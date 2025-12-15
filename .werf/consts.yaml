@@ -15,7 +15,7 @@
   "csi" (dict
     "provisioner" "v5.3.0"
     "resizer" "v1.14.0"
-    "snapshotter" "v8.4.0"
+    "snapshotter" "dev" #"v8.4.0"
     "livenessprobe" "v2.17.0"
     "registrar" "v2.15.0"
     "attacher" "v4.10.0"
