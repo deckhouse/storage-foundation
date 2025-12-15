@@ -13,6 +13,7 @@
   {{- $_ := set $ctx "SVACE_ANALYZE_HOST" (env "SVACE_ANALYZE_HOST" "example.host") }}
   {{- $_ := set $ctx "SVACE_ANALYZE_SSH_USER" (env "SVACE_ANALYZE_SSH_USER" "user") }}
   {{- $_ := set $ctx "Versions" $.VERSIONS }}
+  {{- $_ := set $ctx "k8s" $.k8s }}
   {{- $_ := set $ctx "ImagePath" (printf "/images/%s" $ctx.ImageName) }}
   {{- $_ := set $ctx "ModuleNamePrefix" "" }}
   {{- $_ := set $ctx "ModuleDir" "/" }}

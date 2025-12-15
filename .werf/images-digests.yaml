@@ -25,6 +25,7 @@ dependencies:
 {{- end }}
 shell:
   beforeInstall:
+  {{- include "alpine packages proxy" . | nindent 2 }}
   - apk add --no-cache jq
   setup:
     - |
