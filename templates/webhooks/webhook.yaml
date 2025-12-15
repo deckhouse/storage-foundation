@@ -20,7 +20,7 @@ webhooks:
         namespace: "d8-{{ .Chart.Name }}"
         name: "webhooks"
         path: "/volume-snapshot-mutate"
-      caBundle: {{ .Values.snapshotController.internal.customWebhookCert.ca | b64enc | quote }}
+      caBundle: {{ .Values.storageFoundation.internal.customWebhookCert.ca | b64enc | quote }}
     admissionReviewVersions: ["v1", "v1beta1"]
     sideEffects: None
     timeoutSeconds: 10
