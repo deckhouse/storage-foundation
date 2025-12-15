@@ -3,12 +3,15 @@
   {{- $version := toString $key }}
   {{- if $value.csi.snapshotter }}
     {{- $src_version := toString $value.csi.snapshotter }}
+    {{- $is_dev := eq $src_version "dev" }}
     {{- $patches := (printf "/images/%s" $.ImageName) }}
     {{- $patch := false }}
+    {{- if not $is_dev }}
     {{- range $path, $_ := $.Files.Glob (printf "%s/*" $patches) }}
       {{- if contains $src_version $path }}
         {{- $patch = true }}
       {{- end }}
+    {{- end }}
     {{- end }}
 ---
 image: {{ $.ModuleNamePrefix }}{{ $.ImageName }}-ForK8SGE-{{ $version | replace "." "-" }}
@@ -27,14 +30,29 @@ imageSpec:
 image: {{ $.ModuleNamePrefix }}{{ $.ImageName }}-src-artifact-{{ $version | replace "." "-" }}
 fromImage: builder/src
 final: false
-    {{- if $patch }}
+{{- if and (not $is_dev) $patch }}
 git:
 - add: {{ $patches }}/patches/{{ $src_version }}
   to: /patches
   stageDependencies:
     install:
     - '**/*'
-    {{- end }}
+{{- end }}
+{{- if $is_dev }}
+git:
+- add: /images/snapshot-controller
+  to: /src
+  excludePaths:
+  - werf.inc.yaml
+  - vendor
+  stageDependencies:
+    install:
+    - '**/*'
+shell:
+  install:
+  - cd /src
+  - rm -rf vendor
+{{- else }}
 secrets:
 - id: SOURCE_REPO
   value: {{ $.SOURCE_REPO }}
@@ -47,6 +65,7 @@ shell:
   {{- end }}
   - rm -rf vendor
   - rm -rf .git
+{{- end }}
 ---
 image: {{ $.ModuleNamePrefix }}{{ $.ImageName }}-artifact-{{ $version | replace "." "-" }}
 fromImage: {{ eq .SVACE_ENABLED "false" | ternary "builder/golang-alpine" "builder/golang-alt-svace" }}
