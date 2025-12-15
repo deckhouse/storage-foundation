@@ -17,7 +17,7 @@ limitations under the License.
 package consts
 
 const (
-	ModuleName              string = "snapshotController"
+	ModuleName              string = "storageFoundation"
 	ModuleNamespace         string = "d8-storage-foundation"
 	ModulePluralName        string = "storage-foundation"
 	ValidatingWebhookCertCn string = "snapshot-validation-webhook"
