@@ -24,6 +24,7 @@ import (
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	corev1 "k8s.io/api/core/v1"
+	storagev1 "k8s.io/api/storage/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -59,6 +60,7 @@ var _ = Describe("VolumeCaptureRequest Snapshot Mode", func() {
 		ctx = context.Background()
 		scheme = runtime.NewScheme()
 		Expect(corev1.AddToScheme(scheme)).To(Succeed())
+		Expect(storagev1.AddToScheme(scheme)).To(Succeed())
 		Expect(storagev1alpha1.AddToScheme(scheme)).To(Succeed())
 		Expect(snapshotv1.AddToScheme(scheme)).To(Succeed())
 		Expect(deckhousev1alpha1.AddToScheme(scheme)).To(Succeed())
@@ -109,14 +111,27 @@ var _ = Describe("VolumeCaptureRequest Snapshot Mode", func() {
 			}
 			Expect(client.Create(ctx, vcr)).To(Succeed())
 
-			// Create PVC
+			// Create StorageClass with VolumeSnapshotClass annotation
+			storageClass := &storagev1.StorageClass{
+				ObjectMeta: metav1.ObjectMeta{
+					Name: "test-storage-class",
+					Annotations: map[string]string{
+						"storage.deckhouse.io/volumesnapshotclass": "test-vsc-class",
+					},
+				},
+				Provisioner: "test-driver",
+			}
+			Expect(client.Create(ctx, storageClass)).To(Succeed())
+
+			// Create PVC with StorageClassName
 			pvc = &corev1.PersistentVolumeClaim{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      "test-pvc",
 					Namespace: "default",
 				},
 				Spec: corev1.PersistentVolumeClaimSpec{
-					VolumeName: "test-pv",
+					StorageClassName: pointer.String("test-storage-class"),
+					VolumeName:       "test-pv",
 					Resources: corev1.VolumeResourceRequirements{
 						Requests: corev1.ResourceList{
 							corev1.ResourceStorage: resource.MustParse("10Gi"),
@@ -145,13 +160,10 @@ var _ = Describe("VolumeCaptureRequest Snapshot Mode", func() {
 			}
 			Expect(client.Create(ctx, pv)).To(Succeed())
 
-			// Create default VolumeSnapshotClass (marked as default for automatic selection)
+			// Create VolumeSnapshotClass (referenced by StorageClass annotation)
 			vscClass = &snapshotv1.VolumeSnapshotClass{
 				ObjectMeta: metav1.ObjectMeta{
 					Name: "test-vsc-class",
-					Annotations: map[string]string{
-						IsDefaultSnapshotClassAnnotation: "true",
-					},
 				},
 				Driver:         "test-driver",
 				DeletionPolicy: snapshotv1.VolumeSnapshotContentDelete,
@@ -464,27 +476,69 @@ var _ = Describe("VolumeCaptureRequest Snapshot Mode", func() {
 				Expect(updatedVCR.Annotations).To(HaveKey(AnnotationKeyTTL))
 			})
 
-			It("should fail if no default VolumeSnapshotClass found for driver", func() {
-				// Create VCR without default VolumeSnapshotClass for the driver
-				// (test-vsc-class exists but may not be default, or driver mismatch)
+			It("should fail if StorageClass does not have volumesnapshotclass annotation", func() {
+				// Create StorageClass without volumesnapshotclass annotation
+				storageClassNoAnnotation := &storagev1.StorageClass{
+					ObjectMeta: metav1.ObjectMeta{
+						Name: "test-storage-class-no-annotation",
+					},
+					Provisioner: "test-driver",
+				}
+				Expect(client.Create(ctx, storageClassNoAnnotation)).To(Succeed())
+
+				// Create PV for this test case (unique PV per test)
+				pvNoAnnotation := &corev1.PersistentVolume{
+					ObjectMeta: metav1.ObjectMeta{
+						Name: "test-pv-no-annotation",
+					},
+					Spec: corev1.PersistentVolumeSpec{
+						PersistentVolumeSource: corev1.PersistentVolumeSource{
+							CSI: &corev1.CSIPersistentVolumeSource{
+								Driver:       "test-driver",
+								VolumeHandle: "test-volume-handle-no-annotation",
+							},
+						},
+					},
+				}
+				Expect(client.Create(ctx, pvNoAnnotation)).To(Succeed())
+
+				// Create PVC with StorageClass without annotation
+				pvcNoAnnotation := &corev1.PersistentVolumeClaim{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "test-pvc-no-annotation",
+						Namespace: "default",
+					},
+					Spec: corev1.PersistentVolumeClaimSpec{
+						StorageClassName: pointer.String("test-storage-class-no-annotation"),
+						VolumeName:       "test-pv-no-annotation",
+						Resources: corev1.VolumeResourceRequirements{
+							Requests: corev1.ResourceList{
+								corev1.ResourceStorage: resource.MustParse("10Gi"),
+							},
+						},
+					},
+					Status: corev1.PersistentVolumeClaimStatus{
+						Phase: corev1.ClaimBound,
+					},
+				}
+				Expect(client.Create(ctx, pvcNoAnnotation)).To(Succeed())
+
+				// Create VCR
 				vcr := &storagev1alpha1.VolumeCaptureRequest{
 					ObjectMeta: metav1.ObjectMeta{
-						Name:      "test-vcr-no-default-class",
+						Name:      "test-vcr-no-annotation",
 						Namespace: "default",
-						UID:       types.UID("vcr-uid-no-default-class"),
+						UID:       types.UID("vcr-uid-no-annotation"),
 					},
 					Spec: storagev1alpha1.VolumeCaptureRequestSpec{
 						Mode: ModeSnapshot,
 						PersistentVolumeClaimRef: &storagev1alpha1.ObjectReference{
 							Namespace: "default",
-							Name:      "test-pvc",
+							Name:      "test-pvc-no-annotation",
 						},
 					},
 				}
 				Expect(client.Create(ctx, vcr)).To(Succeed())
-
-				// Delete the default VolumeSnapshotClass to simulate missing default
-				Expect(client.Delete(ctx, vscClass)).To(Succeed())
 
 				// Execute
 				_, err := ctrl.processSnapshotMode(ctx, vcr)
@@ -492,41 +546,77 @@ var _ = Describe("VolumeCaptureRequest Snapshot Mode", func() {
 
 				// Should mark as failed
 				updatedVCR := &storagev1alpha1.VolumeCaptureRequest{}
-				Expect(client.Get(ctx, types.NamespacedName{Name: "test-vcr-no-default-class", Namespace: "default"}, updatedVCR)).To(Succeed())
+				Expect(client.Get(ctx, types.NamespacedName{Name: "test-vcr-no-annotation", Namespace: "default"}, updatedVCR)).To(Succeed())
 
 				readyCondition := getCondition(updatedVCR.Status.Conditions, ConditionTypeReady)
 				Expect(readyCondition).ToNot(BeNil())
 				Expect(readyCondition.Status).To(Equal(metav1.ConditionFalse))
 				Expect(readyCondition.Reason).To(Equal(ErrorReasonNotFound))
-				Expect(readyCondition.Message).To(ContainSubstring("No default VolumeSnapshotClass found for driver"))
+				Expect(readyCondition.Message).To(ContainSubstring("does not have storage.deckhouse.io/volumesnapshotclass annotation"))
 			})
 
-			It("should fail if multiple default VolumeSnapshotClasses found for driver", func() {
-				// Create second default VolumeSnapshotClass with same driver
-				secondDefaultClass := &snapshotv1.VolumeSnapshotClass{
+			It("should fail if VolumeSnapshotClass from StorageClass annotation not found", func() {
+				// Create StorageClass with non-existent VolumeSnapshotClass annotation
+				storageClassBadAnnotation := &storagev1.StorageClass{
 					ObjectMeta: metav1.ObjectMeta{
-						Name: "test-vsc-class-2",
+						Name: "test-storage-class-bad-annotation",
 						Annotations: map[string]string{
-							IsDefaultSnapshotClassAnnotation: "true",
+							"storage.deckhouse.io/volumesnapshotclass": "non-existent-vsc-class",
 						},
 					},
-					Driver:         "test-driver", // Same driver
-					DeletionPolicy: snapshotv1.VolumeSnapshotContentDelete,
+					Provisioner: "test-driver",
 				}
-				Expect(client.Create(ctx, secondDefaultClass)).To(Succeed())
+				Expect(client.Create(ctx, storageClassBadAnnotation)).To(Succeed())
+
+				// Create PV for this test case (unique PV per test)
+				pvBadAnnotation := &corev1.PersistentVolume{
+					ObjectMeta: metav1.ObjectMeta{
+						Name: "test-pv-bad-annotation",
+					},
+					Spec: corev1.PersistentVolumeSpec{
+						PersistentVolumeSource: corev1.PersistentVolumeSource{
+							CSI: &corev1.CSIPersistentVolumeSource{
+								Driver:       "test-driver",
+								VolumeHandle: "test-volume-handle-bad-annotation",
+							},
+						},
+					},
+				}
+				Expect(client.Create(ctx, pvBadAnnotation)).To(Succeed())
+
+				// Create PVC with StorageClass with bad annotation
+				pvcBadAnnotation := &corev1.PersistentVolumeClaim{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "test-pvc-bad-annotation",
+						Namespace: "default",
+					},
+					Spec: corev1.PersistentVolumeClaimSpec{
+						StorageClassName: pointer.String("test-storage-class-bad-annotation"),
+						VolumeName:       "test-pv-bad-annotation",
+						Resources: corev1.VolumeResourceRequirements{
+							Requests: corev1.ResourceList{
+								corev1.ResourceStorage: resource.MustParse("10Gi"),
+							},
+						},
+					},
+					Status: corev1.PersistentVolumeClaimStatus{
+						Phase: corev1.ClaimBound,
+					},
+				}
+				Expect(client.Create(ctx, pvcBadAnnotation)).To(Succeed())
 
 				// Create VCR
 				vcr := &storagev1alpha1.VolumeCaptureRequest{
 					ObjectMeta: metav1.ObjectMeta{
-						Name:      "test-vcr-multiple-defaults",
+						Name:      "test-vcr-bad-annotation",
 						Namespace: "default",
-						UID:       types.UID("vcr-uid-multiple-defaults"),
+						UID:       types.UID("vcr-uid-bad-annotation"),
 					},
 					Spec: storagev1alpha1.VolumeCaptureRequestSpec{
 						Mode: ModeSnapshot,
 						PersistentVolumeClaimRef: &storagev1alpha1.ObjectReference{
 							Namespace: "default",
-							Name:      "test-pvc",
+							Name:      "test-pvc-bad-annotation",
 						},
 					},
 				}
@@ -536,15 +626,15 @@ var _ = Describe("VolumeCaptureRequest Snapshot Mode", func() {
 				_, err := ctrl.processSnapshotMode(ctx, vcr)
 				Expect(err).ToNot(HaveOccurred())
 
-				// Should mark as failed (multiple defaults found)
+				// Should mark as failed
 				updatedVCR := &storagev1alpha1.VolumeCaptureRequest{}
-				Expect(client.Get(ctx, types.NamespacedName{Name: "test-vcr-multiple-defaults", Namespace: "default"}, updatedVCR)).To(Succeed())
+				Expect(client.Get(ctx, types.NamespacedName{Name: "test-vcr-bad-annotation", Namespace: "default"}, updatedVCR)).To(Succeed())
 
 				readyCondition := getCondition(updatedVCR.Status.Conditions, ConditionTypeReady)
 				Expect(readyCondition).ToNot(BeNil())
 				Expect(readyCondition.Status).To(Equal(metav1.ConditionFalse))
 				Expect(readyCondition.Reason).To(Equal(ErrorReasonNotFound))
-				Expect(readyCondition.Message).To(ContainSubstring("multiple default VolumeSnapshotClasses found"))
+				Expect(readyCondition.Message).To(ContainSubstring("not found"))
 			})
 
 			It("should fail VCR when VSC has terminal error", func() {
@@ -1158,39 +1248,68 @@ var _ = Describe("VolumeCaptureRequest Snapshot Mode", func() {
 			)
 
 			BeforeEach(func() {
+				// Create StorageClass with VolumeSnapshotClass annotation
+				// Use unique name per test to avoid conflicts (StorageClass is cluster-scoped)
+				storageClassName := "test-storage-class-error-scenarios"
+				storageClass := &storagev1.StorageClass{
+					ObjectMeta: metav1.ObjectMeta{
+						Name: storageClassName,
+						Annotations: map[string]string{
+							"storage.deckhouse.io/volumesnapshotclass": "test-vsc-class-error-scenarios",
+						},
+					},
+					Provisioner: "test-driver",
+				}
+				Expect(client.Create(ctx, storageClass)).To(Succeed())
+
 				// Setup common resources
 				pvc = &corev1.PersistentVolumeClaim{
 					ObjectMeta: metav1.ObjectMeta{
-						Name:      "test-pvc",
+						Name:      "test-pvc-error-scenarios",
 						Namespace: "default",
 					},
 					Spec: corev1.PersistentVolumeClaimSpec{
-						VolumeName: "test-pv",
+						StorageClassName: pointer.String("test-storage-class-error-scenarios"),
+						VolumeName:       "test-pv-error-scenarios",
 					},
 				}
 				Expect(client.Create(ctx, pvc)).To(Succeed())
 
 				pv = &corev1.PersistentVolume{
 					ObjectMeta: metav1.ObjectMeta{
-						Name: "test-pv",
+						Name: "test-pv-error-scenarios",
 					},
 					Spec: corev1.PersistentVolumeSpec{
 						PersistentVolumeSource: corev1.PersistentVolumeSource{
 							CSI: &corev1.CSIPersistentVolumeSource{
-								Driver:       "cephfs.csi.ceph.com",
-								VolumeHandle: "test-volume-handle",
+								Driver:       "test-driver",
+								VolumeHandle: "test-volume-handle-error-scenarios",
 							},
 						},
 					},
 				}
 				Expect(client.Create(ctx, pv)).To(Succeed())
 
+				// Create StorageClass with cephfs driver (with unique name to avoid conflicts)
+				// Note: Provisioner is immutable, so we create a new StorageClass instead of updating
+				storageClassCephfs := &storagev1.StorageClass{
+					ObjectMeta: metav1.ObjectMeta{
+						Name: "test-storage-class-cephfs",
+						Annotations: map[string]string{
+							"storage.deckhouse.io/volumesnapshotclass": "test-vsc-class-cephfs",
+						},
+					},
+					Provisioner: "cephfs.csi.ceph.com",
+				}
+				Expect(client.Create(ctx, storageClassCephfs)).To(Succeed())
+
+				// Update PVC to use the new StorageClass
+				pvc.Spec.StorageClassName = pointer.String("test-storage-class-cephfs")
+				Expect(client.Update(ctx, pvc)).To(Succeed())
+
 				vscClass = &snapshotv1.VolumeSnapshotClass{
 					ObjectMeta: metav1.ObjectMeta{
-						Name: "test-vsc-class",
-						Annotations: map[string]string{
-							IsDefaultSnapshotClassAnnotation: "true",
-						},
+						Name: "test-vsc-class-cephfs",
 					},
 					Driver: "cephfs.csi.ceph.com",
 					Parameters: map[string]string{
@@ -1202,7 +1321,7 @@ var _ = Describe("VolumeCaptureRequest Snapshot Mode", func() {
 
 				vcr = &storagev1alpha1.VolumeCaptureRequest{
 					ObjectMeta: metav1.ObjectMeta{
-						Name:      "test-vcr",
+						Name:      "test-vcr-error-scenarios",
 						Namespace: "default",
 						// Don't set UID - let apiserver assign it
 					},
@@ -1210,19 +1329,19 @@ var _ = Describe("VolumeCaptureRequest Snapshot Mode", func() {
 						Mode: ModeSnapshot,
 						PersistentVolumeClaimRef: &storagev1alpha1.ObjectReference{
 							Namespace: "default",
-							Name:      "test-pvc",
+							Name:      "test-pvc-error-scenarios",
 						},
 					},
 				}
 				Expect(client.Create(ctx, vcr)).To(Succeed())
 				// Re-read to get actual UID assigned by apiserver
-				Expect(client.Get(ctx, types.NamespacedName{Name: "test-vcr", Namespace: "default"}, vcr)).To(Succeed())
+				Expect(client.Get(ctx, types.NamespacedName{Name: "test-vcr-error-scenarios", Namespace: "default"}, vcr)).To(Succeed())
 				Expect(vcr.UID).ToNot(BeEmpty(), "VCR should have UID assigned by apiserver")
 			})
 
 			It("should fail VCR when secret is missing (secret not found error)", func() {
 				// Re-read VCR to get actual UID assigned by apiserver
-				Expect(client.Get(ctx, types.NamespacedName{Name: "test-vcr", Namespace: "default"}, vcr)).To(Succeed())
+				Expect(client.Get(ctx, types.NamespacedName{Name: "test-vcr-error-scenarios", Namespace: "default"}, vcr)).To(Succeed())
 				Expect(vcr.UID).ToNot(BeEmpty(), "VCR should have UID assigned by apiserver")
 
 				// Create ObjectKeeper (using actual VCR UID)
@@ -1237,7 +1356,7 @@ var _ = Describe("VolumeCaptureRequest Snapshot Mode", func() {
 							APIVersion: APIGroupStorageDeckhouse,
 							Kind:       KindVolumeCaptureRequest,
 							Namespace:  "default",
-							Name:       "test-vcr",
+							Name:       "test-vcr-error-scenarios",
 							UID:        string(vcr.UID),
 						},
 					},
@@ -1300,7 +1419,7 @@ var _ = Describe("VolumeCaptureRequest Snapshot Mode", func() {
 							APIVersion: APIGroupStorageDeckhouse,
 							Kind:       KindVolumeCaptureRequest,
 							Namespace:  "default",
-							Name:       "test-vcr",
+							Name:       "test-vcr-error-scenarios",
 							UID:        "vcr-uid-test",
 						},
 					},
@@ -1394,7 +1513,7 @@ var _ = Describe("VolumeCaptureRequest Snapshot Mode", func() {
 
 			It("should create ObjectKeeper if it doesn't exist", func() {
 				// Re-read VCR to get actual UID
-				Expect(client.Get(ctx, types.NamespacedName{Name: "test-vcr", Namespace: "default"}, vcr)).To(Succeed())
+				Expect(client.Get(ctx, types.NamespacedName{Name: "test-vcr-error-scenarios", Namespace: "default"}, vcr)).To(Succeed())
 				Expect(vcr.UID).ToNot(BeEmpty())
 
 				// ObjectKeeper should NOT exist yet
@@ -1413,7 +1532,7 @@ var _ = Describe("VolumeCaptureRequest Snapshot Mode", func() {
 				Expect(objectKeeper.Spec.Mode).To(Equal("FollowObject"))
 				Expect(objectKeeper.Spec.FollowObjectRef).ToNot(BeNil())
 				Expect(objectKeeper.Spec.FollowObjectRef.UID).To(Equal(string(vcr.UID)))
-				Expect(objectKeeper.Spec.FollowObjectRef.Name).To(Equal("test-vcr"))
+				Expect(objectKeeper.Spec.FollowObjectRef.Name).To(Equal("test-vcr-error-scenarios"))
 				Expect(objectKeeper.Spec.FollowObjectRef.Namespace).To(Equal("default"))
 			})
 
@@ -1460,7 +1579,7 @@ var _ = Describe("VolumeCaptureRequest Snapshot Mode", func() {
 
 			It("should handle controller restart gracefully (idempotency)", func() {
 				// Re-read VCR to get actual UID
-				Expect(client.Get(ctx, types.NamespacedName{Name: "test-vcr", Namespace: "default"}, vcr)).To(Succeed())
+				Expect(client.Get(ctx, types.NamespacedName{Name: "test-vcr-error-scenarios", Namespace: "default"}, vcr)).To(Succeed())
 				Expect(vcr.UID).ToNot(BeEmpty())
 
 				// First reconcile: create ObjectKeeper and VSC
@@ -1492,7 +1611,7 @@ var _ = Describe("VolumeCaptureRequest Snapshot Mode", func() {
 
 				// Re-read VCR from API (simulating controller restart)
 				restartedVCR := &storagev1alpha1.VolumeCaptureRequest{}
-				Expect(client.Get(ctx, types.NamespacedName{Name: "test-vcr", Namespace: "default"}, restartedVCR)).To(Succeed())
+				Expect(client.Get(ctx, types.NamespacedName{Name: "test-vcr-error-scenarios", Namespace: "default"}, restartedVCR)).To(Succeed())
 
 				// Second reconcile with "restarted" controller: should be idempotent
 				// Should not recreate VSC, should continue waiting
@@ -1532,7 +1651,7 @@ var _ = Describe("VolumeCaptureRequest Snapshot Mode", func() {
 
 			It("should handle leader switch gracefully (multiple reconciles)", func() {
 				// Re-read VCR to get actual UID
-				Expect(client.Get(ctx, types.NamespacedName{Name: "test-vcr", Namespace: "default"}, vcr)).To(Succeed())
+				Expect(client.Get(ctx, types.NamespacedName{Name: "test-vcr-error-scenarios", Namespace: "default"}, vcr)).To(Succeed())
 				Expect(vcr.UID).ToNot(BeEmpty())
 
 				// Simulate leader 1: first reconcile creates ObjectKeeper and VSC
@@ -1561,7 +1680,7 @@ var _ = Describe("VolumeCaptureRequest Snapshot Mode", func() {
 
 				// Leader 2 reconciles: should be idempotent, should not recreate resources
 				reReadVCR := &storagev1alpha1.VolumeCaptureRequest{}
-				Expect(client.Get(ctx, types.NamespacedName{Name: "test-vcr", Namespace: "default"}, reReadVCR)).To(Succeed())
+				Expect(client.Get(ctx, types.NamespacedName{Name: "test-vcr-error-scenarios", Namespace: "default"}, reReadVCR)).To(Succeed())
 
 				result, err = leader2Ctrl.processSnapshotMode(ctx, reReadVCR)
 				Expect(err).ToNot(HaveOccurred())

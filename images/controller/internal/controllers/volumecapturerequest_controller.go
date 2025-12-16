@@ -23,6 +23,7 @@ import (
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
+	storagev1 "k8s.io/api/storage/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -37,12 +38,6 @@ import (
 	snapshotv1 "github.com/kubernetes-csi/external-snapshotter/client/v8/apis/volumesnapshot/v1"
 
 	"fox.flant.com/deckhouse/storage/storage-foundation/images/controller/pkg/config"
-)
-
-const (
-	// IsDefaultSnapshotClassAnnotation is the annotation key for marking VolumeSnapshotClass as default
-	// This matches the constant from snapshot-controller/pkg/utils/util.go
-	IsDefaultSnapshotClassAnnotation = "snapshot.storage.kubernetes.io/is-default-class"
 )
 
 // Invariants (architectural guarantees):
@@ -195,6 +190,7 @@ func (r *VolumeCaptureRequestController) Reconcile(ctx context.Context, req ctrl
 // - ObjectKeeper follows VCR lifecycle (automatically deleted when VCR is deleted)
 // - TTL and request cleanup are handled by VCR controller, not ObjectKeeper
 func (r *VolumeCaptureRequestController) processSnapshotMode(ctx context.Context, vcr *storagev1alpha1.VolumeCaptureRequest) (ctrl.Result, error) {
+	var err error
 	l := log.FromContext(ctx).WithValues("vcr", fmt.Sprintf("%s/%s", vcr.Namespace, vcr.Name), "mode", "Snapshot")
 	l.Info("Processing VolumeCaptureRequest in Snapshot mode")
 
@@ -208,7 +204,7 @@ func (r *VolumeCaptureRequestController) processSnapshotMode(ctx context.Context
 	// 2. Check RBAC: try to get PVC (similar to MCR)
 	l.Info("Getting PVC", "pvc", fmt.Sprintf("%s/%s", vcr.Spec.PersistentVolumeClaimRef.Namespace, vcr.Spec.PersistentVolumeClaimRef.Name))
 	pvc := &corev1.PersistentVolumeClaim{}
-	if err := r.Get(ctx, client.ObjectKey{
+	if err = r.Get(ctx, client.ObjectKey{
 		Namespace: vcr.Spec.PersistentVolumeClaimRef.Namespace,
 		Name:      vcr.Spec.PersistentVolumeClaimRef.Name,
 	}, pvc); err != nil {
@@ -234,7 +230,7 @@ func (r *VolumeCaptureRequestController) processSnapshotMode(ctx context.Context
 	// 4. Get PV to extract volume handle
 	l.Info("Getting PV", "pv", pvc.Spec.VolumeName)
 	pv := &corev1.PersistentVolume{}
-	if err := r.Get(ctx, client.ObjectKey{Name: pvc.Spec.VolumeName}, pv); err != nil {
+	if err = r.Get(ctx, client.ObjectKey{Name: pvc.Spec.VolumeName}, pv); err != nil {
 		if apierrors.IsNotFound(err) {
 			l.Error(err, "PV not found")
 			return r.markFailed(ctx, vcr, ErrorReasonNotFound, fmt.Sprintf("PV %s not found", pvc.Spec.VolumeName))
@@ -250,21 +246,59 @@ func (r *VolumeCaptureRequestController) processSnapshotMode(ctx context.Context
 	}
 	l.Info("PV found", "driver", pv.Spec.CSI.Driver, "volumeHandle", pv.Spec.CSI.VolumeHandle)
 
-	// 5. Find default VolumeSnapshotClass for PV's CSI driver (needed for VSC creation)
-	// VCR always uses default VolumeSnapshotClass - it's automatically selected based on PV's CSI driver.
-	// IMPORTANT: VCR relies on snapshot-controller semantics - exactly one default VolumeSnapshotClass per CSI driver must exist.
-	// This is a cluster-level configuration requirement, not a user error.
-	pvDriver := pv.Spec.CSI.Driver
-	l.Info("Looking for default VolumeSnapshotClass", "driver", pvDriver)
-	vscClass, err := r.findDefaultVolumeSnapshotClass(ctx, pvDriver)
-	if err != nil {
-		l.Error(err, "Failed to find default VolumeSnapshotClass", "driver", pvDriver)
-		// Map cluster misconfiguration to NotFound reason (consistent with Kubernetes behavior)
-		// Error message already indicates cluster misconfiguration
-		return r.markFailed(ctx, vcr, ErrorReasonNotFound,
-			fmt.Sprintf("No default VolumeSnapshotClass found for driver %s. Please ensure exactly one default VolumeSnapshotClass exists for this driver", pvDriver))
+	// 5. Get VolumeSnapshotClass from StorageClass annotation (needed for VSC creation)
+	// VCR uses VolumeSnapshotClass specified in StorageClass annotation storage.deckhouse.io/volumesnapshotclass
+	// This is the Deckhouse way: StorageClass explicitly declares which VolumeSnapshotClass to use
+	if pvc.Spec.StorageClassName == nil || *pvc.Spec.StorageClassName == "" {
+		l.Error(nil, "PVC does not have StorageClassName")
+		return r.markFailed(ctx, vcr, ErrorReasonInternalError, "PVC does not have StorageClassName")
 	}
-	l.Info("Found default VolumeSnapshotClass", "name", vscClass.Name, "driver", vscClass.Driver)
+	storageClassName := *pvc.Spec.StorageClassName
+	l.Info("Getting StorageClass", "storageClass", storageClassName)
+	storageClass := &storagev1.StorageClass{}
+	if err = r.Get(ctx, client.ObjectKey{Name: storageClassName}, storageClass); err != nil {
+		if apierrors.IsNotFound(err) {
+			l.Error(err, "StorageClass not found")
+			return r.markFailed(ctx, vcr, ErrorReasonNotFound, fmt.Sprintf("StorageClass %s not found", storageClassName))
+		}
+		if apierrors.IsForbidden(err) {
+			l.Error(err, "Access denied to StorageClass")
+			return r.markFailed(ctx, vcr, ErrorReasonRBACDenied, fmt.Sprintf("Access denied to StorageClass %s", storageClassName))
+		}
+		l.Error(err, "Failed to get StorageClass")
+		return ctrl.Result{}, fmt.Errorf("failed to get StorageClass: %w", err)
+	}
+	// Get VolumeSnapshotClass name from StorageClass annotation
+	vscClassName, ok := storageClass.Annotations["storage.deckhouse.io/volumesnapshotclass"]
+	if !ok || vscClassName == "" {
+		l.Error(nil, "StorageClass does not have storage.deckhouse.io/volumesnapshotclass annotation", "storageClass", storageClassName)
+		return r.markFailed(ctx, vcr, ErrorReasonNotFound,
+			fmt.Sprintf("StorageClass %s does not have storage.deckhouse.io/volumesnapshotclass annotation", storageClassName))
+	}
+	l.Info("Found VolumeSnapshotClass name from StorageClass annotation", "vscClass", vscClassName)
+	// Get VolumeSnapshotClass
+	vscClass := &snapshotv1.VolumeSnapshotClass{}
+	if err = r.Get(ctx, client.ObjectKey{Name: vscClassName}, vscClass); err != nil {
+		if apierrors.IsNotFound(err) {
+			l.Error(err, "VolumeSnapshotClass not found")
+			return r.markFailed(ctx, vcr, ErrorReasonNotFound, fmt.Sprintf("VolumeSnapshotClass %s (from StorageClass %s annotation) not found", vscClassName, storageClassName))
+		}
+		if apierrors.IsForbidden(err) {
+			l.Error(err, "Access denied to VolumeSnapshotClass")
+			return r.markFailed(ctx, vcr, ErrorReasonRBACDenied, fmt.Sprintf("Access denied to VolumeSnapshotClass %s (from StorageClass %s annotation)", vscClassName, storageClassName))
+		}
+		l.Error(err, "Failed to get VolumeSnapshotClass")
+		return ctrl.Result{}, fmt.Errorf("failed to get VolumeSnapshotClass: %w", err)
+	}
+	// Validate that VolumeSnapshotClass driver matches PV CSI driver
+	pvDriver := pv.Spec.CSI.Driver
+	if vscClass.Driver != pvDriver {
+		l.Error(nil, "VolumeSnapshotClass driver does not match PV CSI driver",
+			"vscDriver", vscClass.Driver, "pvDriver", pvDriver)
+		return r.markFailed(ctx, vcr, ErrorReasonInternalError,
+			fmt.Sprintf("VolumeSnapshotClass %s driver %s does not match PV CSI driver %s", vscClassName, vscClass.Driver, pvDriver))
+	}
+	l.Info("Found VolumeSnapshotClass", "name", vscClass.Name, "driver", vscClass.Driver)
 
 	// 6. Create ObjectKeeper FIRST - before creating VSC
 	l.Info("Creating ObjectKeeper")
@@ -357,7 +391,7 @@ func (r *VolumeCaptureRequestController) processSnapshotMode(ctx context.Context
 				VolumeSnapshotRef: corev1.ObjectReference{},
 			},
 		}
-		if err := r.Create(ctx, csiVSC); err != nil {
+		if err = r.Create(ctx, csiVSC); err != nil {
 			return ctrl.Result{}, fmt.Errorf("failed to create VolumeSnapshotContent: %w", err)
 		}
 		l.Info("Created VolumeSnapshotContent", "name", csiVSCName)
@@ -428,6 +462,7 @@ func (r *VolumeCaptureRequestController) processSnapshotMode(ctx context.Context
 	// VCR is fire-and-forget: once completed, we observe the current generation and never reconcile again
 	now := metav1.Now()
 	// Use retry on conflict to handle concurrent updates
+	// Use ObjectKeyFromObject to ensure we have correct namespace/name
 	if err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
 		current := &storagev1alpha1.VolumeCaptureRequest{}
 		if err := r.Get(ctx, client.ObjectKeyFromObject(vcr), current); err != nil {
@@ -945,57 +980,6 @@ func (r *VolumeCaptureRequestController) markFailedSnapshot(ctx context.Context,
 		return ctrl.Result{}, fmt.Errorf("failed to update VCR with Failed condition and TTL annotation: %w", err)
 	}
 	return ctrl.Result{}, nil
-}
-
-// findDefaultVolumeSnapshotClass finds the default VolumeSnapshotClass for the given CSI driver.
-//
-// IMPORTANT INVARIANT: VCR relies on snapshot-controller semantics:
-// exactly one default VolumeSnapshotClass per CSI driver must exist.
-// This is a cluster-level configuration requirement, not a user error.
-//
-// This follows the same logic as snapshot-controller's SetDefaultSnapshotClass.
-// Uses informer cache only - VolumeSnapshotClass must exist before creating VCR.
-//
-// Returns error if:
-//   - no default class found for the driver (cluster misconfiguration)
-//   - multiple default classes found for the same driver (cluster misconfiguration)
-func (r *VolumeCaptureRequestController) findDefaultVolumeSnapshotClass(ctx context.Context, driver string) (*snapshotv1.VolumeSnapshotClass, error) {
-	// List all VolumeSnapshotClasses from informer cache
-	vscList := &snapshotv1.VolumeSnapshotClassList{}
-	if err := r.Client.List(ctx, vscList); err != nil {
-		return nil, fmt.Errorf("failed to list VolumeSnapshotClasses: %w", err)
-	}
-
-	// Find default classes matching the driver
-	var defaultClasses []*snapshotv1.VolumeSnapshotClass
-	for i := range vscList.Items {
-		class := &vscList.Items[i]
-		if isDefaultVolumeSnapshotClass(class) && class.Driver == driver {
-			defaultClasses = append(defaultClasses, class)
-		}
-	}
-
-	switch len(defaultClasses) {
-	case 0:
-		return nil, fmt.Errorf("no default VolumeSnapshotClass found for driver %s", driver)
-	case 1:
-		return defaultClasses[0], nil
-	default:
-		// Cluster misconfiguration: multiple default classes for same driver
-		classNames := make([]string, len(defaultClasses))
-		for i, c := range defaultClasses {
-			classNames[i] = c.Name
-		}
-		return nil, fmt.Errorf("cluster misconfigured: multiple default VolumeSnapshotClasses found for driver %s: %v", driver, classNames)
-	}
-}
-
-// isDefaultVolumeSnapshotClass checks if VolumeSnapshotClass is marked as default
-func isDefaultVolumeSnapshotClass(class *snapshotv1.VolumeSnapshotClass) bool {
-	if class.Annotations == nil {
-		return false
-	}
-	return class.Annotations[IsDefaultSnapshotClassAnnotation] == "true"
 }
 
 // Helper functions for future use (e.g., VRR, metrics, reporting)
