@@ -18,6 +18,7 @@ import (
 
 	crdv1 "github.com/kubernetes-csi/external-snapshotter/client/v8/apis/volumesnapshot/v1"
 	"github.com/kubernetes-csi/external-snapshotter/v8/pkg/utils"
+	"github.com/kubernetes-csi/external-snapshotter/v8/pkg/vscmode"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/tools/cache"
 )
@@ -95,7 +96,9 @@ func TestControllerCacheParsingError(t *testing.T) {
 func TestShouldDelete(t *testing.T) {
 	// Use an empty controller, since there's no struct
 	// state we need to use in this test.
-	ctrl := &csiSnapshotSideCarController{}
+	ctrl := &csiSnapshotSideCarController{
+		vscMode: vscmode.GetVSCMode(), // Initialize vscMode to avoid nil pointer dereference
+	}
 
 	tests := []struct {
 		name           string

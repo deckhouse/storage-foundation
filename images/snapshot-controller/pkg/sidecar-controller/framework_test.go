@@ -334,6 +334,7 @@ func (r *snapshotReactor) checkContents(expectedContents []*crdv1.VolumeSnapshot
 		v.ResourceVersion = ""
 		v.Spec.VolumeSnapshotRef.ResourceVersion = ""
 		// Clear DeletionTimestamp to avoid time precision issues in comparison
+		// This is needed for VSC-only tests that use DeletionTimestamp
 		v.DeletionTimestamp = nil
 		if v.Status != nil {
 			v.Status.CreationTime = nil
@@ -350,6 +351,7 @@ func (r *snapshotReactor) checkContents(expectedContents []*crdv1.VolumeSnapshot
 		v.ResourceVersion = ""
 		v.Spec.VolumeSnapshotRef.ResourceVersion = ""
 		// Clear DeletionTimestamp to avoid time precision issues in comparison
+		// This is needed for VSC-only tests that use DeletionTimestamp
 		v.DeletionTimestamp = nil
 		if v.Status != nil {
 			v.Status.CreationTime = nil

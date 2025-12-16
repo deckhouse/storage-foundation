@@ -57,9 +57,7 @@ const controllerUpdateFailMsg = "snapshot controller failed to update"
 // content should be requeued. On error, the content is always requeued.
 func (ctrl *csiSnapshotSideCarController) syncContent(content *crdv1.VolumeSnapshotContent) (requeue bool, err error) {
 	// Enhanced logging for VSC-only debugging
-	isVSCOnly := content.Spec.VolumeSnapshotRef.UID == "" &&
-		content.Spec.VolumeSnapshotRef.Name == "" &&
-		content.Spec.VolumeSnapshotRef.Namespace == ""
+	isVSCOnly := ctrl.vscMode.IsVSCOnly(content)
 	if isVSCOnly {
 		klog.V(4).Infof("synchronizing VolumeSnapshotContent[%s] (VSC-only, no VolumeSnapshotRef)", content.Name)
 	} else {
@@ -98,7 +96,12 @@ func (ctrl *csiSnapshotSideCarController) syncContent(content *crdv1.VolumeSnaps
 	// VSC-only model: This condition also applies to VSC without VolumeSnapshotRef
 	_, groupSnapshotMember := content.Annotations[utils.VolumeGroupSnapshotHandleAnnotation]
 
-	if content.Spec.Source.VolumeHandle != nil && content.Status == nil && !groupSnapshotMember {
+	// Don't call CreateSnapshot if it's already in progress (annotation set but not completed)
+	hasBeingCreatedAnnotation := metav1.HasAnnotation(content.ObjectMeta, utils.AnnVolumeSnapshotBeingCreated)
+	if hasBeingCreatedAnnotation && !contentIsReady(content) {
+		// CreateSnapshot is already in progress - skip calling it again, continue to status check below
+		klog.V(4).Infof("syncContent [%s]: CreateSnapshot already in progress (annotation set), skipping createSnapshot call", content.Name)
+	} else if ctrl.vscMode.ShouldCreateSnapshot(content) && !groupSnapshotMember {
 		className := "none"
 		if content.Spec.VolumeSnapshotClassName != nil {
 			className = *content.Spec.VolumeSnapshotClassName
@@ -121,6 +124,18 @@ func (ctrl *csiSnapshotSideCarController) syncContent(content *crdv1.VolumeSnaps
 		klog.V(4).Infof("syncContent [%s]: Group snapshot member, skipping CreateSnapshot", content.Name)
 	}
 
+	// Check if CreateSnapshot is in progress (annotation set but status not ready)
+	// Note: hasBeingCreatedAnnotation is already checked above
+	if hasBeingCreatedAnnotation && !contentIsReady(content) {
+		// CreateSnapshot was called but not completed yet - check status periodically
+		if isVSCOnly {
+			klog.V(4).Infof("syncContent [%s]: VSC-only with being-created annotation, checking status (CreateSnapshot in progress)", content.Name)
+		} else {
+			klog.V(5).Infof("syncContent [%s]: Legacy VSC with being-created annotation, checking status (CreateSnapshot in progress)", content.Name)
+		}
+		// Continue to checkandUpdateContentStatus below
+	}
+
 	// Skip checkandUpdateContentStatus() if ReadyToUse is
 	// already true. We don't want to keep calling CreateSnapshot
 	// or ListSnapshots CSI methods over and over again for
@@ -131,6 +146,13 @@ func (ctrl *csiSnapshotSideCarController) syncContent(content *crdv1.VolumeSnaps
 		if err != nil {
 			return true, err
 		}
+		return false, nil
+	}
+
+	// Group snapshot members are handled separately by group snapshot controller
+	// Sidecar controller should not process them (no CreateSnapshot, no status check)
+	if groupSnapshotMember {
+		klog.V(4).Infof("syncContent [%s]: Group snapshot member, skipping processing", content.Name)
 		return false, nil
 	}
 
@@ -301,10 +323,49 @@ func (ctrl *csiSnapshotSideCarController) checkandUpdateContentStatusOperation(c
 	var groupSnapshotID string
 	var snapshotterListCredentials map[string]string
 
+	// NOTE: Some CSI drivers perform CreateSnapshot asynchronously.
+	// In such cases, VolumeSnapshotBeingCreated annotation acts as a lock
+	// preventing repeated CreateSnapshot calls until status is updated.
+	// Check if CreateSnapshot is in progress (annotation set but no status yet)
+	hasBeingCreatedAnnotation := metav1.HasAnnotation(content.ObjectMeta, utils.AnnVolumeSnapshotBeingCreated)
+	isCreateSnapshotInProgress := hasBeingCreatedAnnotation && (content.Status == nil || content.Status.SnapshotHandle == nil)
+
+	if isCreateSnapshotInProgress {
+		// CreateSnapshot was called but not completed yet - this is a timeout/async case
+		// We should NOT call CreateSnapshot again, but we can still check status if we have SnapshotHandle
+		// If SnapshotHandle doesn't exist yet, we can't check status and must wait for CSI driver response
+		if content.Status == nil || content.Status.SnapshotHandle == nil {
+			// No SnapshotHandle yet - can't check status via GetSnapshotStatus
+			// Just wait for CSI driver to update status via callback or next reconcile
+			klog.V(4).Infof("checkandUpdateContentStatusOperation [%s]: CreateSnapshot in progress (annotation set, no SnapshotHandle yet), waiting for CSI response", content.Name)
+			return content, nil
+		}
+		// We have SnapshotHandle - continue to check status via GetSnapshotStatus below
+		klog.V(4).Infof("checkandUpdateContentStatusOperation [%s]: CreateSnapshot in progress (annotation set, SnapshotHandle exists), checking status via GetSnapshotStatus", content.Name)
+	}
+
 	volumeGroupSnapshotMemberWithGroupSnapshotHandle := content.Status != nil && content.Status.VolumeGroupSnapshotHandle != nil
 
-	if content.Spec.Source.SnapshotHandle != nil || (volumeGroupSnapshotMemberWithGroupSnapshotHandle && content.Status.SnapshotHandle != nil) {
-		klog.V(5).Infof("checkandUpdateContentStatusOperation: call GetSnapshotStatus for snapshot content [%s]", content.Name)
+	// Check if snapshot was already created (has SnapshotHandle in status)
+	// For pre-provisioned snapshots (Source.SnapshotHandle) or group snapshots, always check status
+	// For dynamic snapshots with Status.SnapshotHandle:
+	//   - Legacy mode: check if not ready (to poll for status updates)
+	//   - VSC-only mode: always check (to handle partial status updates)
+	if content.Status != nil && content.Status.SnapshotHandle != nil {
+		isVSCOnly := ctrl.vscMode.IsVSCOnly(content)
+		isPreProvisioned := content.Spec.Source.SnapshotHandle != nil
+		// For legacy mode, check status if not ready (to poll for updates) or if pre-provisioned/group snapshot
+		// For VSC-only mode, always check status
+		shouldCheckStatus := isPreProvisioned || volumeGroupSnapshotMemberWithGroupSnapshotHandle || isVSCOnly || !contentIsReady(content)
+
+		if !shouldCheckStatus {
+			// Legacy dynamic snapshot that's already ready - no need to check status
+			klog.V(5).Infof("checkandUpdateContentStatusOperation: legacy dynamic snapshot content [%s] already ready, skipping GetSnapshotStatus", content.Name)
+			return content, nil
+		}
+
+		// SnapshotHandle exists - check status via GetSnapshotStatus, don't create new snapshot
+		klog.V(5).Infof("checkandUpdateContentStatusOperation: call GetSnapshotStatus for snapshot content [%s] (SnapshotHandle already exists)", content.Name)
 
 		if content.Spec.VolumeSnapshotClassName != nil {
 			class, err := ctrl.getSnapshotClass(*content.Spec.VolumeSnapshotClassName)
@@ -321,10 +382,14 @@ func (ctrl *csiSnapshotSideCarController) checkandUpdateContentStatusOperation(c
 
 			snapshotterListCredentials, err = utils.GetCredentials(ctrl.client, snapshotterListSecretRef)
 			if err != nil {
-				// Continue with deletion, as the secret may have already been deleted.
-				klog.Errorf("Failed to get credentials for snapshot content %s: %v", content.Name, err)
-				return content, fmt.Errorf("failed to get credentials for snapshot content %s: %v", content.Name, err)
+				// For dynamic snapshots with existing SnapshotHandle, credentials might not be available
+				// but we can still try to check status with empty credentials
+				klog.V(4).Infof("Failed to get credentials for snapshot content %s (may not be required for status check): %v", content.Name, err)
+				snapshotterListCredentials = map[string]string{} // Use empty credentials
 			}
+		} else {
+			// No VolumeSnapshotClassName - use empty credentials
+			snapshotterListCredentials = map[string]string{}
 		}
 
 		// The VolumeSnapshotContents that are a member of a VolumeGroupSnapshot will always
@@ -364,11 +429,28 @@ func (ctrl *csiSnapshotSideCarController) checkandUpdateContentStatusOperation(c
 	}
 
 	_, groupSnapshotMember := content.Annotations[utils.VolumeGroupSnapshotHandleAnnotation]
-	if !groupSnapshotMember {
-		return ctrl.createSnapshotWrapper(content)
+	if groupSnapshotMember {
+		// Group snapshot members are handled separately by group snapshot controller
+		// Sidecar controller should not process them (no CreateSnapshot, no status check)
+		klog.V(4).Infof("checkandUpdateContentStatusOperation [%s]: Group snapshot member, skipping processing", content.Name)
+		return content, nil
 	}
 
-	return content, nil
+	// Not a group snapshot member - proceed with normal processing
+	// Don't call CreateSnapshot again if it's already in progress
+	if isCreateSnapshotInProgress {
+		// CreateSnapshot is in progress - we've already checked status via ListSnapshots above
+		// (if VolumeHandle was available). If not, we return early to wait for CSI driver response.
+		// For dynamic snapshots with VolumeHandle, we continue here to allow status polling.
+		klog.V(4).Infof("checkandUpdateContentStatusOperation [%s]: CreateSnapshot already in progress, skipping createSnapshotWrapper", content.Name)
+		return content, nil
+	}
+	// Don't call CreateSnapshot if SnapshotHandle already exists (snapshot was already created)
+	if content.Status != nil && content.Status.SnapshotHandle != nil {
+		klog.V(4).Infof("checkandUpdateContentStatusOperation [%s]: SnapshotHandle already exists, skipping createSnapshotWrapper", content.Name)
+		return content, nil
+	}
+	return ctrl.createSnapshotWrapper(content)
 }
 
 // This is a wrapper function for the snapshot creation process.
@@ -399,7 +481,8 @@ func (ctrl *csiSnapshotSideCarController) createSnapshotWrapper(content *crdv1.V
 	if ctrl.extraCreateMetadata {
 		// VSC-only model: VolumeSnapshotRef may be empty. If it's set, use it for backward compatibility.
 		// If empty, we still provide VSC name as metadata.
-		if content.Spec.VolumeSnapshotRef.Name != "" {
+		if !ctrl.vscMode.IsVSCOnly(content) && content.Spec.VolumeSnapshotRef.Name != "" {
+			// Legacy mode: provide VolumeSnapshot name and namespace
 			parameters[utils.PrefixedVolumeSnapshotNameKey] = content.Spec.VolumeSnapshotRef.Name
 			parameters[utils.PrefixedVolumeSnapshotNamespaceKey] = content.Spec.VolumeSnapshotRef.Namespace
 		}
@@ -412,18 +495,22 @@ func (ctrl *csiSnapshotSideCarController) createSnapshotWrapper(content *crdv1.V
 		// NOTE(xyang): handle create timeout
 		// If it is a final error, remove annotation to indicate
 		// storage system has responded with an error
-		klog.Infof("createSnapshotWrapper: CreateSnapshot for content %s returned error: %v", content.Name, err)
+		klog.Errorf("createSnapshotWrapper: CreateSnapshot for content %s returned error: %v", content.Name, err)
 		if isCSIFinalError(err) {
 			var removeAnnotationErr error
 			if content, removeAnnotationErr = ctrl.removeAnnVolumeSnapshotBeingCreated(content); removeAnnotationErr != nil {
 				return content, fmt.Errorf("failed to remove VolumeSnapshotBeingCreated annotation from the content %s: %s", content.Name, removeAnnotationErr)
 			}
+			klog.Infof("createSnapshotWrapper: Removed being-created annotation after final error for content %s", content.Name)
+		} else {
+			klog.V(4).Infof("createSnapshotWrapper: Non-final error for content %s, annotation remains (will retry)", content.Name)
 		}
 
 		return content, fmt.Errorf("failed to take snapshot of the volume %s: %q", *content.Spec.Source.VolumeHandle, err)
 	}
 
-	klog.V(5).Infof("Created snapshot: driver %s, snapshotId %s, creationTime %v, size %d, readyToUse %t", driverName, snapshotID, creationTime, size, readyToUse)
+	klog.Infof("createSnapshotWrapper: Created snapshot successfully for content %s: driver=%s, snapshotId=%s, creationTime=%v, size=%d, readyToUse=%t",
+		content.Name, driverName, snapshotID, creationTime, size, readyToUse)
 
 	if creationTime.IsZero() {
 		creationTime = time.Now()
@@ -431,18 +518,21 @@ func (ctrl *csiSnapshotSideCarController) createSnapshotWrapper(content *crdv1.V
 
 	newContent, err := ctrl.updateSnapshotContentStatus(content, snapshotID, readyToUse, creationTime.UnixNano(), size, "")
 	if err != nil {
-		klog.Errorf("error updating status for volume snapshot content %s: %v.", content.Name, err)
+		klog.Errorf("createSnapshotWrapper: error updating status for volume snapshot content %s: %v", content.Name, err)
 		return content, fmt.Errorf("error updating status for volume snapshot content %s: %v", content.Name, err)
 	}
 	content = newContent
+	klog.V(4).Infof("createSnapshotWrapper: Updated status for content %s: snapshotHandle=%s, readyToUse=%t", content.Name, snapshotID, readyToUse)
 
 	// NOTE(xyang): handle create timeout
 	// Remove annotation to indicate storage system has successfully
 	// cut the snapshot
 	content, err = ctrl.removeAnnVolumeSnapshotBeingCreated(content)
 	if err != nil {
+		klog.Errorf("createSnapshotWrapper: failed to remove VolumeSnapshotBeingCreated annotation on the content %s: %v", content.Name, err)
 		return content, fmt.Errorf("failed to remove VolumeSnapshotBeingCreated annotation on the content %s: %q", content.Name, err)
 	}
+	klog.V(4).Infof("createSnapshotWrapper: Removed being-created annotation for content %s (snapshot ready)", content.Name)
 
 	return content, nil
 }
@@ -605,7 +695,7 @@ func (e controllerUpdateError) Error() string {
 
 func (ctrl *csiSnapshotSideCarController) GetCredentialsFromAnnotation(content *crdv1.VolumeSnapshotContent) (map[string]string, error) {
 	// get secrets if VolumeSnapshotClass specifies it
-	var snapshotterCredentials map[string]string
+	snapshotterCredentials := map[string]string{} // Initialize as empty map, not nil
 	var err error
 
 	// Check if annotation exists
@@ -666,40 +756,7 @@ func (ctrl csiSnapshotSideCarController) removeContentFinalizer(content *crdv1.V
 // if DeletionTimestamp is set on the content
 func (ctrl *csiSnapshotSideCarController) shouldDelete(content *crdv1.VolumeSnapshotContent) bool {
 	klog.V(5).Infof("Check if VolumeSnapshotContent[%s] should be deleted.", content.Name)
-
-	if content.ObjectMeta.DeletionTimestamp == nil {
-		return false
-	}
-
-	// NOTE(xyang): Handle create snapshot timeout
-	// shouldDelete returns false if AnnVolumeSnapshotBeingCreated
-	// annotation is set. This indicates a CreateSnapshot CSI RPC has
-	// not responded with success or failure.
-	// We need to keep waiting for a response from the CSI driver.
-	if metav1.HasAnnotation(content.ObjectMeta, utils.AnnVolumeSnapshotBeingCreated) {
-		return false
-	}
-
-	// Legacy: For pre-provisioned snapshots (SnapshotHandle in Source and VolumeSnapshotRef.UID == ""), delete immediately.
-	if content.Spec.Source.SnapshotHandle != nil && content.Spec.VolumeSnapshotRef.UID == "" {
-		return true
-	}
-
-	// VSC-only or legacy: shouldDelete returns true if AnnVolumeSnapshotBeingDeleted annotation is set.
-	// This annotation is set by common-controller when deletion should proceed.
-	if metav1.HasAnnotation(content.ObjectMeta, utils.AnnVolumeSnapshotBeingDeleted) {
-		return true
-	}
-
-	// VSC-only model: If DeletionTimestamp is set and we have SnapshotHandle in status,
-	// we can proceed with deletion. This covers VSC-only snapshots created by VCR.
-	// Common-controller may not set the annotation for VSC-only, so we check status directly.
-	if content.Status != nil && content.Status.SnapshotHandle != nil {
-		// We have a snapshot to delete - proceed with deletion
-		return true
-	}
-
-	return false
+	return ctrl.vscMode.ShouldDeleteSnapshot(content)
 }
 
 // setAnnVolumeSnapshotBeingCreated sets VolumeSnapshotBeingCreated annotation

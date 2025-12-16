@@ -172,7 +172,7 @@ func TestDeleteSync(t *testing.T) {
 				},
 			},
 			expectedListCalls:   []listCall{{"sid1-1", map[string]string{}, true, time.Now(), 1, nil, ""}},
-			expectedDeleteCalls: []deleteCall{{"sid1-1", nil, nil}},
+			expectedDeleteCalls: []deleteCall{{"sid1-1", map[string]string{}, nil}},
 			expectSuccess:       true,
 			test:                testSyncContent,
 		},
@@ -195,7 +195,7 @@ func TestDeleteSync(t *testing.T) {
 				},
 			},
 			expectedListCalls:   []listCall{{"sid1-2", map[string]string{}, true, time.Now(), 1, nil, ""}},
-			expectedDeleteCalls: []deleteCall{{"sid1-2", nil, nil}},
+			expectedDeleteCalls: []deleteCall{{"sid1-2", map[string]string{}, nil}},
 			expectSuccess:       true,
 			test:                testSyncContent,
 		},
@@ -216,7 +216,7 @@ func TestDeleteSync(t *testing.T) {
 					readyToUse:   true,
 				},
 			},
-			expectedDeleteCalls: []deleteCall{{"sid1-3", nil, fmt.Errorf("mock csi driver delete error")}},
+			expectedDeleteCalls: []deleteCall{{"sid1-3", map[string]string{}, fmt.Errorf("mock csi driver delete error")}},
 			expectedEvents:      []string{"Warning SnapshotDeleteError"},
 			expectedListCalls:   []listCall{{"sid1-3", map[string]string{}, true, time.Now(), 1, nil, ""}},
 			test:                testSyncContent,
@@ -226,7 +226,7 @@ func TestDeleteSync(t *testing.T) {
 			initialContents:     newContentArrayWithDeletionTimestamp("content1-1", "snapuid1-1", "snap1-1", "sid1-1", "invalid", "", "snap1-4-volumehandle", deletionPolicy, nil, nil, true, &timeNowMetav1),
 			expectedContents:    newContentArrayWithDeletionTimestamp("content1-1", "snapuid1-1", "snap1-1", "sid1-1", "invalid", "", "snap1-4-volumehandle", deletionPolicy, nil, nil, true, &timeNowMetav1),
 			expectedEvents:      noevents,
-			expectedDeleteCalls: []deleteCall{{"sid1-1", nil, fmt.Errorf("mock csi driver delete error")}},
+			expectedDeleteCalls: []deleteCall{{"sid1-1", map[string]string{}, fmt.Errorf("mock csi driver delete error")}},
 			errors: []reactorError{
 				// Inject error to the first client.VolumesnapshotV1().VolumeSnapshotContents().Delete call.
 				// All other calls will succeed.
@@ -239,7 +239,7 @@ func TestDeleteSync(t *testing.T) {
 			initialContents:     newContentArrayWithDeletionTimestamp("content1-5", "sid1-5", "snap1-5", "sid1-5", validSecretClass, "", "snap1-5-volumehandle", deletionPolicy, nil, &defaultSize, true, &timeNowMetav1),
 			expectedContents:    newContentArrayWithDeletionTimestamp("content1-5", "sid1-5", "snap1-5", "sid1-5", validSecretClass, "", "snap1-5-volumehandle", deletionPolicy, nil, &defaultSize, true, &timeNowMetav1),
 			expectedListCalls:   []listCall{{"sid1-5", map[string]string{}, true, time.Now(), 1000, nil, ""}},
-			expectedDeleteCalls: []deleteCall{{"sid1-5", nil, errors.New("mock csi driver delete error")}},
+			expectedDeleteCalls: []deleteCall{{"sid1-5", map[string]string{}, errors.New("mock csi driver delete error")}},
 			expectedEvents:      []string{"Warning SnapshotDeleteError"},
 			errors:              noerrors,
 			test:                testSyncContent,
@@ -290,7 +290,7 @@ func TestDeleteSync(t *testing.T) {
 			expectSuccess:       true,
 			errors:              noerrors,
 			initialSecrets:      []*v1.Secret{}, // secret does not exist
-			expectedDeleteCalls: []deleteCall{{"sid1-9", nil, nil}},
+			expectedDeleteCalls: []deleteCall{{"sid1-9", map[string]string{}, nil}},
 			test:                testSyncContent,
 		},
 		{
@@ -311,7 +311,7 @@ func TestDeleteSync(t *testing.T) {
 			expectedEvents:      noevents,
 			expectSuccess:       true,
 			errors:              noerrors,
-			expectedDeleteCalls: []deleteCall{{"sid1-11", nil, nil}},
+			expectedDeleteCalls: []deleteCall{{"sid1-11", map[string]string{}, nil}},
 			test:                testSyncContent,
 		},
 		{
@@ -332,7 +332,7 @@ func TestDeleteSync(t *testing.T) {
 			expectedEvents:      noevents,
 			expectSuccess:       true,
 			errors:              noerrors,
-			expectedDeleteCalls: []deleteCall{{"sid1-13", nil, nil}},
+			expectedDeleteCalls: []deleteCall{{"sid1-13", map[string]string{}, nil}},
 			test:                testSyncContent,
 		},
 		{
@@ -342,7 +342,7 @@ func TestDeleteSync(t *testing.T) {
 			expectedEvents:      noevents,
 			expectSuccess:       true,
 			errors:              noerrors,
-			expectedDeleteCalls: []deleteCall{{"sid1-14", nil, nil}},
+			expectedDeleteCalls: []deleteCall{{"sid1-14", map[string]string{}, nil}},
 			test:                testSyncContent,
 		},
 		{
@@ -351,7 +351,7 @@ func TestDeleteSync(t *testing.T) {
 			expectedContents:    newContentArrayWithDeletionTimestamp("content1-15", "sid1-15", "snap1-15", "", "", "", "snap1-15-volumehandle", deletePolicy, nil, &defaultSize, false, &nonFractionalTime),
 			expectSuccess:       true,
 			errors:              noerrors,
-			expectedDeleteCalls: []deleteCall{{"sid1-15", nil, nil}},
+			expectedDeleteCalls: []deleteCall{{"sid1-15", map[string]string{}, nil}},
 			test:                testSyncContent,
 		},
 
@@ -361,7 +361,7 @@ func TestDeleteSync(t *testing.T) {
 			expectedContents:    newContentWithVolumeGroupSnapshotHandle("content1-16", "sid1-16", "snap1-16", "snap1-16", "grp-snap1-16", "", "", "snap1-16-volumehandle", deletePolicy, nil, &defaultSize, false, &nonFractionalTime),
 			expectSuccess:       true,
 			errors:              noerrors,
-			expectedDeleteCalls: []deleteCall{{"sid1-16", nil, nil}},
+			expectedDeleteCalls: []deleteCall{{"sid1-16", map[string]string{}, nil}},
 			test:                testSyncContent,
 		},
 		{

@@ -46,6 +46,7 @@ import (
 	snapshotlisters "github.com/kubernetes-csi/external-snapshotter/client/v8/listers/volumesnapshot/v1"
 	"github.com/kubernetes-csi/external-snapshotter/v8/pkg/snapshotter"
 	"github.com/kubernetes-csi/external-snapshotter/v8/pkg/utils"
+	"github.com/kubernetes-csi/external-snapshotter/v8/pkg/vscmode"
 )
 
 type csiSnapshotSideCarController struct {
@@ -64,6 +65,7 @@ type csiSnapshotSideCarController struct {
 	contentStore cache.Store
 
 	handler Handler
+	vscMode vscmode.VSCMode
 
 	resyncPeriod time.Duration
 
@@ -104,12 +106,14 @@ func NewCSISnapshotSideCarController(
 	var eventRecorder record.EventRecorder
 	eventRecorder = broadcaster.NewRecorder(scheme.Scheme, v1.EventSource{Component: fmt.Sprintf("csi-snapshotter %s", driverName)})
 
+	vscMode := vscmode.GetVSCMode()
 	ctrl := &csiSnapshotSideCarController{
 		clientset:     clientset,
 		client:        client,
 		driverName:    driverName,
 		eventRecorder: eventRecorder,
-		handler:       NewCSIHandler(snapshotter, groupSnapshotter, timeout, snapshotNamePrefix, snapshotNameUUIDLength, groupSnapshotNamePrefix, groupSnapshotNameUUIDLength),
+		handler:       NewCSIHandler(snapshotter, groupSnapshotter, timeout, snapshotNamePrefix, snapshotNameUUIDLength, groupSnapshotNamePrefix, groupSnapshotNameUUIDLength, vscMode),
+		vscMode:       vscMode,
 		resyncPeriod:  resyncPeriod,
 		contentStore:  cache.NewStore(cache.DeletionHandlingMetaNamespaceKeyFunc),
 		contentQueue: workqueue.NewTypedRateLimitingQueueWithConfig(
@@ -335,8 +339,11 @@ func (ctrl *csiSnapshotSideCarController) syncContentByKey(key string) (requeue 
 // or VolumeGroupSnapshotContent matches the controller's driver name
 func (ctrl *csiSnapshotSideCarController) isDriverMatch(object interface{}) bool {
 	if content, ok := object.(*crdv1.VolumeSnapshotContent); ok {
-		if content.Spec.Source.VolumeHandle == nil && content.Spec.Source.SnapshotHandle == nil {
-			// Skip this snapshot content if it does not have a valid source
+		// For VSC-only mode, allow content without VolumeHandle/SnapshotHandle to be processed
+		// (it will be skipped in syncContent, but we need to add it to reactor for testing)
+		isVSCOnly := ctrl.vscMode.IsVSCOnly(content)
+		if !isVSCOnly && content.Spec.Source.VolumeHandle == nil && content.Spec.Source.SnapshotHandle == nil {
+			// Skip this snapshot content if it does not have a valid source (legacy mode only)
 			return false
 		}
 		if content.Spec.Driver != ctrl.driverName {
