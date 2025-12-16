@@ -1484,13 +1484,10 @@ var _ = Describe("VolumeCaptureRequest Snapshot Mode", func() {
 
 				// Simulate controller restart: create new controller instance with same client
 				// This simulates the scenario where controller restarts but state persists in API server
-				// Note: In envtest, client is not cached, so APIReader can be same as Client
-				// In production, APIReader bypasses cache for read-after-write scenarios
 				newCtrl := &VolumeCaptureRequestController{
-					Client:    client,
-					APIReader: client, // In envtest client is not cached, so this is sufficient
-					Scheme:    scheme,
-					Config:    cfg,
+					Client: client,
+					Scheme: scheme,
+					Config: cfg,
 				}
 
 				// Re-read VCR from API (simulating controller restart)
@@ -1556,12 +1553,10 @@ var _ = Describe("VolumeCaptureRequest Snapshot Mode", func() {
 				// Simulate leader switch: new controller instance (leader 2)
 				// In real scenario, leader election ensures only one controller processes requests
 				// But we test that multiple reconciles are idempotent
-				// Note: In envtest, client is not cached, so APIReader can be same as Client
 				leader2Ctrl := &VolumeCaptureRequestController{
-					Client:    client,
-					APIReader: client, // In envtest client is not cached, so this is sufficient
-					Scheme:    scheme,
-					Config:    cfg,
+					Client: client,
+					Scheme: scheme,
+					Config: cfg,
 				}
 
 				// Leader 2 reconciles: should be idempotent, should not recreate resources

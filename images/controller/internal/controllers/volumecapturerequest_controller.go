@@ -69,11 +69,19 @@ const (
 //    - If another controller needs to own PV, it must coordinate with ObjectKeeper
 
 // VolumeCaptureRequestController reconciles VolumeCaptureRequest objects
+//
+// DESIGN NOTE:
+//
+// VolumeCaptureRequestController intentionally relies only on informer cache.
+// Read-after-write consistency is NOT guaranteed and NOT required.
+// Cluster configuration objects (e.g. VolumeSnapshotClass) must exist
+// before creating VolumeCaptureRequest.
+//
+// Any misconfiguration is treated as terminal failure.
 type VolumeCaptureRequestController struct {
 	client.Client
-	APIReader client.Reader // Direct API reader (bypasses cache) for read-after-write scenarios
-	Scheme    *runtime.Scheme
-	Config    *config.Options
+	Scheme *runtime.Scheme
+	Config *config.Options
 }
 
 func (r *VolumeCaptureRequestController) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
@@ -292,20 +300,7 @@ func (r *VolumeCaptureRequestController) processSnapshotMode(ctx context.Context
 		}
 		l.Info("Created ObjectKeeper", "name", retainerName)
 		// After Create(), controller-runtime populates objectKeeper.UID automatically
-		// Use it directly if available, otherwise read via APIReader (bypasses cache)
-		if objectKeeper.UID == "" {
-			// UID not populated (shouldn't happen, but handle gracefully)
-			// Use APIReader to read directly from API server (bypasses informer cache)
-			if r.APIReader != nil {
-				if err := r.APIReader.Get(ctx, client.ObjectKey{Name: retainerName}, objectKeeper); err != nil {
-					// If still not found, requeue - object will be available on next reconcile
-					return ctrl.Result{RequeueAfter: 200 * time.Millisecond}, nil
-				}
-			} else {
-				// APIReader not available, requeue instead of blocking
-				return ctrl.Result{RequeueAfter: 200 * time.Millisecond}, nil
-			}
-		}
+		// We rely on informer cache - if UID is not populated, it will be available on next reconcile
 	} else if err != nil {
 		return ctrl.Result{}, fmt.Errorf("failed to get ObjectKeeper: %w", err)
 	} else {
@@ -367,22 +362,7 @@ func (r *VolumeCaptureRequestController) processSnapshotMode(ctx context.Context
 		}
 		l.Info("Created VolumeSnapshotContent", "name", csiVSCName)
 		// After Create(), controller-runtime populates csiVSC.UID automatically
-		// Use it directly if available, otherwise read via APIReader (bypasses cache)
-		// For newly created VSC, Status will be empty - external-snapshotter will update it on next reconcile
-		// So we requeue to let external-snapshotter process the VSC and update Status
-		if csiVSC.UID == "" {
-			// UID not populated (shouldn't happen, but handle gracefully)
-			// Use APIReader to read directly from API server (bypasses informer cache)
-			if r.APIReader != nil {
-				if err := r.APIReader.Get(ctx, client.ObjectKey{Name: csiVSCName}, csiVSC); err != nil {
-					// If still not found, requeue - object will be available on next reconcile
-					return ctrl.Result{RequeueAfter: 200 * time.Millisecond}, nil
-				}
-			} else {
-				// APIReader not available, requeue instead of blocking
-				return ctrl.Result{RequeueAfter: 200 * time.Millisecond}, nil
-			}
-		}
+		// We rely on informer cache - if UID is not populated, it will be available on next reconcile
 		// Newly created VSC won't have Status yet - requeue to let external-snapshotter process it
 		return ctrl.Result{RequeueAfter: 1 * time.Second}, nil
 	} else if err != nil {
@@ -974,28 +954,20 @@ func (r *VolumeCaptureRequestController) markFailedSnapshot(ctx context.Context,
 // This is a cluster-level configuration requirement, not a user error.
 //
 // This follows the same logic as snapshot-controller's SetDefaultSnapshotClass.
-// Uses APIReader to bypass cache for read-after-write consistency (e.g., when VolumeSnapshotClass
-// is created just before VCR reconciliation).
+// Uses informer cache only - VolumeSnapshotClass must exist before creating VCR.
 //
 // Returns error if:
 //   - no default class found for the driver (cluster misconfiguration)
 //   - multiple default classes found for the same driver (cluster misconfiguration)
 func (r *VolumeCaptureRequestController) findDefaultVolumeSnapshotClass(ctx context.Context, driver string) (*snapshotv1.VolumeSnapshotClass, error) {
-	// Use APIReader to bypass cache for read-after-write consistency
-	// This is critical because VolumeSnapshotClass may be created just before VCR reconciliation
-	reader := r.Client
-	if r.APIReader != nil {
-		reader = r.APIReader
-	}
-
-	// List all VolumeSnapshotClasses
+	// List all VolumeSnapshotClasses from informer cache
 	vscList := &snapshotv1.VolumeSnapshotClassList{}
-	if err := reader.List(ctx, vscList); err != nil {
+	if err := r.Client.List(ctx, vscList); err != nil {
 		return nil, fmt.Errorf("failed to list VolumeSnapshotClasses: %w", err)
 	}
 
 	// Find default classes matching the driver
-	defaultClasses := []*snapshotv1.VolumeSnapshotClass{}
+	var defaultClasses []*snapshotv1.VolumeSnapshotClass
 	for i := range vscList.Items {
 		class := &vscList.Items[i]
 		if isDefaultVolumeSnapshotClass(class) && class.Driver == driver {
@@ -1003,10 +975,12 @@ func (r *VolumeCaptureRequestController) findDefaultVolumeSnapshotClass(ctx cont
 		}
 	}
 
-	if len(defaultClasses) == 0 {
+	switch len(defaultClasses) {
+	case 0:
 		return nil, fmt.Errorf("no default VolumeSnapshotClass found for driver %s", driver)
-	}
-	if len(defaultClasses) > 1 {
+	case 1:
+		return defaultClasses[0], nil
+	default:
 		// Cluster misconfiguration: multiple default classes for same driver
 		classNames := make([]string, len(defaultClasses))
 		for i, c := range defaultClasses {
@@ -1014,8 +988,6 @@ func (r *VolumeCaptureRequestController) findDefaultVolumeSnapshotClass(ctx cont
 		}
 		return nil, fmt.Errorf("cluster misconfigured: multiple default VolumeSnapshotClasses found for driver %s: %v", driver, classNames)
 	}
-
-	return defaultClasses[0], nil
 }
 
 // isDefaultVolumeSnapshotClass checks if VolumeSnapshotClass is marked as default
