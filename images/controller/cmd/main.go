@@ -62,7 +62,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	log.Info(fmt.Sprintf("[main] Go Version:%s ", goruntime.Version()))
+	log.Info(fmt.Sprintf("[main] Go DEV Version:%s ", goruntime.Version()))
 	log.Info(fmt.Sprintf("[main] OS/Arch:Go OS/Arch:%s/%s ", goruntime.GOOS, goruntime.GOARCH))
 
 	log.Info("[main] CfgParams has been successfully created")
