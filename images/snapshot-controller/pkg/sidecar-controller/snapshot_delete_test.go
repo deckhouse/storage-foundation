@@ -150,6 +150,10 @@ var snapshotClasses = []*crdv1.VolumeSnapshotClass{
 // 1. Fill in the controller with initial data
 // 2. Call the syncContent *once*.
 // 3. Compare resulting contents with expected contents.
+//
+// NOTE: Test expectations use map[string]string{} instead of nil for secrets in expectedDeleteCalls
+// to match GetCredentialsFromAnnotation behavior, which now consistently returns an empty map.
+// This change reflects actual controller behavior and ensures consistent test comparisons.
 func TestDeleteSync(t *testing.T) {
 	tests := []controllerTest{
 		{

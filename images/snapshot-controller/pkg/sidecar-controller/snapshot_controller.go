@@ -57,6 +57,9 @@ const controllerUpdateFailMsg = "snapshot controller failed to update"
 // content should be requeued. On error, the content is always requeued.
 func (ctrl *csiSnapshotSideCarController) syncContent(content *crdv1.VolumeSnapshotContent) (requeue bool, err error) {
 	// Enhanced logging for VSC-only debugging
+	// Determine if this is VSC-only mode (no VolumeSnapshotRef) or legacy mode (with VolumeSnapshotRef).
+	// VSC-only mode is a downstream extension that allows VolumeSnapshotContent to exist without VolumeSnapshot.
+	// Legacy mode follows upstream behavior requiring VolumeSnapshotRef to be set.
 	isVSCOnly := ctrl.vscMode.IsVSCOnly(content)
 	if isVSCOnly {
 		klog.V(4).Infof("synchronizing VolumeSnapshotContent[%s] (VSC-only, no VolumeSnapshotRef)", content.Name)
@@ -96,9 +99,11 @@ func (ctrl *csiSnapshotSideCarController) syncContent(content *crdv1.VolumeSnaps
 	// VSC-only model: This condition also applies to VSC without VolumeSnapshotRef
 	_, groupSnapshotMember := content.Annotations[utils.VolumeGroupSnapshotHandleAnnotation]
 
-	// Don't call CreateSnapshot if it's already in progress (annotation set but not completed)
-	hasBeingCreatedAnnotation := metav1.HasAnnotation(content.ObjectMeta, utils.AnnVolumeSnapshotBeingCreated)
-	if hasBeingCreatedAnnotation && !contentIsReady(content) {
+	// Don't call CreateSnapshot if it's already in progress (annotation set but not completed).
+	// This handles async CreateSnapshot scenarios where CSI drivers perform creation asynchronously.
+	// For VSC-only: annotation acts as a lock preventing repeated CreateSnapshot calls.
+	// For legacy: follows upstream behavior for async snapshot creation.
+	if ctrl.vscMode.ShouldSkipCreateForInProgress(content) {
 		// CreateSnapshot is already in progress - skip calling it again, continue to status check below
 		klog.V(4).Infof("syncContent [%s]: CreateSnapshot already in progress (annotation set), skipping createSnapshot call", content.Name)
 	} else if ctrl.vscMode.ShouldCreateSnapshot(content) && !groupSnapshotMember {
@@ -124,9 +129,11 @@ func (ctrl *csiSnapshotSideCarController) syncContent(content *crdv1.VolumeSnaps
 		klog.V(4).Infof("syncContent [%s]: Group snapshot member, skipping CreateSnapshot", content.Name)
 	}
 
-	// Check if CreateSnapshot is in progress (annotation set but status not ready)
-	// Note: hasBeingCreatedAnnotation is already checked above
-	if hasBeingCreatedAnnotation && !contentIsReady(content) {
+	// Check if CreateSnapshot is in progress (annotation set but status not ready).
+	// This is checked again here to determine if we should proceed to status check.
+	// For VSC-only: allows periodic status polling while CreateSnapshot is in progress.
+	// For legacy: follows upstream behavior for async snapshot creation.
+	if ctrl.vscMode.ShouldSkipCreateForInProgress(content) {
 		// CreateSnapshot was called but not completed yet - check status periodically
 		if isVSCOnly {
 			klog.V(4).Infof("syncContent [%s]: VSC-only with being-created annotation, checking status (CreateSnapshot in progress)", content.Name)
@@ -156,9 +163,10 @@ func (ctrl *csiSnapshotSideCarController) syncContent(content *crdv1.VolumeSnaps
 		return false, nil
 	}
 
-	// VSC-only model: If VolumeHandle is nil, we can't create snapshot and can't check status.
-	// Skip processing such VSC (it may be pre-provisioned with SnapshotHandle, but that's handled separately).
-	if content.Spec.Source.VolumeHandle == nil && (content.Status == nil || content.Status.SnapshotHandle == nil) {
+	// VSC-only model: Skip content that lacks both VolumeHandle and SnapshotHandle.
+	// This is downstream-specific behavior - upstream would consider this an error.
+	// For legacy mode: ShouldSkip always returns false (upstream never skips content processing).
+	if ctrl.vscMode.ShouldSkip(content) {
 		// No VolumeHandle and no SnapshotHandle - nothing to do
 		klog.V(4).Infof("syncContent [%s]: skipping VSC without VolumeHandle and without SnapshotHandle", content.Name)
 		return false, nil

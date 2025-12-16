@@ -80,7 +80,9 @@ func (handler *csiHandler) CreateSnapshot(content *crdv1.VolumeSnapshotContent, 
 	ctx, cancel := context.WithTimeout(context.Background(), handler.timeout)
 	defer cancel()
 
-	// Use VSCMode to determine snapshot UID for name generation
+	// Use VSCMode to determine snapshot UID for name generation.
+	// SnapshotUID may come from VolumeSnapshotRef.UID (legacy/upstream) or from content.UID (VSC-only).
+	// VSCMode handles this selection based on the content's mode.
 	snapshotUID := handler.vscMode.SnapshotUID(content)
 
 	if content.Spec.Source.VolumeHandle == nil {
@@ -138,9 +140,16 @@ func (handler *csiHandler) GetSnapshotStatus(content *crdv1.VolumeSnapshotConten
 	return csiSnapshotStatus, timestamp, size, groupSnapshotID, nil
 }
 
+// makeSnapshotName creates a deterministic snapshot name based on prefix and snapshotUID.
+// The snapshotUID may come from VolumeSnapshotRef.UID (legacy/upstream) or from
+// VolumeSnapshotContent.UID (VSC-only downstream extension). VSCMode handles the selection
+// of which UID to use, ensuring consistent snapshot naming across modes.
+//
+// This deterministic naming allows CSI drivers to identify and manage snapshots consistently,
+// even across controller restarts or when snapshots are created asynchronously.
 func makeSnapshotName(prefix, snapshotUID string, snapshotNameUUIDLength int) (string, error) {
 	// create persistent name based on a volumeNamePrefix and volumeNameUUIDLength
-	// of PVC's UID
+	// of snapshot UID (from VolumeSnapshotRef.UID in legacy mode, or content.UID in VSC-only mode)
 	if len(snapshotUID) == 0 {
 		return "", fmt.Errorf("Corrupted snapshot object, it is missing UID")
 	}

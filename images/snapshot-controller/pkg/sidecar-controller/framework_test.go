@@ -333,8 +333,11 @@ func (r *snapshotReactor) checkContents(expectedContents []*crdv1.VolumeSnapshot
 		v := v.DeepCopy()
 		v.ResourceVersion = ""
 		v.Spec.VolumeSnapshotRef.ResourceVersion = ""
-		// Clear DeletionTimestamp to avoid time precision issues in comparison
-		// This is needed for VSC-only tests that use DeletionTimestamp
+		// Clear DeletionTimestamp to avoid time precision issues in comparison.
+		// This is needed for VSC-only tests that use DeletionTimestamp.
+		// NOTE: This is a downstream-specific modification to the test framework.
+		// Upstream framework does not clear DeletionTimestamp, but VSC-only deletion
+		// tests require this normalization for consistent test comparisons.
 		v.DeletionTimestamp = nil
 		if v.Status != nil {
 			v.Status.CreationTime = nil
@@ -350,8 +353,11 @@ func (r *snapshotReactor) checkContents(expectedContents []*crdv1.VolumeSnapshot
 		v := v.DeepCopy()
 		v.ResourceVersion = ""
 		v.Spec.VolumeSnapshotRef.ResourceVersion = ""
-		// Clear DeletionTimestamp to avoid time precision issues in comparison
-		// This is needed for VSC-only tests that use DeletionTimestamp
+		// Clear DeletionTimestamp to avoid time precision issues in comparison.
+		// This is needed for VSC-only tests that use DeletionTimestamp.
+		// NOTE: This is a downstream-specific modification to the test framework.
+		// Upstream framework does not clear DeletionTimestamp, but VSC-only deletion
+		// tests require this normalization for consistent test comparisons.
 		v.DeletionTimestamp = nil
 		if v.Status != nil {
 			v.Status.CreationTime = nil

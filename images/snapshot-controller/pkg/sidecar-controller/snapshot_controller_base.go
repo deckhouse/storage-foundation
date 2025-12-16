@@ -336,14 +336,20 @@ func (ctrl *csiSnapshotSideCarController) syncContentByKey(key string) (requeue 
 }
 
 // isDriverMatch verifies whether the driver specified in VolumeSnapshotContent
-// or VolumeGroupSnapshotContent matches the controller's driver name
+// or VolumeGroupSnapshotContent matches the controller's driver name.
+//
+// Upstream logic filters out contents without any source (VolumeHandle or SnapshotHandle)
+// only for legacy mode. Downstream (VSC-only) needs to see such objects in sync for
+// proper handling, even though they may be skipped later in syncContent via ShouldSkip().
+//
+// This method determines which objects should be added to the controller's work queue.
+// The actual processing logic (including skipping) is handled in syncContent.
 func (ctrl *csiSnapshotSideCarController) isDriverMatch(object interface{}) bool {
 	if content, ok := object.(*crdv1.VolumeSnapshotContent); ok {
-		// For VSC-only mode, allow content without VolumeHandle/SnapshotHandle to be processed
-		// (it will be skipped in syncContent, but we need to add it to reactor for testing)
-		isVSCOnly := ctrl.vscMode.IsVSCOnly(content)
-		if !isVSCOnly && content.Spec.Source.VolumeHandle == nil && content.Spec.Source.SnapshotHandle == nil {
-			// Skip this snapshot content if it does not have a valid source (legacy mode only)
+		// Use VSCMode to determine if content should be considered for reconciliation.
+		// Upstream (legacy) filters out content without VolumeHandle/SnapshotHandle.
+		// Downstream (VSC-only) allows such content to be processed (skipping happens in syncContent).
+		if !ctrl.vscMode.IsValidContentForReconcile(content) {
 			return false
 		}
 		if content.Spec.Driver != ctrl.driverName {

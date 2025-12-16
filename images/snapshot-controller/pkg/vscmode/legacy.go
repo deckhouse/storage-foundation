@@ -24,6 +24,10 @@ import (
 
 // LegacyVSCMode implements upstream snapshot-controller behavior.
 // This mode requires VolumeSnapshotRef to be set and uses VolumeSnapshotRef.UID for snapshot naming.
+//
+// This implementation preserves upstream semantics exactly as they are in the original
+// snapshot-controller, ensuring that legacy behavior remains unchanged when VSC-only
+// mode is not enabled. This is critical for maintaining upstream compatibility.
 type LegacyVSCMode struct{}
 
 // NewLegacyVSCMode creates a new LegacyVSCMode instance.
@@ -98,4 +102,46 @@ func (m *LegacyVSCMode) ShouldDeleteSnapshot(content *crdv1.VolumeSnapshotConten
 	}
 
 	return false
+}
+
+// ShouldSkipCreateForInProgress returns true if CreateSnapshot should be skipped
+// because it's already in progress (annotation set but not completed).
+// For legacy mode, this follows upstream behavior.
+func (m *LegacyVSCMode) ShouldSkipCreateForInProgress(content *crdv1.VolumeSnapshotContent) bool {
+	// Check if annotation is set
+	if !metav1.HasAnnotation(content.ObjectMeta, utils.AnnVolumeSnapshotBeingCreated) {
+		return false
+	}
+
+	// If annotation is set but content is not ready, CreateSnapshot is in progress
+	// Content is ready if Status exists, SnapshotHandle is set, and ReadyToUse is true
+	if content.Status == nil || content.Status.SnapshotHandle == nil {
+		return true // CreateSnapshot in progress, skip calling it again
+	}
+
+	// If SnapshotHandle exists but ReadyToUse is false, still in progress
+	if content.Status.ReadyToUse == nil || !*content.Status.ReadyToUse {
+		return true
+	}
+
+	return false // Content is ready, no need to skip
+}
+
+// ShouldSkip returns false for legacy mode - upstream never skips content processing.
+// Legacy mode always requires VolumeHandle or SnapshotHandle to be present.
+func (m *LegacyVSCMode) ShouldSkip(content *crdv1.VolumeSnapshotContent) bool {
+	// Upstream behavior: never skip content processing
+	// If VolumeHandle is nil, it's either pre-provisioned (has SnapshotHandle) or an error
+	return false
+}
+
+// IsValidContentForReconcile returns true if the VolumeSnapshotContent should be
+// added to the controller's work queue for reconciliation.
+// For legacy mode: follows upstream behavior - filters out content without VolumeHandle or SnapshotHandle.
+func (m *LegacyVSCMode) IsValidContentForReconcile(content *crdv1.VolumeSnapshotContent) bool {
+	// Upstream behavior: content must have either VolumeHandle or SnapshotHandle
+	if content.Spec.Source.VolumeHandle == nil && content.Spec.Source.SnapshotHandle == nil {
+		return false
+	}
+	return true
 }

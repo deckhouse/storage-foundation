@@ -25,6 +25,11 @@ import (
 // VSCOnlyMode implements VSC-only model behavior.
 // In this mode, VolumeSnapshotContent can exist without VolumeSnapshot,
 // and VolumeSnapshotRef is completely empty.
+//
+// This is a downstream extension that allows VSC to be managed independently
+// by external controllers (e.g., VCR) without requiring VolumeSnapshot objects.
+// All downstream-specific logic is isolated in this implementation to facilitate
+// clean rebases from upstream snapshot-controller.
 type VSCOnlyMode struct{}
 
 // NewVSCOnlyMode creates a new VSCOnlyMode instance.
@@ -119,4 +124,51 @@ func (m *VSCOnlyMode) ShouldDeleteSnapshot(content *crdv1.VolumeSnapshotContent)
 	}
 
 	return false
+}
+
+// ShouldSkipCreateForInProgress returns true if CreateSnapshot should be skipped
+// because it's already in progress (annotation set but not completed).
+// For VSC-only mode, this handles async CreateSnapshot scenarios.
+func (m *VSCOnlyMode) ShouldSkipCreateForInProgress(content *crdv1.VolumeSnapshotContent) bool {
+	// Check if annotation is set
+	if !metav1.HasAnnotation(content.ObjectMeta, utils.AnnVolumeSnapshotBeingCreated) {
+		return false
+	}
+
+	// If annotation is set but content is not ready, CreateSnapshot is in progress
+	// Content is ready if Status exists, SnapshotHandle is set, and ReadyToUse is true
+	if content.Status == nil || content.Status.SnapshotHandle == nil {
+		return true // CreateSnapshot in progress, skip calling it again
+	}
+
+	// If SnapshotHandle exists but ReadyToUse is false, still in progress
+	if content.Status.ReadyToUse == nil || !*content.Status.ReadyToUse {
+		return true
+	}
+
+	return false // Content is ready, no need to skip
+}
+
+// ShouldSkip returns true if the VolumeSnapshotContent should be skipped entirely.
+// For VSC-only mode: skip if VolumeHandle is nil and SnapshotHandle is also nil.
+// This is downstream-specific behavior - upstream would consider this an error.
+func (m *VSCOnlyMode) ShouldSkip(content *crdv1.VolumeSnapshotContent) bool {
+	// VSC-only model: If VolumeHandle is nil, we can't create snapshot and can't check status.
+	// Skip processing such VSC if SnapshotHandle is also nil (it may be pre-provisioned
+	// with SnapshotHandle, but that's handled separately).
+	if content.Spec.Source.VolumeHandle == nil && (content.Status == nil || content.Status.SnapshotHandle == nil) {
+		return true
+	}
+	return false
+}
+
+// IsValidContentForReconcile returns true if the VolumeSnapshotContent should be
+// added to the controller's work queue for reconciliation.
+// For VSC-only mode: allows content without VolumeHandle/SnapshotHandle to be processed
+// (it will be skipped in syncContent via ShouldSkip, but we need to add it to reactor for testing).
+// This is downstream-specific behavior - upstream would filter out such content.
+func (m *VSCOnlyMode) IsValidContentForReconcile(content *crdv1.VolumeSnapshotContent) bool {
+	// VSC-only mode: allow content without VolumeHandle/SnapshotHandle to be processed
+	// The actual skipping logic is handled in syncContent via ShouldSkip()
+	return true
 }
