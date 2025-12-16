@@ -105,7 +105,6 @@ var _ = Describe("VolumeCaptureRequest Snapshot Mode", func() {
 						Namespace: "default",
 						Name:      "test-pvc",
 					},
-					VolumeSnapshotClassName: "test-vsc-class",
 				},
 			}
 			Expect(client.Create(ctx, vcr)).To(Succeed())
@@ -146,10 +145,13 @@ var _ = Describe("VolumeCaptureRequest Snapshot Mode", func() {
 			}
 			Expect(client.Create(ctx, pv)).To(Succeed())
 
-			// Create VolumeSnapshotClass
+			// Create default VolumeSnapshotClass (marked as default for automatic selection)
 			vscClass = &snapshotv1.VolumeSnapshotClass{
 				ObjectMeta: metav1.ObjectMeta{
 					Name: "test-vsc-class",
+					Annotations: map[string]string{
+						IsDefaultSnapshotClassAnnotation: "true",
+					},
 				},
 				Driver:         "test-driver",
 				DeletionPolicy: snapshotv1.VolumeSnapshotContentDelete,
@@ -181,7 +183,7 @@ var _ = Describe("VolumeCaptureRequest Snapshot Mode", func() {
 			Expect(vsc.Spec.Source.VolumeHandle).ToNot(BeNil())
 			Expect(*vsc.Spec.Source.VolumeHandle).To(Equal("test-volume-handle-123"))
 			Expect(vsc.Spec.VolumeSnapshotClassName).ToNot(BeNil())
-			Expect(*vsc.Spec.VolumeSnapshotClassName).To(Equal("test-vsc-class"))
+			Expect(*vsc.Spec.VolumeSnapshotClassName).To(Equal(vscClass.Name)) // Should use the default class found
 			Expect(vsc.Spec.DeletionPolicy).To(Equal(snapshotv1.VolumeSnapshotContentDelete))
 
 			// Verify: NO VolumeSnapshotRef (ADR forbids VolumeSnapshot)
@@ -368,7 +370,7 @@ var _ = Describe("VolumeCaptureRequest Snapshot Mode", func() {
 				},
 				Spec: snapshotv1.VolumeSnapshotContentSpec{
 					Driver:                  "test-driver",
-					VolumeSnapshotClassName: pointer.String("test-vsc-class"),
+					VolumeSnapshotClassName: pointer.String(vscClass.Name), // Use the default class name
 					DeletionPolicy:          snapshotv1.VolumeSnapshotContentDelete,
 					Source: snapshotv1.VolumeSnapshotContentSource{
 						VolumeHandle: pointer.String("test-volume-handle-123"),
@@ -440,7 +442,6 @@ var _ = Describe("VolumeCaptureRequest Snapshot Mode", func() {
 							Namespace: "default",
 							Name:      "non-existent-pvc",
 						},
-						VolumeSnapshotClassName: "test-vsc-class",
 					},
 				}
 				Expect(client.Create(ctx, vcr)).To(Succeed())
@@ -463,13 +464,14 @@ var _ = Describe("VolumeCaptureRequest Snapshot Mode", func() {
 				Expect(updatedVCR.Annotations).To(HaveKey(AnnotationKeyTTL))
 			})
 
-			It("should fail if VolumeSnapshotClass is not found", func() {
-				// Create VCR with non-existent VolumeSnapshotClass
+			It("should fail if no default VolumeSnapshotClass found for driver", func() {
+				// Create VCR without default VolumeSnapshotClass for the driver
+				// (test-vsc-class exists but may not be default, or driver mismatch)
 				vcr := &storagev1alpha1.VolumeCaptureRequest{
 					ObjectMeta: metav1.ObjectMeta{
-						Name:      "test-vcr-no-class",
+						Name:      "test-vcr-no-default-class",
 						Namespace: "default",
-						UID:       types.UID("vcr-uid-no-class"),
+						UID:       types.UID("vcr-uid-no-default-class"),
 					},
 					Spec: storagev1alpha1.VolumeCaptureRequestSpec{
 						Mode: ModeSnapshot,
@@ -477,10 +479,12 @@ var _ = Describe("VolumeCaptureRequest Snapshot Mode", func() {
 							Namespace: "default",
 							Name:      "test-pvc",
 						},
-						VolumeSnapshotClassName: "non-existent-class",
 					},
 				}
 				Expect(client.Create(ctx, vcr)).To(Succeed())
+
+				// Delete the default VolumeSnapshotClass to simulate missing default
+				Expect(client.Delete(ctx, vscClass)).To(Succeed())
 
 				// Execute
 				_, err := ctrl.processSnapshotMode(ctx, vcr)
@@ -488,31 +492,35 @@ var _ = Describe("VolumeCaptureRequest Snapshot Mode", func() {
 
 				// Should mark as failed
 				updatedVCR := &storagev1alpha1.VolumeCaptureRequest{}
-				Expect(client.Get(ctx, types.NamespacedName{Name: "test-vcr-no-class", Namespace: "default"}, updatedVCR)).To(Succeed())
+				Expect(client.Get(ctx, types.NamespacedName{Name: "test-vcr-no-default-class", Namespace: "default"}, updatedVCR)).To(Succeed())
 
 				readyCondition := getCondition(updatedVCR.Status.Conditions, ConditionTypeReady)
 				Expect(readyCondition).ToNot(BeNil())
 				Expect(readyCondition.Status).To(Equal(metav1.ConditionFalse))
 				Expect(readyCondition.Reason).To(Equal(ErrorReasonNotFound))
+				Expect(readyCondition.Message).To(ContainSubstring("No default VolumeSnapshotClass found for driver"))
 			})
 
-			It("should fail if VolumeSnapshotClass driver does not match PV driver", func() {
-				// Create VolumeSnapshotClass with different driver
-				mismatchedClass := &snapshotv1.VolumeSnapshotClass{
+			It("should fail if multiple default VolumeSnapshotClasses found for driver", func() {
+				// Create second default VolumeSnapshotClass with same driver
+				secondDefaultClass := &snapshotv1.VolumeSnapshotClass{
 					ObjectMeta: metav1.ObjectMeta{
-						Name: "mismatched-class",
+						Name: "test-vsc-class-2",
+						Annotations: map[string]string{
+							IsDefaultSnapshotClassAnnotation: "true",
+						},
 					},
-					Driver:         "different-driver",
+					Driver:         "test-driver", // Same driver
 					DeletionPolicy: snapshotv1.VolumeSnapshotContentDelete,
 				}
-				Expect(client.Create(ctx, mismatchedClass)).To(Succeed())
+				Expect(client.Create(ctx, secondDefaultClass)).To(Succeed())
 
-				// Create VCR with mismatched class
+				// Create VCR
 				vcr := &storagev1alpha1.VolumeCaptureRequest{
 					ObjectMeta: metav1.ObjectMeta{
-						Name:      "test-vcr-mismatch",
+						Name:      "test-vcr-multiple-defaults",
 						Namespace: "default",
-						UID:       types.UID("vcr-uid-mismatch"),
+						UID:       types.UID("vcr-uid-multiple-defaults"),
 					},
 					Spec: storagev1alpha1.VolumeCaptureRequestSpec{
 						Mode: ModeSnapshot,
@@ -520,7 +528,6 @@ var _ = Describe("VolumeCaptureRequest Snapshot Mode", func() {
 							Namespace: "default",
 							Name:      "test-pvc",
 						},
-						VolumeSnapshotClassName: "mismatched-class",
 					},
 				}
 				Expect(client.Create(ctx, vcr)).To(Succeed())
@@ -529,14 +536,15 @@ var _ = Describe("VolumeCaptureRequest Snapshot Mode", func() {
 				_, err := ctrl.processSnapshotMode(ctx, vcr)
 				Expect(err).ToNot(HaveOccurred())
 
-				// Should mark as failed
+				// Should mark as failed (multiple defaults found)
 				updatedVCR := &storagev1alpha1.VolumeCaptureRequest{}
-				Expect(client.Get(ctx, types.NamespacedName{Name: "test-vcr-mismatch", Namespace: "default"}, updatedVCR)).To(Succeed())
+				Expect(client.Get(ctx, types.NamespacedName{Name: "test-vcr-multiple-defaults", Namespace: "default"}, updatedVCR)).To(Succeed())
 
 				readyCondition := getCondition(updatedVCR.Status.Conditions, ConditionTypeReady)
 				Expect(readyCondition).ToNot(BeNil())
 				Expect(readyCondition.Status).To(Equal(metav1.ConditionFalse))
-				Expect(readyCondition.Reason).To(Equal(ErrorReasonInternalError))
+				Expect(readyCondition.Reason).To(Equal(ErrorReasonNotFound))
+				Expect(readyCondition.Message).To(ContainSubstring("multiple default VolumeSnapshotClasses found"))
 			})
 
 			It("should fail VCR when VSC has terminal error", func() {
@@ -573,7 +581,6 @@ var _ = Describe("VolumeCaptureRequest Snapshot Mode", func() {
 							Namespace: "default",
 							Name:      "test-pvc",
 						},
-						VolumeSnapshotClassName: "test-vsc-class",
 					},
 				}
 				Expect(client.Create(ctx, vcr)).To(Succeed())
@@ -669,7 +676,6 @@ var _ = Describe("VolumeCaptureRequest Snapshot Mode", func() {
 							Namespace: "default",
 							Name:      "test-pvc",
 						},
-						VolumeSnapshotClassName: "test-vsc-class",
 					},
 				}
 				Expect(client.Create(ctx, vcr)).To(Succeed())
@@ -721,7 +727,6 @@ var _ = Describe("VolumeCaptureRequest Snapshot Mode", func() {
 							Namespace: "default",
 							Name:      "test-pvc",
 						},
-						VolumeSnapshotClassName: "test-vsc-class",
 					},
 				}
 				Expect(client.Create(ctx, vcr)).To(Succeed())
@@ -744,7 +749,7 @@ var _ = Describe("VolumeCaptureRequest Snapshot Mode", func() {
 					},
 					Spec: snapshotv1.VolumeSnapshotContentSpec{
 						Driver:                  "test-driver",
-						VolumeSnapshotClassName: pointer.String("test-vsc-class"),
+						VolumeSnapshotClassName: pointer.String(vscClass.Name), // Use the default class name
 						DeletionPolicy:          snapshotv1.VolumeSnapshotContentDelete,
 						Source: snapshotv1.VolumeSnapshotContentSource{
 							VolumeHandle: pointer.String("test-volume-handle-123"),
@@ -1052,7 +1057,6 @@ var _ = Describe("VolumeCaptureRequest Snapshot Mode", func() {
 							Namespace: "default",
 							Name:      "test-pvc",
 						},
-						VolumeSnapshotClassName: "test-vsc-class",
 					},
 					Status: storagev1alpha1.VolumeCaptureRequestStatus{
 						CompletionTimestamp: &metav1.Time{Time: time.Now().Add(-11 * time.Minute)}, // Expired
@@ -1088,7 +1092,6 @@ var _ = Describe("VolumeCaptureRequest Snapshot Mode", func() {
 							Namespace: "default",
 							Name:      "test-pvc",
 						},
-						VolumeSnapshotClassName: "test-vsc-class",
 					},
 					Status: storagev1alpha1.VolumeCaptureRequestStatus{
 						CompletionTimestamp: &metav1.Time{Time: time.Now()},
@@ -1126,7 +1129,6 @@ var _ = Describe("VolumeCaptureRequest Snapshot Mode", func() {
 							Namespace: "default",
 							Name:      "test-pvc",
 						},
-						VolumeSnapshotClassName: "test-vsc-class",
 					},
 					Status: storagev1alpha1.VolumeCaptureRequestStatus{
 						CompletionTimestamp: &metav1.Time{Time: time.Now().Add(-5 * time.Minute)}, // Not expired yet
@@ -1186,6 +1188,9 @@ var _ = Describe("VolumeCaptureRequest Snapshot Mode", func() {
 				vscClass = &snapshotv1.VolumeSnapshotClass{
 					ObjectMeta: metav1.ObjectMeta{
 						Name: "test-vsc-class",
+						Annotations: map[string]string{
+							IsDefaultSnapshotClassAnnotation: "true",
+						},
 					},
 					Driver: "cephfs.csi.ceph.com",
 					Parameters: map[string]string{
@@ -1207,7 +1212,6 @@ var _ = Describe("VolumeCaptureRequest Snapshot Mode", func() {
 							Namespace: "default",
 							Name:      "test-pvc",
 						},
-						VolumeSnapshotClassName: "test-vsc-class",
 					},
 				}
 				Expect(client.Create(ctx, vcr)).To(Succeed())

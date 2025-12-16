@@ -299,7 +299,6 @@ var _ = Describe("VolumeCaptureRequest TTL", func() {
 						Namespace: "default",
 						Name:      "test-pvc",
 					},
-					VolumeSnapshotClassName: "test-vsc-class",
 				},
 				Status: storagev1alpha1.VolumeCaptureRequestStatus{
 					CompletionTimestamp: &completionTime,
@@ -353,7 +352,6 @@ var _ = Describe("VolumeCaptureRequest TTL", func() {
 						Namespace: "default",
 						Name:      "test-pvc",
 					},
-					VolumeSnapshotClassName: "test-vsc-class",
 				},
 				Status: storagev1alpha1.VolumeCaptureRequestStatus{
 					CompletionTimestamp: &completionTime,

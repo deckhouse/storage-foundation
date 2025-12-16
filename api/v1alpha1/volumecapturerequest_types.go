@@ -30,9 +30,6 @@ type VolumeCaptureRequestSpec struct {
 	// PersistentVolumeClaimRef references the PVC to capture
 	// Required for both Snapshot and Detach modes
 	PersistentVolumeClaimRef *ObjectReference `json:"persistentVolumeClaimRef,omitempty"`
-	// VolumeSnapshotClassName is the name of the VolumeSnapshotClass to use
-	// Required for Snapshot mode, ignored for Detach mode
-	VolumeSnapshotClassName string `json:"volumeSnapshotClassName,omitempty"`
 }
 
 // +k8s:deepcopy-gen=true
