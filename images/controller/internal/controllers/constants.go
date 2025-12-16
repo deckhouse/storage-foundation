@@ -30,13 +30,14 @@ const (
 
 // Error reason constants
 const (
-	ErrorReasonInternalError = "InternalError"
-	ErrorReasonNotFound      = "NotFound"
-	ErrorReasonRBACDenied    = "RBACDenied"
-	ErrorReasonInvalidMode   = "InvalidMode"
-	ErrorReasonInvalidSource = "InvalidSource"
-	ErrorReasonPVBound       = "PVBound"
-	ErrorReasonIncompatible  = "Incompatible" // For WFFC and cross-SC restore
+	ErrorReasonInternalError          = "InternalError"
+	ErrorReasonNotFound               = "NotFound"
+	ErrorReasonRBACDenied             = "RBACDenied"
+	ErrorReasonInvalidMode            = "InvalidMode"
+	ErrorReasonInvalidSource          = "InvalidSource"
+	ErrorReasonPVBound                = "PVBound"
+	ErrorReasonIncompatible           = "Incompatible"           // For WFFC and cross-SC restore
+	ErrorReasonSnapshotCreationFailed = "SnapshotCreationFailed" // For CSI snapshot creation failures
 )
 
 // Condition type constants

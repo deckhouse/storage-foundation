@@ -538,6 +538,260 @@ var _ = Describe("VolumeCaptureRequest Snapshot Mode", func() {
 				Expect(readyCondition.Status).To(Equal(metav1.ConditionFalse))
 				Expect(readyCondition.Reason).To(Equal(ErrorReasonInternalError))
 			})
+
+			It("should fail VCR when VSC has terminal error", func() {
+				// Create ObjectKeeper
+				retainerName := NamePrefixRetainer + "snapshot-vcr-uid-terminal-error"
+				objectKeeper := &deckhousev1alpha1.ObjectKeeper{
+					ObjectMeta: metav1.ObjectMeta{
+						Name: retainerName,
+						UID:  types.UID("retainer-uid-terminal-error"),
+					},
+					Spec: deckhousev1alpha1.ObjectKeeperSpec{
+						Mode: "FollowObject",
+						FollowObjectRef: &deckhousev1alpha1.FollowObjectRef{
+							APIVersion: APIGroupStorageDeckhouse,
+							Kind:       KindVolumeCaptureRequest,
+							Namespace:  "default",
+							Name:       "test-vcr-terminal-error",
+							UID:        "vcr-uid-terminal-error",
+						},
+					},
+				}
+				Expect(client.Create(ctx, objectKeeper)).To(Succeed())
+
+				// Create VCR
+				vcr := &storagev1alpha1.VolumeCaptureRequest{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "test-vcr-terminal-error",
+						Namespace: "default",
+						UID:       types.UID("vcr-uid-terminal-error"),
+					},
+					Spec: storagev1alpha1.VolumeCaptureRequestSpec{
+						Mode: ModeSnapshot,
+						PersistentVolumeClaimRef: &storagev1alpha1.ObjectReference{
+							Namespace: "default",
+							Name:      "test-pvc",
+						},
+						VolumeSnapshotClassName: "test-vsc-class",
+					},
+				}
+				Expect(client.Create(ctx, vcr)).To(Succeed())
+
+				// First reconcile: should create VSC and requeue
+				result, err := ctrl.processSnapshotMode(ctx, vcr)
+				Expect(err).ToNot(HaveOccurred())
+				Expect(result.RequeueAfter).To(BeNumerically(">", 0), "Should requeue while waiting for ReadyToUse")
+
+				// Verify VSC exists
+				vscName := "snapshot-vcr-uid-terminal-error"
+				vsc := &snapshotv1.VolumeSnapshotContent{}
+				Expect(client.Get(ctx, types.NamespacedName{Name: vscName}, vsc)).To(Succeed())
+
+				// Set terminal error on VSC (simulating CSI driver failure)
+				errorMsg := "provided secret is empty"
+				vsc.Status = &snapshotv1.VolumeSnapshotContentStatus{
+					ReadyToUse: pointer.Bool(false),
+					Error: &snapshotv1.VolumeSnapshotError{
+						Message: &errorMsg,
+						Time:    &metav1.Time{Time: time.Now()},
+					},
+				}
+				Expect(client.Status().Update(ctx, vsc)).To(Succeed())
+
+				// Second reconcile: should detect terminal error and mark VCR as failed
+				result, err = ctrl.processSnapshotMode(ctx, vcr)
+				Expect(err).ToNot(HaveOccurred())
+				Expect(result.Requeue).To(BeFalse(), "Should not requeue after terminal error")
+				Expect(result.RequeueAfter).To(Equal(time.Duration(0)), "Should not requeue after terminal error")
+
+				// Verify VCR status
+				updatedVCR := &storagev1alpha1.VolumeCaptureRequest{}
+				Expect(client.Get(ctx, types.NamespacedName{Name: "test-vcr-terminal-error", Namespace: "default"}, updatedVCR)).To(Succeed())
+
+				// Should have Ready=False condition
+				readyCondition := getCondition(updatedVCR.Status.Conditions, ConditionTypeReady)
+				Expect(readyCondition).ToNot(BeNil())
+				Expect(readyCondition.Status).To(Equal(metav1.ConditionFalse))
+				Expect(readyCondition.Reason).To(Equal(ErrorReasonSnapshotCreationFailed))
+				Expect(readyCondition.Message).To(ContainSubstring("CSI snapshot creation failed"))
+				Expect(readyCondition.Message).To(ContainSubstring(errorMsg))
+				Expect(readyCondition.Message).To(ContainSubstring(vscName))
+				Expect(readyCondition.Message).To(ContainSubstring("test-pvc"))
+
+				// Should have CompletionTimestamp
+				Expect(updatedVCR.Status.CompletionTimestamp).ToNot(BeNil())
+
+				// Should have TTL annotation
+				Expect(updatedVCR.Annotations).To(HaveKey(AnnotationKeyTTL))
+				Expect(updatedVCR.Annotations[AnnotationKeyTTL]).To(Equal("10m"))
+
+				// Should have DataRef pointing to problematic VSC
+				Expect(updatedVCR.Status.DataRef).ToNot(BeNil())
+				Expect(updatedVCR.Status.DataRef.Name).To(Equal(vscName))
+				Expect(updatedVCR.Status.DataRef.Kind).To(Equal("VolumeSnapshotContent"))
+
+				// Should have ObservedGeneration set
+				Expect(updatedVCR.Status.ObservedGeneration).To(Equal(updatedVCR.Generation))
+			})
+
+			It("should not requeue when VSC.status is nil (not terminal error)", func() {
+				// Create ObjectKeeper
+				retainerName := NamePrefixRetainer + "snapshot-vcr-uid-no-status"
+				objectKeeper := &deckhousev1alpha1.ObjectKeeper{
+					ObjectMeta: metav1.ObjectMeta{
+						Name: retainerName,
+						UID:  types.UID("retainer-uid-no-status"),
+					},
+					Spec: deckhousev1alpha1.ObjectKeeperSpec{
+						Mode: "FollowObject",
+						FollowObjectRef: &deckhousev1alpha1.FollowObjectRef{
+							APIVersion: APIGroupStorageDeckhouse,
+							Kind:       KindVolumeCaptureRequest,
+							Namespace:  "default",
+							Name:       "test-vcr-no-status",
+							UID:        "vcr-uid-no-status",
+						},
+					},
+				}
+				Expect(client.Create(ctx, objectKeeper)).To(Succeed())
+
+				// Create VCR
+				vcr := &storagev1alpha1.VolumeCaptureRequest{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "test-vcr-no-status",
+						Namespace: "default",
+						UID:       types.UID("vcr-uid-no-status"),
+					},
+					Spec: storagev1alpha1.VolumeCaptureRequestSpec{
+						Mode: ModeSnapshot,
+						PersistentVolumeClaimRef: &storagev1alpha1.ObjectReference{
+							Namespace: "default",
+							Name:      "test-pvc",
+						},
+						VolumeSnapshotClassName: "test-vsc-class",
+					},
+				}
+				Expect(client.Create(ctx, vcr)).To(Succeed())
+
+				// Execute - VSC exists but Status is nil
+				result, err := ctrl.processSnapshotMode(ctx, vcr)
+				Expect(err).ToNot(HaveOccurred())
+				// Should requeue (waiting for snapshotter to set status)
+				Expect(result.RequeueAfter).To(BeNumerically(">", 0), "Should requeue when VSC.Status is nil")
+
+				// VCR should not be marked as failed
+				updatedVCR := &storagev1alpha1.VolumeCaptureRequest{}
+				Expect(client.Get(ctx, types.NamespacedName{Name: "test-vcr-no-status", Namespace: "default"}, updatedVCR)).To(Succeed())
+				readyCondition := getCondition(updatedVCR.Status.Conditions, ConditionTypeReady)
+				Expect(readyCondition).To(BeNil(), "VCR should not have Ready condition when VSC.Status is nil")
+			})
+
+			It("should not change Failed condition on repeated reconcile", func() {
+				// Create ObjectKeeper
+				retainerName := NamePrefixRetainer + "snapshot-vcr-uid-repeated-failed"
+				objectKeeper := &deckhousev1alpha1.ObjectKeeper{
+					ObjectMeta: metav1.ObjectMeta{
+						Name: retainerName,
+						UID:  types.UID("retainer-uid-repeated-failed"),
+					},
+					Spec: deckhousev1alpha1.ObjectKeeperSpec{
+						Mode: "FollowObject",
+						FollowObjectRef: &deckhousev1alpha1.FollowObjectRef{
+							APIVersion: APIGroupStorageDeckhouse,
+							Kind:       KindVolumeCaptureRequest,
+							Namespace:  "default",
+							Name:       "test-vcr-repeated-failed",
+							UID:        "vcr-uid-repeated-failed",
+						},
+					},
+				}
+				Expect(client.Create(ctx, objectKeeper)).To(Succeed())
+
+				// Create VCR
+				vcr := &storagev1alpha1.VolumeCaptureRequest{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "test-vcr-repeated-failed",
+						Namespace: "default",
+						UID:       types.UID("vcr-uid-repeated-failed"),
+					},
+					Spec: storagev1alpha1.VolumeCaptureRequestSpec{
+						Mode: ModeSnapshot,
+						PersistentVolumeClaimRef: &storagev1alpha1.ObjectReference{
+							Namespace: "default",
+							Name:      "test-pvc",
+						},
+						VolumeSnapshotClassName: "test-vsc-class",
+					},
+				}
+				Expect(client.Create(ctx, vcr)).To(Succeed())
+
+				// Create VSC with terminal error
+				vscName := "snapshot-vcr-uid-repeated-failed"
+				errorMsg := "provided secret is empty"
+				vsc := &snapshotv1.VolumeSnapshotContent{
+					ObjectMeta: metav1.ObjectMeta{
+						Name: vscName,
+						OwnerReferences: []metav1.OwnerReference{
+							{
+								APIVersion: APIGroupDeckhouse,
+								Kind:       KindObjectKeeper,
+								Name:       retainerName,
+								UID:        "retainer-uid-repeated-failed",
+								Controller: pointer.Bool(true),
+							},
+						},
+					},
+					Spec: snapshotv1.VolumeSnapshotContentSpec{
+						Driver:                  "test-driver",
+						VolumeSnapshotClassName: pointer.String("test-vsc-class"),
+						DeletionPolicy:          snapshotv1.VolumeSnapshotContentDelete,
+						Source: snapshotv1.VolumeSnapshotContentSource{
+							VolumeHandle: pointer.String("test-volume-handle-123"),
+						},
+					},
+					Status: &snapshotv1.VolumeSnapshotContentStatus{
+						ReadyToUse: pointer.Bool(false),
+						Error: &snapshotv1.VolumeSnapshotError{
+							Message: &errorMsg,
+							Time:    &metav1.Time{Time: time.Now()},
+						},
+					},
+				}
+				Expect(client.Create(ctx, vsc)).To(Succeed())
+
+				// First reconcile: should mark as failed
+				_, err := ctrl.processSnapshotMode(ctx, vcr)
+				Expect(err).ToNot(HaveOccurred())
+
+				// Get VCR after first reconcile
+				updatedVCR := &storagev1alpha1.VolumeCaptureRequest{}
+				Expect(client.Get(ctx, types.NamespacedName{Name: "test-vcr-repeated-failed", Namespace: "default"}, updatedVCR)).To(Succeed())
+				originalTTL := updatedVCR.Annotations[AnnotationKeyTTL]
+				originalMessage := getCondition(updatedVCR.Status.Conditions, ConditionTypeReady).Message
+				originalCompletionTime := updatedVCR.Status.CompletionTimestamp
+
+				// Second reconcile: should not change Failed condition or TTL
+				_, err = ctrl.processSnapshotMode(ctx, updatedVCR)
+				Expect(err).ToNot(HaveOccurred())
+
+				// Verify VCR unchanged
+				finalVCR := &storagev1alpha1.VolumeCaptureRequest{}
+				Expect(client.Get(ctx, types.NamespacedName{Name: "test-vcr-repeated-failed", Namespace: "default"}, finalVCR)).To(Succeed())
+
+				// TTL should not be overwritten
+				Expect(finalVCR.Annotations[AnnotationKeyTTL]).To(Equal(originalTTL), "TTL should not be overwritten")
+
+				// Condition should not change
+				finalCondition := getCondition(finalVCR.Status.Conditions, ConditionTypeReady)
+				Expect(finalCondition).ToNot(BeNil())
+				Expect(finalCondition.Status).To(Equal(metav1.ConditionFalse))
+				Expect(finalCondition.Reason).To(Equal(ErrorReasonSnapshotCreationFailed))
+				Expect(finalCondition.Message).To(Equal(originalMessage), "Message should not change")
+
+				// CompletionTimestamp should not change
+				Expect(finalVCR.Status.CompletionTimestamp).To(Equal(originalCompletionTime), "CompletionTimestamp should not change")
+			})
 		})
 
 		Describe("Snapshot: idempotency (repeated reconcile)", func() {

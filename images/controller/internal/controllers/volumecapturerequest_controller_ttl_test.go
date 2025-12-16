@@ -23,6 +23,7 @@ import (
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
@@ -270,6 +271,115 @@ var _ = Describe("VolumeCaptureRequest TTL", func() {
 
 			// Should have some variation due to jitter
 			Expect(len(requeueValues)).To(BeNumerically(">", 1))
+		})
+
+		It("should use config TTL, not annotation TTL", func() {
+			// This test verifies that TTL scanner uses config.RequestTTL, not annotation TTL
+			// TTL annotation is informational only and does not affect deletion timing
+			now := time.Now()
+			completionTime := metav1.NewTime(now.Add(-15 * time.Minute)) // 15 minutes ago
+
+			// Create VCR with:
+			// - annotation TTL = 1h (should be ignored)
+			// - config TTL = 10m (should be used)
+			// - completionTime = 15m ago
+			// Expected: VCR should be deleted (15m > 10m config TTL)
+			vcr := &storagev1alpha1.VolumeCaptureRequest{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-vcr-config-ttl",
+					Namespace: "default",
+					UID:       types.UID("vcr-uid-config-ttl"),
+					Annotations: map[string]string{
+						AnnotationKeyTTL: "1h", // Annotation TTL - should be ignored
+					},
+				},
+				Spec: storagev1alpha1.VolumeCaptureRequestSpec{
+					Mode: ModeSnapshot,
+					PersistentVolumeClaimRef: &storagev1alpha1.ObjectReference{
+						Namespace: "default",
+						Name:      "test-pvc",
+					},
+					VolumeSnapshotClassName: "test-vsc-class",
+				},
+				Status: storagev1alpha1.VolumeCaptureRequestStatus{
+					CompletionTimestamp: &completionTime,
+					Conditions: []metav1.Condition{
+						{
+							Type:               ConditionTypeReady,
+							Status:             metav1.ConditionTrue,
+							Reason:             ConditionReasonCompleted,
+							LastTransitionTime: completionTime,
+							ObservedGeneration: 1,
+						},
+					},
+				},
+			}
+
+			Expect(client.Create(ctx, vcr)).To(Succeed())
+
+			// Execute scanAndDeleteExpiredVCRs
+			// Config TTL = 10m, completionTime = 15m ago
+			// Expected: shouldDelete = true (15m > 10m)
+			ctrl.scanAndDeleteExpiredVCRs(ctx, client)
+
+			// Verify VCR is deleted (scanner used config TTL, not annotation TTL)
+			deletedVCR := &storagev1alpha1.VolumeCaptureRequest{}
+			err := client.Get(ctx, types.NamespacedName{Name: "test-vcr-config-ttl", Namespace: "default"}, deletedVCR)
+			Expect(apierrors.IsNotFound(err)).To(BeTrue(), "VCR should be deleted because config TTL (10m) expired, not annotation TTL (1h)")
+		})
+
+		It("should not delete VCR when config TTL not expired, even if annotation TTL expired", func() {
+			// This test verifies that annotation TTL is ignored even when it's shorter than config TTL
+			now := time.Now()
+			completionTime := metav1.NewTime(now.Add(-5 * time.Minute)) // 5 minutes ago
+
+			// Create VCR with:
+			// - annotation TTL = 1m (expired, but should be ignored)
+			// - config TTL = 10m (not expired)
+			// - completionTime = 5m ago
+			// Expected: VCR should NOT be deleted (5m < 10m config TTL)
+			vcr := &storagev1alpha1.VolumeCaptureRequest{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-vcr-annotation-ignored",
+					Namespace: "default",
+					UID:       types.UID("vcr-uid-annotation-ignored"),
+					Annotations: map[string]string{
+						AnnotationKeyTTL: "1m", // Annotation TTL expired, but should be ignored
+					},
+				},
+				Spec: storagev1alpha1.VolumeCaptureRequestSpec{
+					Mode: ModeSnapshot,
+					PersistentVolumeClaimRef: &storagev1alpha1.ObjectReference{
+						Namespace: "default",
+						Name:      "test-pvc",
+					},
+					VolumeSnapshotClassName: "test-vsc-class",
+				},
+				Status: storagev1alpha1.VolumeCaptureRequestStatus{
+					CompletionTimestamp: &completionTime,
+					Conditions: []metav1.Condition{
+						{
+							Type:               ConditionTypeReady,
+							Status:             metav1.ConditionTrue,
+							Reason:             ConditionReasonCompleted,
+							LastTransitionTime: completionTime,
+							ObservedGeneration: 1,
+						},
+					},
+				},
+			}
+
+			Expect(client.Create(ctx, vcr)).To(Succeed())
+
+			// Execute scanAndDeleteExpiredVCRs
+			// Config TTL = 10m, completionTime = 5m ago
+			// Expected: should NOT delete (5m < 10m)
+			ctrl.scanAndDeleteExpiredVCRs(ctx, client)
+
+			// Verify VCR still exists (scanner ignored annotation TTL)
+			existingVCR := &storagev1alpha1.VolumeCaptureRequest{}
+			err := client.Get(ctx, types.NamespacedName{Name: "test-vcr-annotation-ignored", Namespace: "default"}, existingVCR)
+			Expect(err).ToNot(HaveOccurred(), "VCR should NOT be deleted because config TTL (10m) not expired, annotation TTL (1m) is ignored")
 		})
 	})
 })

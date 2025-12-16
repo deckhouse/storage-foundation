@@ -24,6 +24,7 @@ import (
 
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/util/retry"
@@ -89,36 +90,16 @@ func (r *VolumeCaptureRequestController) Reconcile(ctx context.Context, req ctrl
 	// before VCR status is set to Ready. This ensures VS is deleted immediately upon VCR completion.
 	// If VCR is already Ready, VS should already be cleaned up (or never existed).
 	if isConditionTrue(vcr.Status.Conditions, ConditionTypeReady) {
-		// Check TTL for completed VCR (after Ready short-circuit)
-		// This ensures TTL cleanup happens only after VCR is fully completed
-		if shouldDelete, requeueAfter, err := r.checkAndHandleTTL(ctx, &vcr); err != nil {
-			l.Error(err, "Failed to check TTL")
-			return ctrl.Result{}, err
-		} else if shouldDelete {
-			// Object was deleted, return
-			return ctrl.Result{}, nil
-		} else if requeueAfter > 0 {
-			// TTL not expired yet, requeue
-			return ctrl.Result{RequeueAfter: requeueAfter}, nil
-		}
+		// VCR is Ready - TTL cleanup is handled by background TTL scanner, not in reconcile loop
+		// This ensures reconcile loop doesn't block on TTL checks
 		return ctrl.Result{}, nil
 	}
 
 	// Skip if already Failed and observed
+	// TTL cleanup is handled by background TTL scanner, not in reconcile loop
 	if isConditionFalse(vcr.Status.Conditions, ConditionTypeReady) {
 		if vcr.Status.ObservedGeneration == vcr.Generation {
-			// Check TTL for failed VCR (after Failed short-circuit)
-			// This ensures TTL cleanup happens only after VCR is fully failed
-			if shouldDelete, requeueAfter, err := r.checkAndHandleTTL(ctx, &vcr); err != nil {
-				l.Error(err, "Failed to check TTL")
-				return ctrl.Result{}, err
-			} else if shouldDelete {
-				// Object was deleted, return
-				return ctrl.Result{}, nil
-			} else if requeueAfter > 0 {
-				// TTL not expired yet, requeue
-				return ctrl.Result{RequeueAfter: requeueAfter}, nil
-			}
+			// VCR is Failed and observed - TTL cleanup is handled by background TTL scanner
 			return ctrl.Result{}, nil
 		}
 	}
@@ -351,17 +332,24 @@ func (r *VolumeCaptureRequestController) processSnapshotMode(ctx context.Context
 	// 8. Wait for external-snapshotter to set ReadyToUse=true on VSC
 	// external-snapshotter will detect VSC, call CSI CreateSnapshot, and set ReadyToUse when snapshot is ready
 	if csiVSC.Status == nil || csiVSC.Status.ReadyToUse == nil || !*csiVSC.Status.ReadyToUse {
-		// Check for CSI errors (e.g., broken driver, invalid parameters)
-		if csiVSC.Status != nil && csiVSC.Status.Error != nil {
-			errorMsg := "unknown error"
-			if csiVSC.Status.Error.Message != nil {
-				errorMsg = *csiVSC.Status.Error.Message
+		// Check for terminal CSI errors (e.g., broken driver, invalid parameters, secret issues)
+		// Terminal error: Status.Error.Message is set and non-empty
+		if csiVSC.Status != nil && csiVSC.Status.Error != nil && csiVSC.Status.Error.Message != nil && *csiVSC.Status.Error.Message != "" {
+			errorMsg := *csiVSC.Status.Error.Message
+			// Include VSC name and PVC name in error message for better debugging
+			errorDetails := fmt.Sprintf("VSC %s, PVC %s/%s: %s", csiVSCName, pvc.Namespace, pvc.Name, errorMsg)
+			// Include error time if available
+			if csiVSC.Status.Error.Time != nil {
+				errorDetails = fmt.Sprintf("%s (error time: %s)", errorDetails, csiVSC.Status.Error.Time.Format(time.RFC3339))
 			}
-			return r.markFailed(ctx, vcr, ErrorReasonInternalError,
-				fmt.Sprintf("CSI snapshot creation failed: %s", errorMsg))
+			// Mark VCR as failed with DataRef pointing to the problematic VSC
+			return r.markFailedSnapshot(ctx, vcr, csiVSCName, ErrorReasonSnapshotCreationFailed,
+				fmt.Sprintf("CSI snapshot creation failed: %s", errorDetails))
 		}
 		l.Info("Waiting for external-snapshotter to set ReadyToUse=true", "name", csiVSCName)
-		return ctrl.Result{RequeueAfter: 2 * time.Second}, nil
+		// Use longer requeue interval for snapshot operations to avoid API pressure
+		// External-snapshotter needs time to call CSI CreateSnapshot and update status
+		return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
 	}
 
 	// 9. Update VCR status (VSC is ready)
@@ -696,10 +684,18 @@ func (r *VolumeCaptureRequestController) processDetachMode(ctx context.Context, 
 
 // Helper functions
 
-// setTTLAnnotation sets TTL annotation on the object
-// TTL is set when Ready/Failed condition is set, and used for automatic deletion
-// TTL comes from configuration (storage-foundation module settings), not from VCR spec
-// If annotation already exists, it is not overwritten (idempotent)
+// setTTLAnnotation sets TTL annotation on the object.
+// TTL annotation is informational only and does not affect deletion timing.
+// Actual TTL is controlled exclusively by controller configuration (config.RequestTTL).
+// This ensures predictable cluster-wide retention policy.
+//
+// IMPORTANT:
+// TTL annotation (storage.deckhouse.io/ttl) is informational only.
+// Actual TTL is controlled exclusively by controller configuration.
+// This ensures predictable cluster-wide retention policy.
+//
+// The annotation is set when Ready/Failed condition is set for operator visibility.
+// If annotation already exists, it is not overwritten (idempotent).
 func (r *VolumeCaptureRequestController) setTTLAnnotation(vcr *storagev1alpha1.VolumeCaptureRequest) {
 	// Don't overwrite if annotation already exists
 	if vcr.Annotations != nil {
@@ -711,6 +707,7 @@ func (r *VolumeCaptureRequestController) setTTLAnnotation(vcr *storagev1alpha1.V
 		vcr.Annotations = make(map[string]string)
 	}
 	// Get TTL from configuration (default: 10m)
+	// This is informational only - actual deletion uses config.RequestTTL
 	ttlStr := config.DefaultRequestTTLStr
 	if r.Config != nil && r.Config.RequestTTLStr != "" {
 		ttlStr = r.Config.RequestTTLStr
@@ -818,10 +815,25 @@ func (r *VolumeCaptureRequestController) checkAndHandleTTL(ctx context.Context, 
 }
 
 func (r *VolumeCaptureRequestController) markFailed(ctx context.Context, vcr *storagev1alpha1.VolumeCaptureRequest, reason, message string) (ctrl.Result, error) {
+	return r.markFailedSnapshot(ctx, vcr, "", reason, message)
+}
+
+// markFailedSnapshot marks VCR as failed with optional DataRef pointing to VSC
+// This is used when snapshot creation fails and we want to reference the problematic VSC
+func (r *VolumeCaptureRequestController) markFailedSnapshot(ctx context.Context, vcr *storagev1alpha1.VolumeCaptureRequest, vscName, reason, message string) (ctrl.Result, error) {
 	vcrBase := vcr.DeepCopy()
 	vcr.Status.ObservedGeneration = vcr.Generation
 	now := metav1.Now()
 	vcr.Status.CompletionTimestamp = &now
+
+	// Set DataRef to VSC if provided (for snapshot failures)
+	if vscName != "" {
+		vcr.Status.DataRef = &storagev1alpha1.ObjectReference{
+			Name: vscName,
+			Kind: "VolumeSnapshotContent",
+		}
+	}
+
 	setSingleCondition(&vcr.Status.Conditions, metav1.Condition{
 		Type:               ConditionTypeReady,
 		Status:             metav1.ConditionFalse,
@@ -895,4 +907,156 @@ func (r *VolumeCaptureRequestController) SetupWithManager(mgr ctrl.Manager) erro
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&storagev1alpha1.VolumeCaptureRequest{}).
 		Complete(r)
+}
+
+// StartTTLScanner starts the TTL scanner in a background goroutine.
+// Should be called from manager.RunnableFunc to ensure it runs only on the leader replica.
+// Scanner periodically lists all VCRs and deletes expired ones based on completionTimestamp + TTL.
+//
+// IMPORTANT: This method should be called from manager.RunnableFunc to ensure leader-only execution.
+// When leadership changes, ctx.Done() triggers graceful shutdown of the scanner.
+func (r *VolumeCaptureRequestController) StartTTLScanner(ctx context.Context, client client.Client) {
+	go r.startTTLScanner(ctx, client)
+}
+
+// startTTLScanner runs a background scanner that periodically checks and deletes expired VCRs.
+// Scanner uses List() to get all VCRs and checks completionTimestamp + TTL from controller config.
+// This approach is simpler than per-object reconcile and doesn't block the reconcile loop.
+//
+// TTL SCANNER CONTRACT:
+//
+// 1. Works only with terminal VCRs:
+//   - Ready=True (completed successfully)
+//   - Ready=False (failed)
+//   - Non-terminal VCRs are never touched
+//
+// 2. TTL source:
+//   - TTL is ALWAYS taken from controller configuration (config.RequestTTL), NOT from VCR annotations
+//   - TTL annotation (storage.deckhouse.io/ttl) is informational only and does not affect deletion timing
+//   - This ensures predictable cluster-wide retention policy
+//
+// 3. TTL calculation:
+//   - TTL starts counting from CompletionTimestamp (when VCR reaches Ready=True or Failed=True)
+//   - Expiration time = CompletionTimestamp + config.RequestTTL
+//   - Only VCRs with CompletionTimestamp are eligible for deletion
+//
+// 4. Scanner behavior:
+//   - Scanner does NOT update status
+//   - Scanner does NOT patch objects
+//   - Scanner only performs List() and Delete() operations
+//   - Deletion of VCR triggers GC of ObjectKeeper and VSC through ownerReferences
+//
+// 5. Leader-only execution:
+//   - Scanner runs only on the leader replica (enforced by manager.RunnableFunc)
+//   - When leadership changes, ctx.Done() triggers graceful shutdown
+func (r *VolumeCaptureRequestController) startTTLScanner(ctx context.Context, client client.Client) {
+	// Scanner interval: check every 5 minutes
+	// This is a reasonable balance between responsiveness and API load
+	scannerInterval := 5 * time.Minute
+	ticker := time.NewTicker(scannerInterval)
+	defer ticker.Stop()
+
+	l := log.FromContext(ctx)
+	l.Info("TTL scanner started", "interval", scannerInterval)
+
+	// Run immediately on startup, then periodically
+	r.scanAndDeleteExpiredVCRs(ctx, client)
+
+	for {
+		select {
+		case <-ctx.Done():
+			l.Info("TTL scanner stopped (context cancelled)")
+			return
+		case <-ticker.C:
+			r.scanAndDeleteExpiredVCRs(ctx, client)
+		}
+	}
+}
+
+// scanAndDeleteExpiredVCRs lists all VCRs and deletes those where completionTimestamp + TTL < now.
+//
+// IMPORTANT:
+// TTL annotation (storage.deckhouse.io/ttl) is informational only.
+// Actual TTL is controlled exclusively by controller configuration.
+// This ensures predictable cluster-wide retention policy.
+//
+// TTL SEMANTICS:
+// - TTL is ALWAYS taken from controller configuration (config.RequestTTL), NOT from VCR annotations.
+// - TTL annotation (storage.deckhouse.io/ttl) is informational only and is IGNORED by the scanner.
+// - This ensures consistent cleanup behavior: all VCRs use the same TTL policy defined by controller config.
+// - TTL starts counting from CompletionTimestamp (when VCR reaches Ready=True or Failed=True).
+func (r *VolumeCaptureRequestController) scanAndDeleteExpiredVCRs(ctx context.Context, client client.Client) {
+	// Get TTL from controller config (this is the ONLY source of TTL timing)
+	// TTL annotation is informational only and is ignored here
+	defaultTTL := config.DefaultRequestTTL
+	if r.Config != nil && r.Config.RequestTTL > 0 {
+		defaultTTL = r.Config.RequestTTL
+	}
+
+	// List all VCRs across all namespaces
+	vcrList := &storagev1alpha1.VolumeCaptureRequestList{}
+	if err := client.List(ctx, vcrList); err != nil {
+		log.FromContext(ctx).Error(err, "Failed to list VolumeCaptureRequests for TTL scan")
+		return
+	}
+
+	now := time.Now()
+	deletedCount := 0
+	skippedCount := 0
+
+	for i := range vcrList.Items {
+		vcr := &vcrList.Items[i]
+
+		// Skip if not terminal (Ready=True or Failed=True)
+		readyCondition := meta.FindStatusCondition(vcr.Status.Conditions, ConditionTypeReady)
+		isTerminal := (readyCondition != nil && readyCondition.Status == metav1.ConditionTrue) ||
+			(readyCondition != nil && readyCondition.Status == metav1.ConditionFalse)
+
+		if !isTerminal {
+			skippedCount++
+			continue // Skip non-terminal VCRs
+		}
+
+		// Skip if no completionTimestamp
+		if vcr.Status.CompletionTimestamp == nil {
+			skippedCount++
+			continue
+		}
+
+		// Check if TTL expired: completionTimestamp + defaultTTL < now
+		completionTime := vcr.Status.CompletionTimestamp.Time
+		expirationTime := completionTime.Add(defaultTTL)
+
+		if now.After(expirationTime) {
+			// TTL expired, delete the object
+			log.FromContext(ctx).Info("TTL expired, deleting VolumeCaptureRequest",
+				"namespace", vcr.Namespace,
+				"name", vcr.Name,
+				"completionTime", completionTime,
+				"expirationTime", expirationTime,
+				"ttl", defaultTTL)
+
+			if err := client.Delete(ctx, vcr); err != nil {
+				if apierrors.IsNotFound(err) {
+					// Already deleted, that's fine (double-delete is safe)
+					log.FromContext(ctx).V(1).Info("VCR already deleted during TTL scan",
+						"namespace", vcr.Namespace,
+						"name", vcr.Name)
+				} else {
+					log.FromContext(ctx).Error(err, "Failed to delete expired VolumeCaptureRequest",
+						"namespace", vcr.Namespace,
+						"name", vcr.Name)
+				}
+			} else {
+				deletedCount++
+			}
+		}
+	}
+
+	if deletedCount > 0 || skippedCount > 0 {
+		log.FromContext(ctx).V(1).Info("TTL scan completed",
+			"total", len(vcrList.Items),
+			"deleted", deletedCount,
+			"skipped", skippedCount)
+	}
 }
