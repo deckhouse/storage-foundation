@@ -314,9 +314,28 @@ func (ctrl *csiSnapshotSideCarController) getCSISnapshotInput(content *crdv1.Vol
 	}
 
 	// Resolve snapshotting secret credentials.
+	// First try to get from annotations (set by common-controller in legacy mode)
 	snapshotterCredentials, err := ctrl.GetCredentialsFromAnnotation(content)
 	if err != nil {
 		return nil, nil, err
+	}
+
+	// If no credentials from annotations and we have a class, try to read from class parameters
+	// This is needed for VSC-only mode where common-controller doesn't set annotations
+	if len(snapshotterCredentials) == 0 && class != nil {
+		snapshotterSecretRef, err := utils.GetSecretReference(utils.SnapshotterSecretParams, class.Parameters, content.GetObjectMeta().GetName(), nil)
+		if err != nil {
+			// Secret reference not found or invalid - this is OK, some drivers don't need secrets
+			klog.V(5).Infof("getCSISnapshotInput: no secret reference found in class parameters for content %s: %v", content.Name, err)
+		} else if snapshotterSecretRef != nil {
+			// Found secret reference in class parameters - read the secret
+			snapshotterCredentials, err = utils.GetCredentials(ctrl.client, snapshotterSecretRef)
+			if err != nil {
+				klog.Errorf("getCSISnapshotInput: failed to get credentials from class parameters for content %s: %v", content.Name, err)
+				return nil, nil, fmt.Errorf("failed to get credentials from class parameters for content %s: %w", content.Name, err)
+			}
+			klog.V(5).Infof("getCSISnapshotInput: successfully read credentials from class parameters for content %s", content.Name)
+		}
 	}
 
 	return class, snapshotterCredentials, nil
@@ -549,10 +568,36 @@ func (ctrl *csiSnapshotSideCarController) createSnapshotWrapper(content *crdv1.V
 func (ctrl *csiSnapshotSideCarController) deleteCSISnapshotOperation(content *crdv1.VolumeSnapshotContent) (*crdv1.VolumeSnapshotContent, error) {
 	klog.V(5).Infof("deleteCSISnapshotOperation [%s] started", content.Name)
 
+	// Resolve snapshotting secret credentials.
+	// First try to get from annotations (set by common-controller in legacy mode)
 	snapshotterCredentials, err := ctrl.GetCredentialsFromAnnotation(content)
 	if err != nil {
 		ctrl.eventRecorder.Event(content, v1.EventTypeWarning, "SnapshotDeleteError", "Failed to get snapshot credentials")
 		return content, fmt.Errorf("failed to get input parameters to delete snapshot for content %s: %q", content.Name, err)
+	}
+
+	// If no credentials from annotations and we have a class, try to read from class parameters
+	// This is needed for VSC-only mode where common-controller doesn't set annotations
+	if len(snapshotterCredentials) == 0 && content.Spec.VolumeSnapshotClassName != nil {
+		class, err := ctrl.getSnapshotClass(*content.Spec.VolumeSnapshotClassName)
+		if err != nil {
+			klog.V(5).Infof("deleteCSISnapshotOperation: failed to get snapshot class %s for content %s: %v", *content.Spec.VolumeSnapshotClassName, content.Name, err)
+		} else if class != nil {
+			snapshotterSecretRef, err := utils.GetSecretReference(utils.SnapshotterSecretParams, class.Parameters, content.GetObjectMeta().GetName(), nil)
+			if err != nil {
+				// Secret reference not found or invalid - this is OK, some drivers don't need secrets
+				klog.V(5).Infof("deleteCSISnapshotOperation: no secret reference found in class parameters for content %s: %v", content.Name, err)
+			} else if snapshotterSecretRef != nil {
+				// Found secret reference in class parameters - read the secret
+				snapshotterCredentials, err = utils.GetCredentials(ctrl.client, snapshotterSecretRef)
+				if err != nil {
+					klog.Errorf("deleteCSISnapshotOperation: failed to get credentials from class parameters for content %s: %v", content.Name, err)
+					ctrl.eventRecorder.Event(content, v1.EventTypeWarning, "SnapshotDeleteError", "Failed to get snapshot credentials from class parameters")
+					return content, fmt.Errorf("failed to get credentials from class parameters for content %s: %w", content.Name, err)
+				}
+				klog.V(5).Infof("deleteCSISnapshotOperation: successfully read credentials from class parameters for content %s", content.Name)
+			}
+		}
 	}
 
 	err = ctrl.handler.DeleteSnapshot(content, snapshotterCredentials)

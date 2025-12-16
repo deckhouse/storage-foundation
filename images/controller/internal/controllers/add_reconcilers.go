@@ -32,9 +32,10 @@ import (
 // When leadership changes, the scanner context is cancelled and scanner stops gracefully.
 func AddVolumeCaptureRequestControllerToManager(mgr ctrl.Manager, cfg *config.Options) error {
 	reconciler := &VolumeCaptureRequestController{
-		Client: mgr.GetClient(),
-		Scheme: mgr.GetScheme(),
-		Config: cfg,
+		Client:    mgr.GetClient(),
+		APIReader: mgr.GetAPIReader(), // Direct API reader for read-after-write scenarios
+		Scheme:    mgr.GetScheme(),
+		Config:    cfg,
 	}
 
 	if err := reconciler.SetupWithManager(mgr); err != nil {

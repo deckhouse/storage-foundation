@@ -65,21 +65,26 @@ import (
 // VolumeCaptureRequestController reconciles VolumeCaptureRequest objects
 type VolumeCaptureRequestController struct {
 	client.Client
-	Scheme *runtime.Scheme
-	Config *config.Options
+	APIReader client.Reader // Direct API reader (bypasses cache) for read-after-write scenarios
+	Scheme    *runtime.Scheme
+	Config    *config.Options
 }
 
 func (r *VolumeCaptureRequestController) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	l := log.FromContext(ctx).WithValues("vcr", req.NamespacedName)
+	l.Info("Reconciling VolumeCaptureRequest")
 
 	var vcr storagev1alpha1.VolumeCaptureRequest
 	if err := r.Get(ctx, req.NamespacedName, &vcr); err != nil {
 		if apierrors.IsNotFound(err) {
+			l.V(1).Info("VolumeCaptureRequest not found, skipping")
 			return ctrl.Result{}, nil
 		}
 		l.Error(err, "failed to get VolumeCaptureRequest")
 		return ctrl.Result{}, err
 	}
+
+	l = l.WithValues("generation", vcr.Generation, "observedGeneration", vcr.Status.ObservedGeneration)
 
 	// Skip if already Ready
 	// NOTE: VCR is a fire-and-forget (one-time) operation. Once Ready, VCR will not be
@@ -92,6 +97,7 @@ func (r *VolumeCaptureRequestController) Reconcile(ctx context.Context, req ctrl
 	if isConditionTrue(vcr.Status.Conditions, ConditionTypeReady) {
 		// VCR is Ready - TTL cleanup is handled by background TTL scanner, not in reconcile loop
 		// This ensures reconcile loop doesn't block on TTL checks
+		l.V(1).Info("VCR is already Ready, skipping reconcile")
 		return ctrl.Result{}, nil
 	}
 
@@ -100,8 +106,10 @@ func (r *VolumeCaptureRequestController) Reconcile(ctx context.Context, req ctrl
 	if isConditionFalse(vcr.Status.Conditions, ConditionTypeReady) {
 		if vcr.Status.ObservedGeneration == vcr.Generation {
 			// VCR is Failed and observed - TTL cleanup is handled by background TTL scanner
+			l.V(1).Info("VCR is already Failed and observed, skipping reconcile")
 			return ctrl.Result{}, nil
 		}
+		l.Info("VCR is Failed but not observed, will retry", "observedGeneration", vcr.Status.ObservedGeneration, "generation", vcr.Generation)
 	}
 
 	// Handle deletion
@@ -116,12 +124,14 @@ func (r *VolumeCaptureRequestController) Reconcile(ctx context.Context, req ctrl
 	}
 
 	// Process based on mode
+	l.Info("Processing VCR", "mode", vcr.Spec.Mode)
 	switch vcr.Spec.Mode {
 	case ModeSnapshot:
 		return r.processSnapshotMode(ctx, &vcr)
 	case ModeDetach:
 		return r.processDetachMode(ctx, &vcr)
 	default:
+		l.Error(nil, "Unknown mode", "mode", vcr.Spec.Mode)
 		base := vcr.DeepCopy()
 		vcr.Status.ObservedGeneration = vcr.Generation
 		now := metav1.Now()
@@ -172,65 +182,87 @@ func (r *VolumeCaptureRequestController) Reconcile(ctx context.Context, req ctrl
 // - TTL and request cleanup are handled by VCR controller, not ObjectKeeper
 func (r *VolumeCaptureRequestController) processSnapshotMode(ctx context.Context, vcr *storagev1alpha1.VolumeCaptureRequest) (ctrl.Result, error) {
 	l := log.FromContext(ctx).WithValues("vcr", fmt.Sprintf("%s/%s", vcr.Namespace, vcr.Name), "mode", "Snapshot")
+	l.Info("Processing VolumeCaptureRequest in Snapshot mode")
 
 	// 1. Validate spec
 	if vcr.Spec.PersistentVolumeClaimRef == nil {
+		l.Error(nil, "PersistentVolumeClaimRef is required")
 		return r.markFailed(ctx, vcr, ErrorReasonInternalError, "PersistentVolumeClaimRef is required")
 	}
 	if vcr.Spec.VolumeSnapshotClassName == "" {
+		l.Error(nil, "VolumeSnapshotClassName is required for Snapshot mode")
 		return r.markFailed(ctx, vcr, ErrorReasonInternalError, "VolumeSnapshotClassName is required for Snapshot mode")
 	}
+	l = l.WithValues("pvc", fmt.Sprintf("%s/%s", vcr.Spec.PersistentVolumeClaimRef.Namespace, vcr.Spec.PersistentVolumeClaimRef.Name), "vscClass", vcr.Spec.VolumeSnapshotClassName)
 
 	// 2. Check RBAC: try to get PVC (similar to MCR)
+	l.Info("Getting PVC", "pvc", fmt.Sprintf("%s/%s", vcr.Spec.PersistentVolumeClaimRef.Namespace, vcr.Spec.PersistentVolumeClaimRef.Name))
 	pvc := &corev1.PersistentVolumeClaim{}
 	if err := r.Get(ctx, client.ObjectKey{
 		Namespace: vcr.Spec.PersistentVolumeClaimRef.Namespace,
 		Name:      vcr.Spec.PersistentVolumeClaimRef.Name,
 	}, pvc); err != nil {
 		if apierrors.IsNotFound(err) {
+			l.Error(err, "PVC not found")
 			return r.markFailed(ctx, vcr, ErrorReasonNotFound, fmt.Sprintf("PVC %s/%s not found", vcr.Spec.PersistentVolumeClaimRef.Namespace, vcr.Spec.PersistentVolumeClaimRef.Name))
 		}
 		if apierrors.IsForbidden(err) {
+			l.Error(err, "Access denied to PVC")
 			return r.markFailed(ctx, vcr, ErrorReasonRBACDenied, fmt.Sprintf("Access denied to PVC %s/%s", vcr.Spec.PersistentVolumeClaimRef.Namespace, vcr.Spec.PersistentVolumeClaimRef.Name))
 		}
+		l.Error(err, "Failed to get PVC")
 		return ctrl.Result{}, fmt.Errorf("failed to get PVC: %w", err)
 	}
+	l.Info("PVC found", "volumeName", pvc.Spec.VolumeName)
 
 	// 3. Check if PVC is bound
 	if pvc.Spec.VolumeName == "" {
+		l.Error(nil, "PVC is not bound")
 		return r.markFailed(ctx, vcr, ErrorReasonInternalError, fmt.Sprintf("PVC %s/%s is not bound", pvc.Namespace, pvc.Name))
 	}
 
 	// 4. Get PV to extract volume handle
+	l.Info("Getting PV", "pv", pvc.Spec.VolumeName)
 	pv := &corev1.PersistentVolume{}
 	if err := r.Get(ctx, client.ObjectKey{Name: pvc.Spec.VolumeName}, pv); err != nil {
 		if apierrors.IsNotFound(err) {
+			l.Error(err, "PV not found")
 			return r.markFailed(ctx, vcr, ErrorReasonNotFound, fmt.Sprintf("PV %s not found", pvc.Spec.VolumeName))
 		}
+		l.Error(err, "Failed to get PV")
 		return ctrl.Result{}, fmt.Errorf("failed to get PV: %w", err)
 	}
 
 	// Check if PV has CSI volume handle
 	if pv.Spec.CSI == nil || pv.Spec.CSI.VolumeHandle == "" {
+		l.Error(nil, "PV does not have CSI volume handle", "pv", pv.Name, "hasCSI", pv.Spec.CSI != nil)
 		return r.markFailed(ctx, vcr, ErrorReasonInternalError, fmt.Sprintf("PV %s does not have CSI volume handle", pv.Name))
 	}
+	l.Info("PV found", "driver", pv.Spec.CSI.Driver, "volumeHandle", pv.Spec.CSI.VolumeHandle)
 
 	// 5. Validate VolumeSnapshotClass (needed for VSC creation)
+	l.Info("Getting VolumeSnapshotClass", "vscClass", vcr.Spec.VolumeSnapshotClassName)
 	vscClass := &snapshotv1.VolumeSnapshotClass{}
 	if err := r.Get(ctx, client.ObjectKey{Name: vcr.Spec.VolumeSnapshotClassName}, vscClass); err != nil {
 		if apierrors.IsNotFound(err) {
+			l.Error(err, "VolumeSnapshotClass not found")
 			return r.markFailed(ctx, vcr, ErrorReasonNotFound, fmt.Sprintf("VolumeSnapshotClass %s not found", vcr.Spec.VolumeSnapshotClassName))
 		}
+		l.Error(err, "Failed to get VolumeSnapshotClass")
 		return ctrl.Result{}, fmt.Errorf("failed to get VolumeSnapshotClass: %w", err)
 	}
+	l.Info("VolumeSnapshotClass found", "driver", vscClass.Driver)
 
 	// Validate that VolumeSnapshotClass driver matches PV CSI driver
 	if vscClass.Driver != pv.Spec.CSI.Driver {
+		l.Error(nil, "VolumeSnapshotClass driver does not match PV CSI driver",
+			"vscDriver", vscClass.Driver, "pvDriver", pv.Spec.CSI.Driver)
 		return r.markFailed(ctx, vcr, ErrorReasonInternalError,
 			fmt.Sprintf("VolumeSnapshotClass driver %s does not match PV CSI driver %s", vscClass.Driver, pv.Spec.CSI.Driver))
 	}
 
 	// 6. Create ObjectKeeper FIRST - before creating VSC
+	l.Info("Creating ObjectKeeper")
 	// ObjectKeeper is a pure ownership anchor that follows VCR lifecycle.
 	// It owns resulting artifacts (VSC/PV) and is automatically deleted when VCR is deleted.
 	// TTL and request cleanup are handled by VCR controller, not ObjectKeeper.
@@ -262,9 +294,20 @@ func (r *VolumeCaptureRequestController) processSnapshotMode(ctx context.Context
 			return ctrl.Result{}, fmt.Errorf("failed to create ObjectKeeper: %w", err)
 		}
 		l.Info("Created ObjectKeeper", "name", retainerName)
-		// Re-read to get UID
-		if err := r.Get(ctx, client.ObjectKey{Name: retainerName}, objectKeeper); err != nil {
-			return ctrl.Result{}, fmt.Errorf("failed to get created ObjectKeeper: %w", err)
+		// After Create(), controller-runtime populates objectKeeper.UID automatically
+		// Use it directly if available, otherwise read via APIReader (bypasses cache)
+		if objectKeeper.UID == "" {
+			// UID not populated (shouldn't happen, but handle gracefully)
+			// Use APIReader to read directly from API server (bypasses informer cache)
+			if r.APIReader != nil {
+				if err := r.APIReader.Get(ctx, client.ObjectKey{Name: retainerName}, objectKeeper); err != nil {
+					// If still not found, requeue - object will be available on next reconcile
+					return ctrl.Result{RequeueAfter: 200 * time.Millisecond}, nil
+				}
+			} else {
+				// APIReader not available, requeue instead of blocking
+				return ctrl.Result{RequeueAfter: 200 * time.Millisecond}, nil
+			}
 		}
 	} else if err != nil {
 		return ctrl.Result{}, fmt.Errorf("failed to get ObjectKeeper: %w", err)
@@ -282,10 +325,17 @@ func (r *VolumeCaptureRequestController) processSnapshotMode(ctx context.Context
 
 	// 7. Create VolumeSnapshotContent directly (VCR is the source of truth)
 	// According to ADR: VCR creates VSC directly, no snapshot-controller involvement
+	//
+	// IMPORTANT: VCR does NOT recreate VSC after terminal errors.
+	// If VSC exists but has errors, VCR will mark itself as Failed (see step 8).
+	// This ensures VCR is a fire-and-forget operation without retry logic.
+	//
 	// Check if VSC already exists (idempotency - don't recreate)
+	l.Info("Checking for existing VolumeSnapshotContent", "vscName", csiVSCName)
 	csiVSC := &snapshotv1.VolumeSnapshotContent{}
 	err = r.Get(ctx, client.ObjectKey{Name: csiVSCName}, csiVSC)
 	if apierrors.IsNotFound(err) {
+		l.Info("VolumeSnapshotContent not found, creating new one")
 		// Create VSC with proper spec and ownerRefs
 		volumeHandle := pv.Spec.CSI.VolumeHandle
 		vscClassName := vcr.Spec.VolumeSnapshotClassName
@@ -319,33 +369,77 @@ func (r *VolumeCaptureRequestController) processSnapshotMode(ctx context.Context
 			return ctrl.Result{}, fmt.Errorf("failed to create VolumeSnapshotContent: %w", err)
 		}
 		l.Info("Created VolumeSnapshotContent", "name", csiVSCName)
-		// Re-read VSC to get latest state (including UID) before checking ReadyToUse
-		if err := r.Get(ctx, client.ObjectKey{Name: csiVSCName}, csiVSC); err != nil {
-			return ctrl.Result{}, fmt.Errorf("failed to get created VolumeSnapshotContent: %w", err)
+		// After Create(), controller-runtime populates csiVSC.UID automatically
+		// Use it directly if available, otherwise read via APIReader (bypasses cache)
+		// For newly created VSC, Status will be empty - external-snapshotter will update it on next reconcile
+		// So we requeue to let external-snapshotter process the VSC and update Status
+		if csiVSC.UID == "" {
+			// UID not populated (shouldn't happen, but handle gracefully)
+			// Use APIReader to read directly from API server (bypasses informer cache)
+			if r.APIReader != nil {
+				if err := r.APIReader.Get(ctx, client.ObjectKey{Name: csiVSCName}, csiVSC); err != nil {
+					// If still not found, requeue - object will be available on next reconcile
+					return ctrl.Result{RequeueAfter: 200 * time.Millisecond}, nil
+				}
+			} else {
+				// APIReader not available, requeue instead of blocking
+				return ctrl.Result{RequeueAfter: 200 * time.Millisecond}, nil
+			}
 		}
-		// Continue to check ReadyToUse below (don't requeue immediately - check status first)
+		// Newly created VSC won't have Status yet - requeue to let external-snapshotter process it
+		return ctrl.Result{RequeueAfter: 1 * time.Second}, nil
 	} else if err != nil {
 		return ctrl.Result{}, fmt.Errorf("failed to get VolumeSnapshotContent: %w", err)
 	}
 	// VSC exists - continue to wait for ReadyToUse (idempotency)
 
 	// 8. Wait for external-snapshotter to set ReadyToUse=true on VSC
-	// external-snapshotter will detect VSC, call CSI CreateSnapshot, and set ReadyToUse when snapshot is ready
-	if csiVSC.Status == nil || csiVSC.Status.ReadyToUse == nil || !*csiVSC.Status.ReadyToUse {
-		// Check for terminal CSI errors (e.g., broken driver, invalid parameters, secret issues)
-		// Terminal error: Status.Error.Message is set and non-empty
-		if csiVSC.Status != nil && csiVSC.Status.Error != nil && csiVSC.Status.Error.Message != nil && *csiVSC.Status.Error.Message != "" {
-			errorMsg := *csiVSC.Status.Error.Message
-			// Include VSC name and PVC name in error message for better debugging
-			errorDetails := fmt.Sprintf("VSC %s, PVC %s/%s: %s", csiVSCName, pvc.Namespace, pvc.Name, errorMsg)
-			// Include error time if available
-			if csiVSC.Status.Error.Time != nil {
-				errorDetails = fmt.Sprintf("%s (error time: %s)", errorDetails, csiVSC.Status.Error.Time.Format(time.RFC3339))
-			}
-			// Mark VCR as failed with DataRef pointing to the problematic VSC
-			return r.markFailedSnapshot(ctx, vcr, csiVSCName, ErrorReasonSnapshotCreationFailed,
-				fmt.Sprintf("CSI snapshot creation failed: %s", errorDetails))
+	//
+	// Decision algorithm (according to ADR):
+	//   if VCR Ready or Failed (observed):
+	//       exit reconcile
+	//   if VSC not found:
+	//       create VSC
+	//       requeue
+	//   if VSC.status.error exists (regardless of ReadyToUse):
+	//       mark VCR Failed
+	//       exit reconcile
+	//   if VSC.status.readyToUse == true:
+	//       mark VCR Ready
+	//       exit reconcile
+	//   else:
+	//       requeue (wait for snapshot-controller)
+	//
+	// VCR is a fire-and-forget operation:
+	//   - VCR does NOT recreate VSC after terminal errors
+	//   - VCR does NOT try to "heal" VSC
+	//   - VSC.status.error is the single source of truth for snapshot errors
+	//   - Any terminal error in VSC → terminal state in VCR
+	//   - Error has priority over ReadyToUse (if both exist, error wins)
+
+	// Check for terminal CSI errors FIRST (error has priority over ReadyToUse)
+	// Terminal error: Status.Error.Message is set and non-empty
+	// Examples: "provided secret is empty", NotFound/Forbidden for secrets, invalid arguments, PermissionDenied
+	// VCR does NOT interpret CSI error codes - it only checks for presence of error message
+	// IMPORTANT: Check error even if ReadyToUse==true (error has priority)
+	if csiVSC.Status != nil && csiVSC.Status.Error != nil && csiVSC.Status.Error.Message != nil && *csiVSC.Status.Error.Message != "" {
+		errorMsg := *csiVSC.Status.Error.Message
+		// Include VSC name and PVC name in error message for better debugging
+		errorDetails := fmt.Sprintf("VSC %s, PVC %s/%s: %s", csiVSCName, pvc.Namespace, pvc.Name, errorMsg)
+		// Include error time if available
+		if csiVSC.Status.Error.Time != nil {
+			errorDetails = fmt.Sprintf("%s (error time: %s)", errorDetails, csiVSC.Status.Error.Time.Format(time.RFC3339))
 		}
+		// Mark VCR as failed with DataRef pointing to the problematic VSC
+		// This is a terminal error - VCR will not retry or recreate VSC
+		return r.markFailedSnapshot(ctx, vcr, csiVSCName, ErrorReasonSnapshotCreationFailed,
+			fmt.Sprintf("CSI snapshot creation failed: %s", errorDetails))
+	}
+
+	// Check ReadyToUse status (only if no error)
+	if csiVSC.Status == nil || csiVSC.Status.ReadyToUse == nil || !*csiVSC.Status.ReadyToUse {
+		// Temporary state: VSC exists but snapshot-controller hasn't processed it yet
+		// This is NOT an error - just wait for snapshot-controller to update status
 		l.Info("Waiting for external-snapshotter to set ReadyToUse=true", "name", csiVSCName)
 		// Use longer requeue interval for snapshot operations to avoid API pressure
 		// External-snapshotter needs time to call CSI CreateSnapshot and update status
@@ -353,6 +447,8 @@ func (r *VolumeCaptureRequestController) processSnapshotMode(ctx context.Context
 	}
 
 	// 9. Update VCR status (VSC is ready)
+	// VSC.status.readyToUse == true → mark VCR as Ready (terminal success state)
+	// After this, VCR will not be reconciled again (fire-and-forget)
 	vcrBase := vcr.DeepCopy()
 	vcr.Status.DataRef = &storagev1alpha1.ObjectReference{
 		Name: csiVSCName,
@@ -819,7 +915,14 @@ func (r *VolumeCaptureRequestController) markFailed(ctx context.Context, vcr *st
 }
 
 // markFailedSnapshot marks VCR as failed with optional DataRef pointing to VSC
-// This is used when snapshot creation fails and we want to reference the problematic VSC
+//
+// This is used when snapshot creation fails and we want to reference the problematic VSC.
+// After calling this function, VCR enters a terminal Failed state and will not be reconciled again.
+//
+// VCR invariants:
+//   - Any terminal error in VSC → terminal state in VCR
+//   - VCR does NOT try to "heal" VSC or recreate it
+//   - VSC.status.error is the single source of truth for snapshot errors
 func (r *VolumeCaptureRequestController) markFailedSnapshot(ctx context.Context, vcr *storagev1alpha1.VolumeCaptureRequest, vscName, reason, message string) (ctrl.Result, error) {
 	vcrBase := vcr.DeepCopy()
 	vcr.Status.ObservedGeneration = vcr.Generation

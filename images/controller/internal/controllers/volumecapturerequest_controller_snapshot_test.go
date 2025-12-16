@@ -1146,6 +1146,463 @@ var _ = Describe("VolumeCaptureRequest Snapshot Mode", func() {
 				Expect(client.Get(ctx, types.NamespacedName{Name: "test-vcr-ttl-not-expired", Namespace: "default"}, updatedVCR)).To(Succeed())
 			})
 		})
+
+		Describe("Error scenarios and resilience", func() {
+			var (
+				vcr      *storagev1alpha1.VolumeCaptureRequest
+				pvc      *corev1.PersistentVolumeClaim
+				pv       *corev1.PersistentVolume
+				vscClass *snapshotv1.VolumeSnapshotClass
+			)
+
+			BeforeEach(func() {
+				// Setup common resources
+				pvc = &corev1.PersistentVolumeClaim{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "test-pvc",
+						Namespace: "default",
+					},
+					Spec: corev1.PersistentVolumeClaimSpec{
+						VolumeName: "test-pv",
+					},
+				}
+				Expect(client.Create(ctx, pvc)).To(Succeed())
+
+				pv = &corev1.PersistentVolume{
+					ObjectMeta: metav1.ObjectMeta{
+						Name: "test-pv",
+					},
+					Spec: corev1.PersistentVolumeSpec{
+						PersistentVolumeSource: corev1.PersistentVolumeSource{
+							CSI: &corev1.CSIPersistentVolumeSource{
+								Driver:       "cephfs.csi.ceph.com",
+								VolumeHandle: "test-volume-handle",
+							},
+						},
+					},
+				}
+				Expect(client.Create(ctx, pv)).To(Succeed())
+
+				vscClass = &snapshotv1.VolumeSnapshotClass{
+					ObjectMeta: metav1.ObjectMeta{
+						Name: "test-vsc-class",
+					},
+					Driver: "cephfs.csi.ceph.com",
+					Parameters: map[string]string{
+						"csi.storage.k8s.io/snapshotter-secret-name":      "csi-ceph-secret",
+						"csi.storage.k8s.io/snapshotter-secret-namespace": "d8-csi-ceph",
+					},
+				}
+				Expect(client.Create(ctx, vscClass)).To(Succeed())
+
+				vcr = &storagev1alpha1.VolumeCaptureRequest{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "test-vcr",
+						Namespace: "default",
+						// Don't set UID - let apiserver assign it
+					},
+					Spec: storagev1alpha1.VolumeCaptureRequestSpec{
+						Mode: ModeSnapshot,
+						PersistentVolumeClaimRef: &storagev1alpha1.ObjectReference{
+							Namespace: "default",
+							Name:      "test-pvc",
+						},
+						VolumeSnapshotClassName: "test-vsc-class",
+					},
+				}
+				Expect(client.Create(ctx, vcr)).To(Succeed())
+				// Re-read to get actual UID assigned by apiserver
+				Expect(client.Get(ctx, types.NamespacedName{Name: "test-vcr", Namespace: "default"}, vcr)).To(Succeed())
+				Expect(vcr.UID).ToNot(BeEmpty(), "VCR should have UID assigned by apiserver")
+			})
+
+			It("should fail VCR when secret is missing (secret not found error)", func() {
+				// Re-read VCR to get actual UID assigned by apiserver
+				Expect(client.Get(ctx, types.NamespacedName{Name: "test-vcr", Namespace: "default"}, vcr)).To(Succeed())
+				Expect(vcr.UID).ToNot(BeEmpty(), "VCR should have UID assigned by apiserver")
+
+				// Create ObjectKeeper (using actual VCR UID)
+				retainerName := NamePrefixRetainer + "snapshot-" + string(vcr.UID)
+				objectKeeper := &deckhousev1alpha1.ObjectKeeper{
+					ObjectMeta: metav1.ObjectMeta{
+						Name: retainerName,
+					},
+					Spec: deckhousev1alpha1.ObjectKeeperSpec{
+						Mode: "FollowObject",
+						FollowObjectRef: &deckhousev1alpha1.FollowObjectRef{
+							APIVersion: APIGroupStorageDeckhouse,
+							Kind:       KindVolumeCaptureRequest,
+							Namespace:  "default",
+							Name:       "test-vcr",
+							UID:        string(vcr.UID),
+						},
+					},
+				}
+				Expect(client.Create(ctx, objectKeeper)).To(Succeed())
+
+				// First reconcile: should create VSC
+				result, err := ctrl.processSnapshotMode(ctx, vcr)
+				Expect(err).ToNot(HaveOccurred())
+				Expect(result.RequeueAfter).To(BeNumerically(">", 0), "Should requeue while waiting for snapshot-controller")
+
+				// Verify VSC exists (using actual VCR UID)
+				vscName := "snapshot-" + string(vcr.UID)
+				vsc := &snapshotv1.VolumeSnapshotContent{}
+				Expect(client.Get(ctx, types.NamespacedName{Name: vscName}, vsc)).To(Succeed())
+
+				// Simulate snapshot-controller error: secret not found
+				errorMsg := "failed to get credentials from class parameters: secrets \"csi-ceph-secret\" not found"
+				vsc.Status = &snapshotv1.VolumeSnapshotContentStatus{
+					ReadyToUse: pointer.Bool(false),
+					Error: &snapshotv1.VolumeSnapshotError{
+						Message: &errorMsg,
+						Time:    &metav1.Time{Time: time.Now()},
+					},
+				}
+				Expect(client.Status().Update(ctx, vsc)).To(Succeed())
+
+				// Second reconcile: should detect error and mark VCR as failed
+				result, err = ctrl.processSnapshotMode(ctx, vcr)
+				Expect(err).ToNot(HaveOccurred())
+				Expect(result.Requeue).To(BeFalse(), "Should not requeue after terminal error")
+				Expect(result.RequeueAfter).To(Equal(time.Duration(0)), "Should not requeue after terminal error")
+
+				// Verify VCR is marked as failed
+				updatedVCR := &storagev1alpha1.VolumeCaptureRequest{}
+				Expect(client.Get(ctx, types.NamespacedName{Name: "test-vcr", Namespace: "default"}, updatedVCR)).To(Succeed())
+
+				readyCondition := getCondition(updatedVCR.Status.Conditions, ConditionTypeReady)
+				Expect(readyCondition).ToNot(BeNil())
+				Expect(readyCondition.Status).To(Equal(metav1.ConditionFalse))
+				Expect(readyCondition.Reason).To(Equal(ErrorReasonSnapshotCreationFailed))
+				Expect(readyCondition.Message).To(ContainSubstring(errorMsg))
+				Expect(updatedVCR.Status.ObservedGeneration).To(Equal(updatedVCR.Generation))
+				Expect(updatedVCR.Status.CompletionTimestamp).ToNot(BeNil())
+				Expect(updatedVCR.Status.DataRef).ToNot(BeNil())
+				Expect(updatedVCR.Status.DataRef.Name).To(Equal(vscName))
+			})
+
+			It("should handle different snapshot error types", func() {
+				// Create ObjectKeeper
+				retainerName := NamePrefixRetainer + "snapshot-vcr-uid-test"
+				objectKeeper := &deckhousev1alpha1.ObjectKeeper{
+					ObjectMeta: metav1.ObjectMeta{
+						Name: retainerName,
+						UID:  types.UID("retainer-uid-test"),
+					},
+					Spec: deckhousev1alpha1.ObjectKeeperSpec{
+						Mode: "FollowObject",
+						FollowObjectRef: &deckhousev1alpha1.FollowObjectRef{
+							APIVersion: APIGroupStorageDeckhouse,
+							Kind:       KindVolumeCaptureRequest,
+							Namespace:  "default",
+							Name:       "test-vcr",
+							UID:        "vcr-uid-test",
+						},
+					},
+				}
+				Expect(client.Create(ctx, objectKeeper)).To(Succeed())
+
+				// Test different error types from VSC.status.error
+				// Note: "driver mismatch" is NOT a VSC error - it's validated by VCR controller before VSC creation
+				errorScenarios := []struct {
+					nameSlug string // Valid Kubernetes name (no spaces, lowercase)
+					name     string // Human-readable name for By() message
+					errorMsg string
+				}{
+					{
+						nameSlug: "provided-secret-is-empty",
+						name:     "provided secret is empty",
+						errorMsg: "rpc error: code = Unknown desc = provided secret is empty",
+					},
+					{
+						nameSlug: "invalid-argument",
+						name:     "invalid argument",
+						errorMsg: "rpc error: code = InvalidArgument desc = invalid snapshot parameters",
+					},
+					{
+						nameSlug: "permission-denied",
+						name:     "permission denied",
+						errorMsg: "rpc error: code = PermissionDenied desc = access denied",
+					},
+				}
+
+				for _, scenario := range errorScenarios {
+					By("Testing error scenario: " + scenario.name)
+
+					// Create fresh VCR for each scenario (without UID - let apiserver assign it)
+					vcrName := "test-vcr-" + scenario.nameSlug
+					testVCR := vcr.DeepCopy()
+					testVCR.Name = vcrName
+					testVCR.UID = "" // Let apiserver assign UID
+					Expect(client.Create(ctx, testVCR)).To(Succeed())
+
+					// Re-read VCR to get actual UID assigned by apiserver
+					Expect(client.Get(ctx, types.NamespacedName{Name: vcrName, Namespace: "default"}, testVCR)).To(Succeed())
+					Expect(testVCR.UID).ToNot(BeEmpty(), "VCR should have UID assigned by apiserver")
+
+					// Create ObjectKeeper for this VCR (using actual UID)
+					testRetainerName := NamePrefixRetainer + "snapshot-" + string(testVCR.UID)
+					testObjectKeeper := objectKeeper.DeepCopy()
+					testObjectKeeper.Name = testRetainerName
+					testObjectKeeper.UID = "" // Let apiserver assign UID
+					testObjectKeeper.Spec.FollowObjectRef.UID = string(testVCR.UID)
+					testObjectKeeper.Spec.FollowObjectRef.Name = vcrName
+					Expect(client.Create(ctx, testObjectKeeper)).To(Succeed())
+
+					// Re-read ObjectKeeper to get actual UID
+					Expect(client.Get(ctx, types.NamespacedName{Name: testRetainerName}, testObjectKeeper)).To(Succeed())
+					Expect(testObjectKeeper.UID).ToNot(BeEmpty(), "ObjectKeeper should have UID assigned by apiserver")
+
+					// First reconcile: create VSC
+					_, err := ctrl.processSnapshotMode(ctx, testVCR)
+					Expect(err).ToNot(HaveOccurred())
+
+					// Set error on VSC (using actual VCR UID for VSC name)
+					vscName := "snapshot-" + string(testVCR.UID)
+					vsc := &snapshotv1.VolumeSnapshotContent{}
+					Expect(client.Get(ctx, types.NamespacedName{Name: vscName}, vsc)).To(Succeed())
+					vsc.Status = &snapshotv1.VolumeSnapshotContentStatus{
+						ReadyToUse: pointer.Bool(false),
+						Error: &snapshotv1.VolumeSnapshotError{
+							Message: &scenario.errorMsg,
+							Time:    &metav1.Time{Time: time.Now()},
+						},
+					}
+					Expect(client.Status().Update(ctx, vsc)).To(Succeed())
+
+					// Second reconcile: should detect error
+					result, err := ctrl.processSnapshotMode(ctx, testVCR)
+					Expect(err).ToNot(HaveOccurred())
+					Expect(result.Requeue).To(BeFalse(), "Should not requeue after terminal error")
+					Expect(result.RequeueAfter).To(Equal(time.Duration(0)), "Should not requeue after terminal error")
+
+					// Verify VCR is failed
+					updatedVCR := &storagev1alpha1.VolumeCaptureRequest{}
+					Expect(client.Get(ctx, types.NamespacedName{Name: vcrName, Namespace: "default"}, updatedVCR)).To(Succeed())
+					readyCondition := getCondition(updatedVCR.Status.Conditions, ConditionTypeReady)
+					Expect(readyCondition).ToNot(BeNil())
+					Expect(readyCondition.Status).To(Equal(metav1.ConditionFalse))
+					Expect(readyCondition.Reason).To(Equal(ErrorReasonSnapshotCreationFailed))
+					Expect(readyCondition.Message).To(ContainSubstring(scenario.errorMsg))
+				}
+			})
+
+			It("should create ObjectKeeper if it doesn't exist", func() {
+				// Re-read VCR to get actual UID
+				Expect(client.Get(ctx, types.NamespacedName{Name: "test-vcr", Namespace: "default"}, vcr)).To(Succeed())
+				Expect(vcr.UID).ToNot(BeEmpty())
+
+				// ObjectKeeper should NOT exist yet
+				retainerName := NamePrefixRetainer + "snapshot-" + string(vcr.UID)
+				objectKeeper := &deckhousev1alpha1.ObjectKeeper{}
+				err := client.Get(ctx, types.NamespacedName{Name: retainerName}, objectKeeper)
+				Expect(apierrors.IsNotFound(err)).To(BeTrue(), "ObjectKeeper should not exist before reconcile")
+
+				// First reconcile: should create ObjectKeeper
+				result, err := ctrl.processSnapshotMode(ctx, vcr)
+				Expect(err).ToNot(HaveOccurred())
+				Expect(result.RequeueAfter).To(BeNumerically(">", 0))
+
+				// Verify ObjectKeeper was created by controller
+				Expect(client.Get(ctx, types.NamespacedName{Name: retainerName}, objectKeeper)).To(Succeed())
+				Expect(objectKeeper.Spec.Mode).To(Equal("FollowObject"))
+				Expect(objectKeeper.Spec.FollowObjectRef).ToNot(BeNil())
+				Expect(objectKeeper.Spec.FollowObjectRef.UID).To(Equal(string(vcr.UID)))
+				Expect(objectKeeper.Spec.FollowObjectRef.Name).To(Equal("test-vcr"))
+				Expect(objectKeeper.Spec.FollowObjectRef.Namespace).To(Equal("default"))
+			})
+
+			It("should prioritize error over ReadyToUse (error wins even if ReadyToUse=true)", func() {
+				// Re-read VCR to get actual UID
+				Expect(client.Get(ctx, types.NamespacedName{Name: "test-vcr", Namespace: "default"}, vcr)).To(Succeed())
+				Expect(vcr.UID).ToNot(BeEmpty())
+
+				// First reconcile: create ObjectKeeper and VSC
+				result, err := ctrl.processSnapshotMode(ctx, vcr)
+				Expect(err).ToNot(HaveOccurred())
+				Expect(result.RequeueAfter).To(BeNumerically(">", 0))
+
+				// Simulate edge case: VSC has both ReadyToUse=true AND error
+				// This shouldn't happen in practice, but we handle it defensively
+				vscName := "snapshot-" + string(vcr.UID)
+				vsc := &snapshotv1.VolumeSnapshotContent{}
+				Expect(client.Get(ctx, types.NamespacedName{Name: vscName}, vsc)).To(Succeed())
+				errorMsg := "rpc error: code = Unknown desc = provided secret is empty"
+				vsc.Status = &snapshotv1.VolumeSnapshotContentStatus{
+					ReadyToUse: pointer.Bool(true), // ReadyToUse=true
+					Error: &snapshotv1.VolumeSnapshotError{
+						Message: &errorMsg, // But error exists
+						Time:    &metav1.Time{Time: time.Now()},
+					},
+				}
+				Expect(client.Status().Update(ctx, vsc)).To(Succeed())
+
+				// Reconcile: should detect error and fail VCR (error has priority)
+				result, err = ctrl.processSnapshotMode(ctx, vcr)
+				Expect(err).ToNot(HaveOccurred())
+				Expect(result.Requeue).To(BeFalse(), "Should not requeue after terminal error")
+				Expect(result.RequeueAfter).To(Equal(time.Duration(0)), "Should not requeue after terminal error")
+
+				// Verify VCR is failed (error wins over ReadyToUse)
+				updatedVCR := &storagev1alpha1.VolumeCaptureRequest{}
+				Expect(client.Get(ctx, types.NamespacedName{Name: "test-vcr", Namespace: "default"}, updatedVCR)).To(Succeed())
+				readyCondition := getCondition(updatedVCR.Status.Conditions, ConditionTypeReady)
+				Expect(readyCondition).ToNot(BeNil())
+				Expect(readyCondition.Status).To(Equal(metav1.ConditionFalse), "Error should have priority over ReadyToUse")
+				Expect(readyCondition.Reason).To(Equal(ErrorReasonSnapshotCreationFailed))
+				Expect(readyCondition.Message).To(ContainSubstring(errorMsg))
+			})
+
+			It("should handle controller restart gracefully (idempotency)", func() {
+				// Re-read VCR to get actual UID
+				Expect(client.Get(ctx, types.NamespacedName{Name: "test-vcr", Namespace: "default"}, vcr)).To(Succeed())
+				Expect(vcr.UID).ToNot(BeEmpty())
+
+				// First reconcile: create ObjectKeeper and VSC
+				result, err := ctrl.processSnapshotMode(ctx, vcr)
+				Expect(err).ToNot(HaveOccurred())
+				Expect(result.RequeueAfter).To(BeNumerically(">", 0))
+
+				// Verify ObjectKeeper exists
+				retainerName := NamePrefixRetainer + "snapshot-" + string(vcr.UID)
+				objectKeeper := &deckhousev1alpha1.ObjectKeeper{}
+				Expect(client.Get(ctx, types.NamespacedName{Name: retainerName}, objectKeeper)).To(Succeed())
+				originalOKUID := objectKeeper.UID
+				Expect(originalOKUID).ToNot(BeEmpty())
+
+				// Verify VSC exists
+				vscName := "snapshot-" + string(vcr.UID)
+				vsc := &snapshotv1.VolumeSnapshotContent{}
+				Expect(client.Get(ctx, types.NamespacedName{Name: vscName}, vsc)).To(Succeed())
+				originalVSCUID := vsc.UID
+				Expect(originalVSCUID).ToNot(BeEmpty())
+
+				// Simulate controller restart: create new controller instance with same client
+				// This simulates the scenario where controller restarts but state persists in API server
+				// Note: In envtest, client is not cached, so APIReader can be same as Client
+				// In production, APIReader bypasses cache for read-after-write scenarios
+				newCtrl := &VolumeCaptureRequestController{
+					Client:    client,
+					APIReader: client, // In envtest client is not cached, so this is sufficient
+					Scheme:    scheme,
+					Config:    cfg,
+				}
+
+				// Re-read VCR from API (simulating controller restart)
+				restartedVCR := &storagev1alpha1.VolumeCaptureRequest{}
+				Expect(client.Get(ctx, types.NamespacedName{Name: "test-vcr", Namespace: "default"}, restartedVCR)).To(Succeed())
+
+				// Second reconcile with "restarted" controller: should be idempotent
+				// Should not recreate VSC, should continue waiting
+				result, err = newCtrl.processSnapshotMode(ctx, restartedVCR)
+				Expect(err).ToNot(HaveOccurred())
+				Expect(result.RequeueAfter).To(BeNumerically(">", 0), "Should still requeue while waiting")
+
+				// Verify VSC still exists and wasn't recreated
+				existingVSC := &snapshotv1.VolumeSnapshotContent{}
+				Expect(client.Get(ctx, types.NamespacedName{Name: vscName}, existingVSC)).To(Succeed())
+				Expect(existingVSC.UID).To(Equal(originalVSCUID), "VSC should not be recreated")
+
+				// Verify ObjectKeeper still exists
+				existingOK := &deckhousev1alpha1.ObjectKeeper{}
+				Expect(client.Get(ctx, types.NamespacedName{Name: retainerName}, existingOK)).To(Succeed())
+				Expect(existingOK.UID).To(Equal(originalOKUID), "ObjectKeeper should not be recreated")
+
+				// Now simulate ReadyToUse=true
+				existingVSC.Status = &snapshotv1.VolumeSnapshotContentStatus{
+					ReadyToUse: pointer.Bool(true),
+				}
+				Expect(client.Status().Update(ctx, existingVSC)).To(Succeed())
+
+				// Third reconcile: should complete successfully
+				result, err = newCtrl.processSnapshotMode(ctx, restartedVCR)
+				Expect(err).ToNot(HaveOccurred())
+				Expect(result.Requeue).To(BeFalse())
+				Expect(result.RequeueAfter).To(Equal(time.Duration(0)))
+
+				// Verify VCR is Ready
+				finalVCR := &storagev1alpha1.VolumeCaptureRequest{}
+				Expect(client.Get(ctx, types.NamespacedName{Name: "test-vcr", Namespace: "default"}, finalVCR)).To(Succeed())
+				readyCondition := getCondition(finalVCR.Status.Conditions, ConditionTypeReady)
+				Expect(readyCondition).ToNot(BeNil())
+				Expect(readyCondition.Status).To(Equal(metav1.ConditionTrue))
+			})
+
+			It("should handle leader switch gracefully (multiple reconciles)", func() {
+				// Re-read VCR to get actual UID
+				Expect(client.Get(ctx, types.NamespacedName{Name: "test-vcr", Namespace: "default"}, vcr)).To(Succeed())
+				Expect(vcr.UID).ToNot(BeEmpty())
+
+				// Simulate leader 1: first reconcile creates ObjectKeeper and VSC
+				result, err := ctrl.processSnapshotMode(ctx, vcr)
+				Expect(err).ToNot(HaveOccurred())
+				Expect(result.RequeueAfter).To(BeNumerically(">", 0))
+
+				// Verify ObjectKeeper exists
+				retainerName := NamePrefixRetainer + "snapshot-" + string(vcr.UID)
+				objectKeeper := &deckhousev1alpha1.ObjectKeeper{}
+				Expect(client.Get(ctx, types.NamespacedName{Name: retainerName}, objectKeeper)).To(Succeed())
+
+				// Verify VSC exists
+				vscName := "snapshot-" + string(vcr.UID)
+				vsc := &snapshotv1.VolumeSnapshotContent{}
+				Expect(client.Get(ctx, types.NamespacedName{Name: vscName}, vsc)).To(Succeed())
+
+				// Simulate leader switch: new controller instance (leader 2)
+				// In real scenario, leader election ensures only one controller processes requests
+				// But we test that multiple reconciles are idempotent
+				// Note: In envtest, client is not cached, so APIReader can be same as Client
+				leader2Ctrl := &VolumeCaptureRequestController{
+					Client:    client,
+					APIReader: client, // In envtest client is not cached, so this is sufficient
+					Scheme:    scheme,
+					Config:    cfg,
+				}
+
+				// Leader 2 reconciles: should be idempotent, should not recreate resources
+				reReadVCR := &storagev1alpha1.VolumeCaptureRequest{}
+				Expect(client.Get(ctx, types.NamespacedName{Name: "test-vcr", Namespace: "default"}, reReadVCR)).To(Succeed())
+
+				result, err = leader2Ctrl.processSnapshotMode(ctx, reReadVCR)
+				Expect(err).ToNot(HaveOccurred())
+				Expect(result.RequeueAfter).To(BeNumerically(">", 0), "Should still requeue while waiting")
+
+				// Verify resources weren't duplicated
+				vscList := &snapshotv1.VolumeSnapshotContentList{}
+				Expect(client.List(ctx, vscList)).To(Succeed())
+				Expect(vscList.Items).To(HaveLen(1), "Should have exactly one VSC")
+
+				okList := &deckhousev1alpha1.ObjectKeeperList{}
+				Expect(client.List(ctx, okList)).To(Succeed())
+				Expect(okList.Items).To(HaveLen(1), "Should have exactly one ObjectKeeper")
+
+				// Simulate ReadyToUse=true
+				vsc.Status = &snapshotv1.VolumeSnapshotContentStatus{
+					ReadyToUse: pointer.Bool(true),
+				}
+				Expect(client.Status().Update(ctx, vsc)).To(Succeed())
+
+				// Leader 1 reconciles again: should complete
+				result, err = ctrl.processSnapshotMode(ctx, vcr)
+				Expect(err).ToNot(HaveOccurred())
+				Expect(result.Requeue).To(BeFalse())
+				Expect(result.RequeueAfter).To(Equal(time.Duration(0)))
+
+				// Verify VCR is Ready
+				finalVCR := &storagev1alpha1.VolumeCaptureRequest{}
+				Expect(client.Get(ctx, types.NamespacedName{Name: "test-vcr", Namespace: "default"}, finalVCR)).To(Succeed())
+				readyCondition := getCondition(finalVCR.Status.Conditions, ConditionTypeReady)
+				Expect(readyCondition).ToNot(BeNil())
+				Expect(readyCondition.Status).To(Equal(metav1.ConditionTrue))
+
+				// Leader 2 reconciles again: should be no-op (already Ready)
+				result, err = leader2Ctrl.processSnapshotMode(ctx, finalVCR)
+				Expect(err).ToNot(HaveOccurred())
+				Expect(result.Requeue).To(BeFalse())
+				Expect(result.RequeueAfter).To(Equal(time.Duration(0)))
+			})
+		})
 	})
 })
 
