@@ -4,9 +4,22 @@
 - `state-snapshotter` (ManifestCaptureRequest, ManifestCheckpoint)
 - `storage-foundation` (VolumeCaptureRequest, VolumeRestoreRequest)
 
+**Важно:** Все описанные здесь паттерны применяются к обоим модулям. Если паттерн касается обоих модулей, он описан как общий принцип без разделений на конкретные реализации.
+
 ## Название паттерна
 
 **Deckhouse Fire-and-Forget Operation Controller**
+
+### Что означает Fire-and-Forget
+
+Fire-and-Forget означает:
+- контроллер инициирует операцию один раз
+- не управляет её выполнением
+- не делает повторных попыток
+- не переходит в state machine
+- не переиспользует Request
+
+Контроллер не "забывает" объект, а **не возвращается к нему логически** после достижения терминального состояния.
 
 ---
 
@@ -29,20 +42,11 @@
 
 ### Реализация
 
-✅ **storage-foundation**: `VolumeCaptureRequestController`, `VolumeRestoreRequestController`
-- Создают VSC/PVC, ждут CSI
-- Не ретрают операции
-- Транслируют статусы внешних объектов
+Контроллеры создают артефакты (VSC/PVC, ManifestCheckpoint, ObjectKeeper) и транслируют статусы внешних объектов в Status Request-ресурса.
 
-✅ **state-snapshotter**: `ManifestCheckpointController`
-- Создает ObjectKeeper, ManifestCheckpoint
-- Ждёт внешние контроллеры
-- Агрегирует состояние в Status
-
-**Файлы:**
-- `images/controller/internal/controllers/volumecapturerequest_controller.go`
-- `images/controller/internal/controllers/volumerestorerequest_controller.go`
-- `images/state-snapshotter-controller/internal/controllers/manifestcheckpoint_controller.go`
+**Примеры:**
+- `VolumeCaptureRequestController`, `VolumeRestoreRequestController` (storage-foundation)
+- `ManifestCheckpointController` (state-snapshotter)
 
 ---
 
@@ -76,15 +80,7 @@
 
 ### Реализация
 
-✅ **storage-foundation**: 
-- VCR/VRR после Ready не пересоздаются
-- Проверка `isConditionTrue(vcr.Status.Conditions, ConditionTypeReady)` → skip reconcile
-- `images/controller/internal/controllers/volumecapturerequest_controller.go:112-116`
-
-✅ **state-snapshotter**:
-- MCR после Ready не пересоздаются
-- Проверка `readyCondition.Status == metav1.ConditionTrue` → skip reconcile
-- `images/state-snapshotter-controller/internal/controllers/manifestcheckpoint_controller.go:103`
+После достижения терминального состояния (Ready=True или Ready=False) reconcile должен немедленно завершаться без обработки. Проверка терминальности выполняется в начале reconcile через проверку наличия Ready condition с финальным статусом.
 
 ---
 
@@ -92,33 +88,15 @@
 
 ### Общее
 
-Статус → `Ready=True | Ready=False`
+После установки Ready condition объект считается **immutable**.
 
-После этого:
-- `ObservedGeneration` фиксируется
-- reconcile больше ничего не делает
-
-**Важно:** Используется только один condition — `Ready`:
-- `Ready=True` — успешное завершение операции
-- `Ready=False` — финальная ошибка (с соответствующим `Reason`)
-- Condition выставляется только в финальном состоянии
+Reconcile обязан немедленно завершаться без обработки. Единственное допустимое последующее действие — TTL cleanup через scanner.
 
 ### Ошибка = терминальная
 
 Если внешний объект (VSC / Job / Pod / Checkpoint) сказал Error, контроллер транслирует в `Ready=False` с соответствующим `Reason`, а не интерпретирует.
 
-### Реализация
-
-✅ **storage-foundation**:
-- `ObservedGeneration` фиксируется при `Ready=True` или `Ready=False`
-- `images/controller/internal/controllers/volumecapturerequest_controller.go:112-123`
-- Ошибки VSC транслируются в `Ready=False` с соответствующим `Reason`
-- Константы условий: `storagev1alpha1.ConditionTypeReady`, `storagev1alpha1.ConditionReason*` из `api/v1alpha1/conditions.go`
-
-✅ **state-snapshotter**:
-- `ObservedGeneration` фиксируется при `Ready=True` или `Ready=False`
-- Ошибки внешних объектов транслируются в `Ready=False` с соответствующим `Reason`
-- Константы условий: `storagev1alpha1.ConditionTypeReady`, `storagev1alpha1.ConditionReason*` из `api/v1alpha1/conditions.go`
+Все ошибки транслируются в `Ready=False`. Детали ошибки передаются через `Message`, категоризация — через соответствующие `Reason` константы из `api/v1alpha1/conditions.go`.
 
 ---
 
@@ -141,15 +119,17 @@
 
 ### Реализация
 
-✅ **storage-foundation**:
-- VCR не владеет VSC/PV напрямую
-- ObjectKeeper — controller owner VSC/PV
-- `images/controller/internal/controllers/volumecapturerequest_controller.go:388-396`
+Request создаёт ObjectKeeper, который становится controller owner артефактов (VSC/PV, ManifestCheckpoint). При удалении Request автоматически удаляются ObjectKeeper и все артефакты через стандартный Kubernetes GC.
 
-✅ **state-snapshotter**:
-- MCR не владеет ManifestCheckpoint напрямую
-- ObjectKeeper — controller owner ManifestCheckpoint
-- `images/state-snapshotter-controller/internal/controllers/manifestcheckpoint_controller.go:556-558`
+```
+Request
+   |
+   v
+ObjectKeeper (FollowObject)
+   |
+   v
+Artifacts (VSC / MCP / Chunks)
+```
 
 ---
 
@@ -170,15 +150,7 @@ ObjectKeeper — ownership anchor:
 
 ### Реализация
 
-✅ **storage-foundation**:
-- ObjectKeeper создается с `FollowObject` режимом
-- `images/controller/internal/controllers/volumecapturerequest_controller.go:320-340`
-- Нет TTL у ObjectKeeper
-
-✅ **state-snapshotter**:
-- ObjectKeeper создается с `FollowObject` режимом
-- `images/state-snapshotter-controller/internal/controllers/manifestcheckpoint_controller.go:442-494`
-- Нет TTL у ObjectKeeper
+ObjectKeeper создается с режимом `FollowObject` и не имеет TTL. Он живёт ровно столько же, сколько Request, и обеспечивает безопасную цепочку ownerRef для артефактов.
 
 ---
 
@@ -190,16 +162,16 @@ ObjectKeeper — ownership anchor:
 
 ### Проблема
 
-После `Create()` объект может быть создан в API-сервере, но:
-- `objectKeeper.UID` может быть пустым в локальном объекте
-- controller-runtime не всегда заполняет UID сразу после Create()
+После `Create()`:
+- UID гарантированно существует в API server
+- но локальный объект или cache может не содержать UID
 - использование пустого UID в OwnerReference приведёт к ошибке
 
 ### Решение
 
-Два допустимых подхода:
+После `Create()` необходимо гарантировать получение UID перед использованием в OwnerReference. Два допустимых подхода:
 
-#### Подход A: Requeue (storage-foundation)
+#### Подход A: Requeue
 
 ```go
 if err := r.Create(ctx, objectKeeper); err != nil {
@@ -219,20 +191,20 @@ vsc.OwnerReferences = []metav1.OwnerReference{{
 }}
 ```
 
-#### Подход B: APIReader (state-snapshotter)
+#### Подход B: APIReader
 
 ```go
 if err := r.Create(ctx, objectKeeper); err != nil {
     return ctrl.Result{}, fmt.Errorf("failed to create ObjectKeeper: %w", err)
 }
 
-// After Create(), controller-runtime populates objectKeeper.UID automatically
-// Use it directly if available, otherwise read via APIReader (bypasses cache)
-if objectKeeper.UID == "" {
-    // UID not populated - read directly from API server
-    if err := r.APIReader.Get(ctx, client.ObjectKey{Name: retainerName}, objectKeeper); err != nil {
-        return ctrl.Result{RequeueAfter: 200 * time.Millisecond}, nil
-    }
+// After create, ensure it's observable via apiserver (UID barrier pattern)
+// Always read via APIReader (direct API, no cache) to ensure read-after-write consistency
+// This guarantees that ObjectKeeper is visible in apiserver before proceeding
+if err := r.APIReader.Get(ctx, client.ObjectKey{Name: retainerName}, objectKeeper); err != nil {
+    // UID barrier: if object is not yet observable via APIReader, requeue briefly
+    // This ensures read-after-write consistency for ownerRef UID
+    return ctrl.Result{RequeueAfter: 200 * time.Millisecond}, nil
 }
 
 // UID гарантированно заполнен, можно использовать
@@ -240,7 +212,7 @@ if objectKeeper.UID == "" {
 
 ### Требования
 
-1. **Обязательно:** Проверка `objectKeeper.UID == ""` после Create()
+1. **Обязательно:** Гарантировать получение UID после `Create()` перед использованием в OwnerReference
 2. **Обязательно:** Получение UID перед использованием в OwnerReference
 3. **Запрещено:** Использование пустого UID в OwnerReference (приведёт к ошибке)
 
@@ -249,15 +221,6 @@ if objectKeeper.UID == "" {
 - OwnerReference с пустым UID не работает
 - Kubernetes GC игнорирует ownerRef без правильного UID
 - Это может привести к утечкам ресурсов
-
-### Реализация
-
-✅ **storage-foundation**: Подход A (Requeue)
-- `images/controller/internal/controllers/volumecapturerequest_controller.go:345-352`
-- `images/controller/internal/controllers/volumecapturerequest_controller.go:736-743`
-
-✅ **state-snapshotter**: Подход B (APIReader)
-- `images/state-snapshotter-controller/internal/controllers/manifestcheckpoint_controller.go:497-511`
 
 ---
 
@@ -279,22 +242,9 @@ if objectKeeper.UID == "" {
 
 ### Реализация
 
-✅ **storage-foundation**:
-- TTL scanner: `StartTTLScanner()` в `add_reconcilers.go:51-60`
-- Реализация: `images/controller/internal/controllers/volumecapturerequest_controller.go:1056-1130`
-- Leader-only через `manager.RunnableFunc`
-- Annotation игнорируется, используется `config.RequestTTL`
+TTL scanner запускается как leader-only `manager.RunnableFunc` в `Add*ControllerToManager`. Scanner периодически сканирует терминальные Request-ресурсы и удаляет те, у которых истёк TTL (с момента `CompletionTimestamp`).
 
-✅ **state-snapshotter**:
-- TTL scanner: `StartTTLScanner()` в `add_reconcilers.go:56-65`
-- Реализация: `images/state-snapshotter-controller/internal/controllers/manifestcheckpoint_controller.go:1567-1634`
-- Leader-only через `manager.RunnableFunc`
-- Annotation игнорируется, используется `config.DefaultTTL`
-
-**Общее:**
-- Оба используют одинаковый паттерн leader-only RunnableFunc
-- Оба игнорируют annotation TTL, используют конфиг
-- TTL начинается с `CompletionTimestamp`
+Annotation TTL игнорируется, используется значение из конфига контроллера.
 
 ---
 
@@ -317,6 +267,10 @@ if objectKeeper.UID == "" {
 - RBAC проще
 - меньше гонок
 - конфиг должен существовать до Request
+
+### Исключение
+
+Cluster-scoped артефакты, создаваемые самим контроллером (ManifestCheckpoint, VolumeSnapshotContent), могут читаться через cache как динамические объекты.
 
 ### APIReader — обязательная зависимость
 
@@ -343,21 +297,7 @@ func AddControllerToManager(mgr ctrl.Manager, cfg *config.Options) error {
 
 ### Реализация
 
-✅ **storage-foundation**:
-- APIReader для StorageClass: `images/controller/internal/controllers/volumecapturerequest_controller.go:268`
-- APIReader для StorageClass: `images/controller/internal/controllers/volumerestorerequest_controller.go:260, 552`
-- Валидация: `images/controller/internal/controllers/add_reconcilers.go:35-37, 70-72`
-- Структура: `images/controller/internal/controllers/volumecapturerequest_controller.go:83`
-
-✅ **state-snapshotter**:
-- APIReader для ObjectKeeper после создания: `images/state-snapshotter-controller/internal/controllers/manifestcheckpoint_controller.go:507`
-- Валидация: `images/state-snapshotter-controller/internal/controllers/add_reconcilers.go:41-43`
-- Структура: `images/state-snapshotter-controller/internal/controllers/manifestcheckpoint_controller.go:76`
-
-**Общее:**
-- Оба валидируют APIReader при создании контроллера
-- Оба используют APIReader напрямую без nil-проверок
-- Оба имеют обязательное поле APIReader в структуре контроллера
+APIReader используется для чтения cluster-level конфигурации (StorageClass, SnapshotClass, CRD-конфиг) и для UID barrier после создания ObjectKeeper. Валидация APIReader выполняется при создании контроллера или в `AddControllerToManager`.
 
 ---
 
@@ -377,13 +317,7 @@ func AddControllerToManager(mgr ctrl.Manager, cfg *config.Options) error {
 
 ### Реализация
 
-✅ **storage-foundation**:
-- UID barrier с requeue: `images/controller/internal/controllers/volumecapturerequest_controller.go:349-352`
-- Нет ожидания статусов внешних объектов
-
-✅ **state-snapshotter**:
-- UID barrier с APIReader: `images/state-snapshotter-controller/internal/controllers/manifestcheckpoint_controller.go:504-510`
-- Нет ожидания статусов внешних объектов
+Полная read-after-write consistency не требуется. Требуются только точечные жёсткие барьеры (например, UID barrier перед использованием в OwnerReference) и requeue при необходимости.
 
 ---
 
@@ -401,19 +335,9 @@ func AddControllerToManager(mgr ctrl.Manager, cfg *config.Options) error {
 
 ### Реализация
 
-✅ **storage-foundation**:
-- NotFound → Ready=False: `images/controller/internal/controllers/volumecapturerequest_controller.go:261-262`
-- Forbidden → Ready=False: `images/controller/internal/controllers/volumecapturerequest_controller.go:265-266`
-- Invalid config → Ready=False: `images/controller/internal/controllers/volumecapturerequest_controller.go:274-277`
-- Temporary status → Requeue: используется в различных местах
-- Константы: `storagev1alpha1.ConditionReasonNotFound`, `storagev1alpha1.ConditionReasonRBACDenied`, и т.д. из `api/v1alpha1/conditions.go`
+Все ошибки транслируются в `Ready=False` с соответствующими `Reason` константами из `api/v1alpha1/conditions.go`. Временные ситуации (отсутствие статуса) обрабатываются через requeue.
 
-✅ **state-snapshotter**:
-- NotFound → Ready=False: различные места в `manifestcheckpoint_controller.go`
-- Forbidden → Ready=False: различные места
-- Invalid config → Ready=False: различные места
-- Temporary status → Requeue: используется в различных местах
-- Константы: `storagev1alpha1.ConditionReasonNotFound`, `storagev1alpha1.ConditionReasonInternalError`, и т.д. из `api/v1alpha1/conditions.go`
+**Примечание:** NotFound считается терминальной ошибкой, так как Request — декларация мгновенного среза состояния. Если объект появится позже, требуется новый Request.
 
 ---
 
@@ -427,15 +351,44 @@ func AddControllerToManager(mgr ctrl.Manager, cfg *config.Options) error {
 
 ### Реализация
 
-✅ **storage-foundation**:
-- Все reconcile функции возвращают быстро
-- Нет циклов ожидания
-- `images/controller/internal/controllers/volumecapturerequest_controller.go:82-1207`
+Все reconcile функции должны возвращаться быстро. Нет циклов ожидания, нет внутренних retry циклов (кроме `RetryOnConflict` для `Status().Patch()` при конфликтах записи статуса).
 
-✅ **state-snapshotter**:
-- Все reconcile функции возвращают быстро
-- Нет циклов ожидания
-- `images/state-snapshotter-controller/internal/controllers/manifestcheckpoint_controller.go:57-1634`
+---
+
+## 12. Request-style модель
+
+### Общее
+
+Все контроллеры используют request-style модель:
+- Один reconcile = одна попытка
+- Ошибка → terminal Ready=False → нет retry
+- Для retry пользователь должен удалить и пересоздать Request
+- Нет retry state machine, нет внутренних retry циклов
+- Retry только для `Status().Patch()` (конфликты записи статуса)
+
+### Ключевые принципы
+
+1. **Fail-fast семантика:**
+   - `Create(ObjectKeeper)` → fail-fast
+   - `Create(Checkpoint/VSC)` → fail-fast (+ AlreadyExists как идемпотентность)
+   - `Create(Chunk)` → fail-fast (+ AlreadyExists validation с checksum при необходимости)
+
+2. **Терминальность:**
+   - Проверка терминальности выполняется в начале reconcile
+   - Terminal Request = immutable (кроме TTL annotation в post-restart сценарии)
+
+3. **Единая финализация:**
+   - Все пути финализации используют единую функцию финализации
+   - Устраняет дублирование кода
+   - Гарантирует консистентность
+
+4. **Обработка ошибок:**
+   - Все ошибки транслируются в `Ready=False`
+   - Детали передаются через `Message`, категоризация — через соответствующие `Reason` константы
+
+### Реализация
+
+Early-return по терминальности в начале reconcile. Fail-fast создание объектов без внутренних retry циклов. Единая функция финализации для всех путей завершения.
 
 ---
 
@@ -448,6 +401,7 @@ ObjectKeeper — это владение
 GC — это уборщик
 TTL — это политика, а не логика
 UID — это обязательный барьер после Create()
+Terminal = immutable (request-style)
 ```
 
 ---
@@ -456,7 +410,7 @@ UID — это обязательный барьер после Create()
 
 ### 1. Структура контроллера
 
-Оба проекта используют одинаковую структуру:
+Все контроллеры используют одинаковую структуру:
 
 ```go
 type Controller struct {
@@ -464,13 +418,13 @@ type Controller struct {
     APIReader client.Reader // Required dependency
     Scheme    *runtime.Scheme
     Config    *config.Options
-    // + специфичные поля (Logger для state-snapshotter)
+    // + специфичные поля (Logger и т.д.)
 }
 ```
 
 ### 2. Инициализация контроллера
 
-Оба проекта валидируют APIReader одинаково:
+Все контроллеры валидируют зависимости при создании:
 
 ```go
 func AddControllerToManager(mgr ctrl.Manager, cfg *config.Options) error {
@@ -478,13 +432,30 @@ func AddControllerToManager(mgr ctrl.Manager, cfg *config.Options) error {
     if apiReader == nil {
         return fmt.Errorf("APIReader must not be nil: controllers require APIReader")
     }
-    // ...
+    // ... создание контроллера с валидацией зависимостей
+}
+```
+
+Или через конструктор с валидацией:
+
+```go
+func NewController(
+    client client.Client,
+    apiReader client.Reader,
+    scheme *runtime.Scheme,
+    cfg *config.Options,
+) (*Controller, error) {
+    if apiReader == nil {
+        return nil, fmt.Errorf("APIReader must not be nil")
+    }
+    // ... валидация всех зависимостей
+    return &Controller{...}, nil
 }
 ```
 
 ### 3. TTL Scanner паттерн
 
-Оба проекта используют идентичный паттерн:
+Все контроллеры используют идентичный паттерн:
 - Leader-only через `manager.RunnableFunc`
 - Запуск в `Add*ControllerToManager`
 - Graceful shutdown через context cancellation
@@ -492,34 +463,25 @@ func AddControllerToManager(mgr ctrl.Manager, cfg *config.Options) error {
 
 ### 4. Терминальное состояние
 
-Оба проекта проверяют Ready одинаково:
-- Проверка `isConditionTrue(vcr.Status.Conditions, storagev1alpha1.ConditionTypeReady)` для успеха
-- Проверка `isConditionFalse(vcr.Status.Conditions, storagev1alpha1.ConditionTypeReady)` для ошибки
-- Или проверка `readyCondition.Status == metav1.ConditionTrue` / `readyCondition.Status == metav1.ConditionFalse`
+Все контроллеры проверяют Ready одинаково:
+- Проверка наличия Ready condition с финальным статусом (True или False)
 - Skip reconcile после терминального состояния (Ready=True или Ready=False)
 - TTL cleanup вынесен в scanner
 - Константы условий определены в `api/v1alpha1/conditions.go` и используются через префикс `storagev1alpha1.`
 
 ### 5. ObjectKeeper создание
 
-Оба проекта создают ObjectKeeper одинаково:
+Все контроллеры создают ObjectKeeper одинаково:
 - Режим `FollowObject`
 - Нет TTL у ObjectKeeper
 - UID barrier после создания (разные подходы, но одинаковый принцип)
 
 ### 6. Conditions — только Ready, константы в API пакете
 
-Оба проекта используют одинаковый подход к conditions:
-- **Только один condition:** `Ready`
-  - `Ready=True` — успешное завершение операции
-  - `Ready=False` — финальная ошибка (с соответствующим `Reason`)
-- **Condition выставляется только в финальном состоянии** (терминальный успех или терминальная ошибка)
+Все контроллеры используют одинаковый подход к conditions:
+- **Только один condition:** `Ready` (см. разделы 2 и 3)
 - **Константы определены в API пакете:**
   - `storage-foundation`: `github.com/deckhouse/storage-foundation/api/v1alpha1/conditions.go`
   - `state-snapshotter`: `github.com/deckhouse/state-snapshotter/api/v1alpha1/conditions.go`
-- **Использование:** Все константы используются через префикс `storagev1alpha1.`:
-  - `storagev1alpha1.ConditionTypeReady`
-  - `storagev1alpha1.ConditionReasonCompleted`
-  - `storagev1alpha1.ConditionReasonInternalError`
-  - и т.д.
+- **Использование:** Все константы используются через префикс `storagev1alpha1.`
 - **Запрещено:** Использование захардкоженных строк вместо констант

@@ -1,10 +1,10 @@
-module fox.flant.com/deckhouse/storage/storage-foundation/images/controller
+module github.com/deckhouse/storage-foundation/images/controller
 
 go 1.24.9
 
 require (
-	fox.flant.com/deckhouse/storage/storage-foundation/api v0.0.0-00010101000000-000000000000
 	github.com/deckhouse/deckhouse v1.67.7-0.20251212134859-497a0dab9fc0
+	github.com/deckhouse/storage-foundation/api v0.0.0-00010101000000-000000000000
 	github.com/go-logr/logr v1.4.3
 	github.com/kubernetes-csi/external-snapshotter/client/v8 v8.2.0
 	github.com/onsi/ginkgo/v2 v2.23.3
@@ -18,7 +18,7 @@ require (
 	sigs.k8s.io/controller-runtime v0.22.4
 )
 
-replace fox.flant.com/deckhouse/storage/storage-foundation/api => ../../api
+replace github.com/deckhouse/storage-foundation/api => ../../api
 
 require (
 	github.com/Masterminds/semver/v3 v3.3.1 // indirect

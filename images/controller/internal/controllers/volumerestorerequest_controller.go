@@ -21,7 +21,6 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
-	"math/rand"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
@@ -35,11 +34,11 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
-	storagev1alpha1 "fox.flant.com/deckhouse/storage/storage-foundation/api/v1alpha1"
+	storagev1alpha1 "github.com/deckhouse/storage-foundation/api/v1alpha1"
 	snapshotv1 "github.com/kubernetes-csi/external-snapshotter/client/v8/apis/volumesnapshot/v1"
 
-	"fox.flant.com/deckhouse/storage/storage-foundation/images/controller/pkg/config"
-	"fox.flant.com/deckhouse/storage/storage-foundation/images/controller/pkg/snapshotmeta"
+	"github.com/deckhouse/storage-foundation/images/controller/pkg/config"
+	"github.com/deckhouse/storage-foundation/images/controller/pkg/snapshotmeta"
 )
 
 const (
@@ -72,40 +71,15 @@ func (r *VolumeRestoreRequestController) Reconcile(ctx context.Context, req ctrl
 		return ctrl.Result{}, err
 	}
 
-	// Skip if already Ready
-	if isConditionTrue(vrr.Status.Conditions, storagev1alpha1.ConditionTypeReady) {
-		// Check TTL for completed VRR (after Ready short-circuit)
-		// This ensures TTL cleanup happens only after VRR is fully completed
-		if shouldDelete, requeueAfter, err := r.checkAndHandleTTL(ctx, &vrr); err != nil {
-			l.Error(err, "Failed to check TTL")
-			return ctrl.Result{}, err
-		} else if shouldDelete {
-			// Object was deleted, return
-			return ctrl.Result{}, nil
-		} else if requeueAfter > 0 {
-			// TTL not expired yet, requeue
-			return ctrl.Result{RequeueAfter: requeueAfter}, nil
-		}
+	// Skip if terminal (Ready=True or Ready=False)
+	// NOTE: VRR is a fire-and-forget (one-time) operation. Once terminal, VRR will not be
+	// reconciled again even if spec is changed. This is by design: VRR represents a single
+	// restore operation. To create a new restore, create a new VRR.
+	if isTerminal(vrr.Status.Conditions, storagev1alpha1.ConditionTypeReady) {
+		// VRR is terminal - TTL cleanup is handled by background TTL scanner, not in reconcile loop
+		// This ensures reconcile loop doesn't block on TTL checks
+		l.V(1).Info("VRR is terminal, skipping reconcile")
 		return ctrl.Result{}, nil
-	}
-
-	// Skip if already Failed and observed
-	if isConditionFalse(vrr.Status.Conditions, storagev1alpha1.ConditionTypeReady) {
-		if vrr.Status.ObservedGeneration == vrr.Generation {
-			// Check TTL for failed VRR (after Failed short-circuit)
-			// This ensures TTL cleanup happens only after VRR is fully failed
-			if shouldDelete, requeueAfter, err := r.checkAndHandleTTL(ctx, &vrr); err != nil {
-				l.Error(err, "Failed to check TTL")
-				return ctrl.Result{}, err
-			} else if shouldDelete {
-				// Object was deleted, return
-				return ctrl.Result{}, nil
-			} else if requeueAfter > 0 {
-				// TTL not expired yet, requeue
-				return ctrl.Result{RequeueAfter: requeueAfter}, nil
-			}
-			return ctrl.Result{}, nil
-		}
 	}
 
 	// Handle deletion
@@ -177,37 +151,13 @@ func (r *VolumeRestoreRequestController) processVolumeSnapshotContentRestore(
 				}
 			}
 			// Update status to Ready
-			base := vrr.DeepCopy()
+			// Set TargetPVCRef before finalization
 			vrr.Status.TargetPVCRef = &storagev1alpha1.ObjectReference{
 				Name:      vrr.Spec.TargetPVCName,
 				Namespace: vrr.Spec.TargetNamespace,
 			}
-			vrr.Status.ObservedGeneration = vrr.Generation
-			now := metav1.Now()
-			vrr.Status.CompletionTimestamp = &now
-			setSingleCondition(&vrr.Status.Conditions, metav1.Condition{
-				Type:               storagev1alpha1.ConditionTypeReady,
-				Status:             metav1.ConditionTrue,
-				Reason:             storagev1alpha1.ConditionReasonCompleted,
-				Message:            fmt.Sprintf("PVC %s/%s restored successfully", vrr.Spec.TargetNamespace, vrr.Spec.TargetPVCName),
-				LastTransitionTime: now,
-				ObservedGeneration: vrr.Generation,
-			})
-			// Set TTL annotation when marking as Ready (same Patch as Ready condition)
-			// Use retry on conflict to handle concurrent updates
-			if err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
-				current := &storagev1alpha1.VolumeRestoreRequest{}
-				if err := r.Get(ctx, client.ObjectKeyFromObject(vrr), current); err != nil {
-					return err
-				}
-				// Apply status changes
-				current.Status = vrr.Status
-				// Set TTL annotation
-				r.setTTLAnnotation(current)
-				// Patch both metadata (annotations) and status in the same operation
-				return r.Patch(ctx, current, client.MergeFrom(base))
-			}); err != nil {
-				return ctrl.Result{}, fmt.Errorf("failed to update VRR with Ready condition and TTL annotation: %w", err)
+			if err := r.finalizeVRR(ctx, vrr, metav1.ConditionTrue, storagev1alpha1.ConditionReasonCompleted, fmt.Sprintf("PVC %s/%s restored successfully", vrr.Spec.TargetNamespace, vrr.Spec.TargetPVCName)); err != nil {
+				return ctrl.Result{}, err
 			}
 			l.Info("VolumeRestoreRequest completed (PVC already Bound)", "source", "VolumeSnapshotContent", "pvc", vrr.Spec.TargetPVCName)
 			return ctrl.Result{}, nil
@@ -342,37 +292,13 @@ func (r *VolumeRestoreRequestController) processVolumeSnapshotContentRestore(
 	}
 
 	// 10. Update status
-	base := vrr.DeepCopy()
+	// Set TargetPVCRef before finalization
 	vrr.Status.TargetPVCRef = &storagev1alpha1.ObjectReference{
 		Name:      vrr.Spec.TargetPVCName,
 		Namespace: vrr.Spec.TargetNamespace,
 	}
-	vrr.Status.ObservedGeneration = vrr.Generation
-	now := metav1.Now()
-	vrr.Status.CompletionTimestamp = &now
-	setSingleCondition(&vrr.Status.Conditions, metav1.Condition{
-		Type:               storagev1alpha1.ConditionTypeReady,
-		Status:             metav1.ConditionTrue,
-		Reason:             storagev1alpha1.ConditionReasonCompleted,
-		Message:            fmt.Sprintf("PVC %s/%s restored successfully", vrr.Spec.TargetNamespace, vrr.Spec.TargetPVCName),
-		LastTransitionTime: now,
-		ObservedGeneration: vrr.Generation,
-	})
-	// Set TTL annotation when marking as Ready (same Patch as Ready condition)
-	// Use retry on conflict to handle concurrent updates
-	if err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
-		current := &storagev1alpha1.VolumeRestoreRequest{}
-		if err := r.Get(ctx, client.ObjectKeyFromObject(vrr), current); err != nil {
-			return err
-		}
-		// Apply status changes
-		current.Status = vrr.Status
-		// Set TTL annotation
-		r.setTTLAnnotation(current)
-		// Patch both metadata (annotations) and status in the same operation
-		return r.Patch(ctx, current, client.MergeFrom(base))
-	}); err != nil {
-		return ctrl.Result{}, fmt.Errorf("failed to update VRR with Ready condition and TTL annotation: %w", err)
+	if err := r.finalizeVRR(ctx, vrr, metav1.ConditionTrue, storagev1alpha1.ConditionReasonCompleted, fmt.Sprintf("PVC %s/%s restored successfully", vrr.Spec.TargetNamespace, vrr.Spec.TargetPVCName)); err != nil {
+		return ctrl.Result{}, err
 	}
 
 	l.Info("VolumeRestoreRequest completed", "source", "VolumeSnapshotContent", "pvc", vrr.Spec.TargetPVCName)
@@ -430,37 +356,13 @@ func (r *VolumeRestoreRequestController) processPersistentVolumeRestore(
 				}
 			}
 			// Update status to Ready
-			base := vrr.DeepCopy()
+			// Set TargetPVCRef before finalization
 			vrr.Status.TargetPVCRef = &storagev1alpha1.ObjectReference{
 				Name:      vrr.Spec.TargetPVCName,
 				Namespace: vrr.Spec.TargetNamespace,
 			}
-			vrr.Status.ObservedGeneration = vrr.Generation
-			now := metav1.Now()
-			vrr.Status.CompletionTimestamp = &now
-			setSingleCondition(&vrr.Status.Conditions, metav1.Condition{
-				Type:               storagev1alpha1.ConditionTypeReady,
-				Status:             metav1.ConditionTrue,
-				Reason:             storagev1alpha1.ConditionReasonCompleted,
-				Message:            fmt.Sprintf("PVC %s/%s restored successfully from PV", vrr.Spec.TargetNamespace, vrr.Spec.TargetPVCName),
-				LastTransitionTime: now,
-				ObservedGeneration: vrr.Generation,
-			})
-			// Set TTL annotation when marking as Ready (same Patch as Ready condition)
-			// Use retry on conflict to handle concurrent updates
-			if err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
-				current := &storagev1alpha1.VolumeRestoreRequest{}
-				if err := r.Get(ctx, client.ObjectKeyFromObject(vrr), current); err != nil {
-					return err
-				}
-				// Apply status changes
-				current.Status = vrr.Status
-				// Set TTL annotation
-				r.setTTLAnnotation(current)
-				// Patch both metadata (annotations) and status in the same operation
-				return r.Patch(ctx, current, client.MergeFrom(base))
-			}); err != nil {
-				return ctrl.Result{}, fmt.Errorf("failed to update VRR with Ready condition and TTL annotation: %w", err)
+			if err := r.finalizeVRR(ctx, vrr, metav1.ConditionTrue, storagev1alpha1.ConditionReasonCompleted, fmt.Sprintf("PVC %s/%s restored successfully from PV", vrr.Spec.TargetNamespace, vrr.Spec.TargetPVCName)); err != nil {
+				return ctrl.Result{}, err
 			}
 			l.Info("VolumeRestoreRequest completed (PVC already Bound)", "source", "PersistentVolume", "pvc", vrr.Spec.TargetPVCName)
 			return ctrl.Result{}, nil
@@ -609,37 +511,13 @@ func (r *VolumeRestoreRequestController) processPersistentVolumeRestore(
 	}
 
 	// 12. Update status
-	base := vrr.DeepCopy()
+	// Set TargetPVCRef before finalization
 	vrr.Status.TargetPVCRef = &storagev1alpha1.ObjectReference{
 		Name:      vrr.Spec.TargetPVCName,
 		Namespace: vrr.Spec.TargetNamespace,
 	}
-	vrr.Status.ObservedGeneration = vrr.Generation
-	now := metav1.Now()
-	vrr.Status.CompletionTimestamp = &now
-	setSingleCondition(&vrr.Status.Conditions, metav1.Condition{
-		Type:               storagev1alpha1.ConditionTypeReady,
-		Status:             metav1.ConditionTrue,
-		Reason:             storagev1alpha1.ConditionReasonCompleted,
-		Message:            fmt.Sprintf("PVC %s/%s restored successfully from PV", vrr.Spec.TargetNamespace, vrr.Spec.TargetPVCName),
-		LastTransitionTime: now,
-		ObservedGeneration: vrr.Generation,
-	})
-	// Set TTL annotation when marking as Ready (same Patch as Ready condition)
-	// Use retry on conflict to handle concurrent updates
-	if err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
-		current := &storagev1alpha1.VolumeRestoreRequest{}
-		if err := r.Get(ctx, client.ObjectKeyFromObject(vrr), current); err != nil {
-			return err
-		}
-		// Apply status changes
-		current.Status = vrr.Status
-		// Set TTL annotation
-		r.setTTLAnnotation(current)
-		// Patch both metadata (annotations) and status in the same operation
-		return r.Patch(ctx, current, client.MergeFrom(base))
-	}); err != nil {
-		return ctrl.Result{}, fmt.Errorf("failed to update VRR with Ready condition and TTL annotation: %w", err)
+	if err := r.finalizeVRR(ctx, vrr, metav1.ConditionTrue, storagev1alpha1.ConditionReasonCompleted, fmt.Sprintf("PVC %s/%s restored successfully from PV", vrr.Spec.TargetNamespace, vrr.Spec.TargetPVCName)); err != nil {
+		return ctrl.Result{}, err
 	}
 
 	l.Info("VolumeRestoreRequest completed", "source", "PersistentVolume", "pvc", vrr.Spec.TargetPVCName)
@@ -816,10 +694,17 @@ func (r *VolumeRestoreRequestController) getSizeFromPV(pv *corev1.PersistentVolu
 	return resource.MustParse("1Gi")
 }
 
-// setTTLAnnotation sets TTL annotation on the object
-// TTL is set when Ready/Failed condition is set, and used for automatic deletion
-// TTL comes from configuration (storage-foundation module settings), not from VRR spec
-// If annotation already exists, it is not overwritten (idempotent)
+// setTTLAnnotation sets TTL annotation on the object.
+//
+// IMPORTANT TTL SEMANTICS:
+// - TTL annotation (storage.deckhouse.io/ttl) is INFORMATIONAL ONLY.
+// - Actual TTL deletion timing is controlled by controller configuration (config.RequestTTL).
+// - TTL scanner uses config.RequestTTL, NOT the annotation value.
+// - Annotation is set for observability and post-mortem analysis, but does not affect deletion timing.
+//
+// TTL is set when Ready/Failed condition is set during finalization.
+// TTL comes from configuration (storage-foundation module settings), not from VRR spec.
+// If annotation already exists, it is not overwritten (idempotent).
 func (r *VolumeRestoreRequestController) setTTLAnnotation(vrr *storagev1alpha1.VolumeRestoreRequest) {
 	// Don't overwrite if annotation already exists
 	if vrr.Annotations != nil {
@@ -838,136 +723,14 @@ func (r *VolumeRestoreRequestController) setTTLAnnotation(vrr *storagev1alpha1.V
 	vrr.Annotations[AnnotationKeyTTL] = ttlStr
 }
 
-// checkAndHandleTTL checks if TTL has expired and deletes the object if needed
-// Returns (shouldDelete, requeueAfter, error)
-func (r *VolumeRestoreRequestController) checkAndHandleTTL(ctx context.Context, vrr *storagev1alpha1.VolumeRestoreRequest) (bool, time.Duration, error) {
-	// Check if TTL annotation exists
-	ttlStr, hasTTL := vrr.Annotations[AnnotationKeyTTL]
-	if !hasTTL {
-		// No TTL annotation, nothing to do
-		return false, 0, nil
-	}
-
-	// Parse TTL duration
-	ttl, err := time.ParseDuration(ttlStr)
-	if err != nil {
-		// Invalid TTL format - set Ready=False condition to inform user
-		l := log.FromContext(ctx)
-		l.Error(err, "Invalid TTL annotation format", "ttl", ttlStr)
-
-		// Set Ready=False condition to inform user about TTL issue
-		base := vrr.DeepCopy()
-		vrr.Status.ObservedGeneration = vrr.Generation
-		now := metav1.Now()
-		setSingleCondition(&vrr.Status.Conditions, metav1.Condition{
-			Type:               storagev1alpha1.ConditionTypeReady,
-			Status:             metav1.ConditionFalse,
-			Reason:             storagev1alpha1.ConditionReasonInvalidTTL,
-			Message:            fmt.Sprintf("Invalid TTL annotation format: %s (error: %v)", ttlStr, err),
-			LastTransitionTime: now,
-			ObservedGeneration: vrr.Generation,
-		})
-		// Use retry on conflict to handle concurrent updates
-		if patchErr := retry.RetryOnConflict(retry.DefaultRetry, func() error {
-			current := &storagev1alpha1.VolumeRestoreRequest{}
-			if getErr := r.Get(ctx, client.ObjectKeyFromObject(vrr), current); getErr != nil {
-				return getErr
-			}
-			current.Status = vrr.Status
-			return r.Status().Patch(ctx, current, client.MergeFrom(base))
-		}); patchErr != nil {
-			l.Error(patchErr, "Failed to update status with InvalidTTL condition")
-			return false, 0, patchErr
-		}
-		return false, 0, nil
-	}
-
-	// Calculate expiration time: completionTimestamp + TTL
-	if vrr.Status.CompletionTimestamp == nil {
-		// No completion timestamp yet, TTL hasn't started
-		return false, 0, nil
-	}
-
-	completionTime := vrr.Status.CompletionTimestamp.Time
-	expirationTime := completionTime.Add(ttl)
-	now := time.Now()
-
-	// Check if TTL has expired
-	if now.After(expirationTime) {
-		// TTL expired, delete the object
-		// NOTE: VRR deletion is safe: temporary objects (VS/PVC) are cleaned up in handleDeletion.
-		// VRR TTL only controls when the request resource is deleted (short-lived, cleanup API noise).
-		log.FromContext(ctx).Info("TTL expired, deleting VolumeRestoreRequest",
-			"namespace", vrr.Namespace,
-			"name", vrr.Name,
-			"completionTime", completionTime,
-			"expirationTime", expirationTime,
-		)
-		if err := r.Delete(ctx, vrr); err != nil {
-			if apierrors.IsNotFound(err) {
-				// Already deleted, that's fine (double-delete is safe)
-				return true, 0, nil
-			}
-			return false, 0, fmt.Errorf("failed to delete expired VolumeRestoreRequest: %w", err)
-		}
-		return true, 0, nil
-	}
-
-	// TTL not expired yet, calculate requeue time with jitter to avoid reconcile flood
-	timeUntilExpiration := expirationTime.Sub(now)
-	// Requeue after min(timeLeft, 1m), but not less than 30s
-	requeueAfter := timeUntilExpiration
-	if requeueAfter > time.Minute {
-		requeueAfter = time.Minute
-	}
-	if requeueAfter < 30*time.Second {
-		requeueAfter = 30 * time.Second
-	}
-
-	// Add jitter (±10%) to avoid reconcile flood when multiple VRR expire simultaneously
-	// This follows the pattern used by JobController, DeploymentController, etc.
-	jitterRange := requeueAfter / 10 // 10% jitter
-	jitter := time.Duration(rand.Int63n(int64(2*jitterRange))) - jitterRange
-	requeueAfter = requeueAfter + jitter
-	if requeueAfter < 30*time.Second {
-		requeueAfter = 30 * time.Second // Ensure minimum after jitter
-	}
-
-	return false, requeueAfter, nil
-}
 
 func (r *VolumeRestoreRequestController) markFailed(
 	ctx context.Context,
 	vrr *storagev1alpha1.VolumeRestoreRequest,
 	reason, message string,
 ) (ctrl.Result, error) {
-	base := vrr.DeepCopy()
-	vrr.Status.ObservedGeneration = vrr.Generation
-	now := metav1.Now()
-	vrr.Status.CompletionTimestamp = &now
-	setSingleCondition(&vrr.Status.Conditions, metav1.Condition{
-		Type:               storagev1alpha1.ConditionTypeReady,
-		Status:             metav1.ConditionFalse,
-		Reason:             reason,
-		Message:            message,
-		LastTransitionTime: now,
-		ObservedGeneration: vrr.Generation,
-	})
-	// Set TTL annotation when marking as Failed (same Patch as Ready condition)
-	// Use retry on conflict to handle concurrent updates
-	if err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
-		current := &storagev1alpha1.VolumeRestoreRequest{}
-		if err := r.Get(ctx, client.ObjectKeyFromObject(vrr), current); err != nil {
-			return err
-		}
-		// Apply status changes
-		current.Status = vrr.Status
-		// Set TTL annotation
-		r.setTTLAnnotation(current)
-		// Patch both metadata (annotations) and status in the same operation
-		return r.Patch(ctx, current, client.MergeFrom(base))
-	}); err != nil {
-		return ctrl.Result{}, fmt.Errorf("failed to update VRR with Failed condition and TTL annotation: %w", err)
+	if err := r.finalizeVRR(ctx, vrr, metav1.ConditionFalse, reason, message); err != nil {
+		return ctrl.Result{}, err
 	}
 	return ctrl.Result{}, nil
 }
@@ -979,35 +742,57 @@ func (r *VolumeRestoreRequestController) markIncompatible(
 	vrr *storagev1alpha1.VolumeRestoreRequest,
 	message string,
 ) (ctrl.Result, error) {
-	base := vrr.DeepCopy()
-	vrr.Status.ObservedGeneration = vrr.Generation
+	if err := r.finalizeVRR(ctx, vrr, metav1.ConditionFalse, storagev1alpha1.ConditionReasonIncompatible, message); err != nil {
+		return ctrl.Result{}, err
+	}
+	return ctrl.Result{}, nil
+}
+
+// finalizeVRR finalizes VRR by setting Ready condition, CompletionTimestamp, updating status, and TTL annotation.
+// This is a unified helper to eliminate code duplication across all finalization paths.
+func (r *VolumeRestoreRequestController) finalizeVRR(
+	ctx context.Context,
+	vrr *storagev1alpha1.VolumeRestoreRequest,
+	status metav1.ConditionStatus,
+	reason, message string,
+) error {
 	now := metav1.Now()
-	vrr.Status.CompletionTimestamp = &now
+	if vrr.Status.CompletionTimestamp == nil {
+		vrr.Status.CompletionTimestamp = &now
+	}
 	setSingleCondition(&vrr.Status.Conditions, metav1.Condition{
 		Type:               storagev1alpha1.ConditionTypeReady,
-		Status:             metav1.ConditionFalse,
-		Reason:             storagev1alpha1.ConditionReasonIncompatible,
+		Status:             status,
+		Reason:             reason,
 		Message:            message,
 		LastTransitionTime: now,
-		ObservedGeneration: vrr.Generation,
 	})
-	// Set TTL annotation when marking as Failed (same Patch as Ready condition)
-	// Use retry on conflict to handle concurrent updates
+
+	// Update status (retry only for status conflicts)
 	if err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
 		current := &storagev1alpha1.VolumeRestoreRequest{}
 		if err := r.Get(ctx, client.ObjectKeyFromObject(vrr), current); err != nil {
 			return err
 		}
-		// Apply status changes
+		base := current.DeepCopy()
 		current.Status = vrr.Status
-		// Set TTL annotation
-		r.setTTLAnnotation(current)
-		// Patch both metadata (annotations) and status in the same operation
-		return r.Patch(ctx, current, client.MergeFrom(base))
+		return r.Status().Patch(ctx, current, client.MergeFrom(base))
 	}); err != nil {
-		return ctrl.Result{}, fmt.Errorf("failed to update VRR with Failed condition and TTL annotation: %w", err)
+		if apierrors.IsNotFound(err) {
+			return nil // Object deleted - fine
+		}
+		return fmt.Errorf("failed to update VRR status: %w", err)
 	}
-	return ctrl.Result{}, nil
+
+	// Update TTL annotation (informational only, best-effort, no retry)
+	current := &storagev1alpha1.VolumeRestoreRequest{}
+	if err := r.Get(ctx, client.ObjectKeyFromObject(vrr), current); err == nil {
+		base := current.DeepCopy()
+		r.setTTLAnnotation(current)
+		_ = r.Patch(ctx, current, client.MergeFrom(base)) // Ignore errors - annotation is informational
+	}
+
+	return nil
 }
 
 func (r *VolumeRestoreRequestController) handleDeletion(
@@ -1072,4 +857,152 @@ func (r *VolumeRestoreRequestController) SetupWithManager(mgr ctrl.Manager) erro
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&storagev1alpha1.VolumeRestoreRequest{}).
 		Complete(r)
+}
+
+// StartTTLScanner starts the TTL scanner in a background goroutine.
+// Should be called from manager.RunnableFunc to ensure it runs only on the leader replica.
+// Scanner periodically lists all VRRs and deletes expired ones based on completionTimestamp + TTL.
+//
+// IMPORTANT: This method should be called from manager.RunnableFunc to ensure leader-only execution.
+// When leadership changes, ctx.Done() triggers graceful shutdown of the scanner.
+func (r *VolumeRestoreRequestController) StartTTLScanner(ctx context.Context, client client.Client) {
+	go r.startTTLScanner(ctx, client)
+}
+
+// startTTLScanner runs a background scanner that periodically checks and deletes expired VRRs.
+// Scanner uses List() to get all VRRs and checks completionTimestamp + TTL from controller config.
+// This approach is simpler than per-object reconcile and doesn't block the reconcile loop.
+//
+// TTL SCANNER CONTRACT:
+//
+// 1. Works only with terminal VRRs:
+//   - Ready=True (completed successfully)
+//   - Ready=False (failed, terminal error)
+//   - Non-terminal VRRs are never touched
+//
+// 2. TTL source:
+//   - TTL is ALWAYS taken from controller configuration (config.RequestTTL), NOT from VRR annotations
+//   - TTL annotation (storage.deckhouse.io/ttl) is informational only and does not affect deletion timing
+//   - This ensures predictable cluster-wide retention policy
+//
+// 3. TTL calculation:
+//   - TTL starts counting from CompletionTimestamp (when VRR reaches Ready=True or Ready=False)
+//   - Expiration time = CompletionTimestamp + config.RequestTTL
+//   - Only VRRs with CompletionTimestamp are eligible for deletion
+//
+// 4. Scanner behavior:
+//   - Scanner does NOT update status
+//   - Scanner does NOT patch objects
+//   - Scanner only performs List() and Delete() operations
+//   - Deletion of VRR triggers cleanup of temporary objects through handleDeletion
+//
+// 5. Leader-only execution:
+//   - Scanner runs only on the leader replica (enforced by manager.RunnableFunc)
+//   - When leadership changes, ctx.Done() triggers graceful shutdown
+func (r *VolumeRestoreRequestController) startTTLScanner(ctx context.Context, client client.Client) {
+	// Scanner interval: check every 5 minutes
+	// This is a reasonable balance between responsiveness and API load
+	scannerInterval := 5 * time.Minute
+	ticker := time.NewTicker(scannerInterval)
+	defer ticker.Stop()
+
+	l := log.FromContext(ctx)
+	l.Info("TTL scanner started", "interval", scannerInterval)
+
+	// Run immediately on startup, then periodically
+	r.scanAndDeleteExpiredVRRs(ctx, client)
+
+	for {
+		select {
+		case <-ctx.Done():
+			l.Info("TTL scanner stopped (context cancelled)")
+			return
+		case <-ticker.C:
+			r.scanAndDeleteExpiredVRRs(ctx, client)
+		}
+	}
+}
+
+// scanAndDeleteExpiredVRRs lists all VRRs and deletes those where completionTimestamp + TTL < now.
+//
+// IMPORTANT:
+// TTL annotation (storage.deckhouse.io/ttl) is informational only.
+// Actual TTL is controlled exclusively by controller configuration.
+// This ensures predictable cluster-wide retention policy.
+//
+// TTL SEMANTICS:
+// - TTL is ALWAYS taken from controller configuration (config.RequestTTL), NOT from VRR annotations.
+// - TTL annotation (storage.deckhouse.io/ttl) is informational only and is IGNORED by the scanner.
+// - This ensures consistent cleanup behavior: all VRRs use the same TTL policy defined by controller config.
+// - TTL starts counting from CompletionTimestamp (when VRR reaches Ready=True or Ready=False).
+func (r *VolumeRestoreRequestController) scanAndDeleteExpiredVRRs(ctx context.Context, client client.Client) {
+	// Get TTL from controller config (this is the ONLY source of TTL timing)
+	// TTL annotation is informational only and is ignored here
+	defaultTTL := config.DefaultRequestTTL
+	if r.Config != nil && r.Config.RequestTTL > 0 {
+		defaultTTL = r.Config.RequestTTL
+	}
+
+	// List all VRRs across all namespaces
+	vrrList := &storagev1alpha1.VolumeRestoreRequestList{}
+	if err := client.List(ctx, vrrList); err != nil {
+		log.FromContext(ctx).Error(err, "Failed to list VolumeRestoreRequests for TTL scan")
+		return
+	}
+
+	now := time.Now()
+	deletedCount := 0
+	skippedCount := 0
+
+	for i := range vrrList.Items {
+		vrr := &vrrList.Items[i]
+
+		// Skip if not terminal (Ready=True or Ready=False)
+		if !isTerminal(vrr.Status.Conditions, storagev1alpha1.ConditionTypeReady) {
+			skippedCount++
+			continue // Skip non-terminal VRRs
+		}
+
+		// Skip if no completionTimestamp
+		if vrr.Status.CompletionTimestamp == nil {
+			skippedCount++
+			continue
+		}
+
+		// Check if TTL expired: completionTimestamp + defaultTTL < now
+		completionTime := vrr.Status.CompletionTimestamp.Time
+		expirationTime := completionTime.Add(defaultTTL)
+
+		if now.After(expirationTime) {
+			// TTL expired, delete the object
+			log.FromContext(ctx).Info("TTL expired, deleting VolumeRestoreRequest",
+				"namespace", vrr.Namespace,
+				"name", vrr.Name,
+				"completionTime", completionTime,
+				"expirationTime", expirationTime,
+				"ttl", defaultTTL)
+
+			if err := client.Delete(ctx, vrr); err != nil {
+				if apierrors.IsNotFound(err) {
+					// Already deleted, that's fine (double-delete is safe)
+					log.FromContext(ctx).V(1).Info("VRR already deleted during TTL scan",
+						"namespace", vrr.Namespace,
+						"name", vrr.Name)
+				} else {
+					log.FromContext(ctx).Error(err, "Failed to delete expired VolumeRestoreRequest",
+						"namespace", vrr.Namespace,
+						"name", vrr.Name)
+				}
+			} else {
+				deletedCount++
+			}
+		}
+	}
+
+	if deletedCount > 0 || skippedCount > 0 {
+		log.FromContext(ctx).V(1).Info("TTL scan completed",
+			"total", len(vrrList.Items),
+			"deleted", deletedCount,
+			"skipped", skippedCount)
+	}
 }

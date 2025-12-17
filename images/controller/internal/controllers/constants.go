@@ -29,7 +29,7 @@ const (
 )
 
 // Condition type and reason constants are defined in api/v1alpha1/conditions.go
-// Import them from: fox.flant.com/deckhouse/storage/storage-foundation/api/v1alpha1
+// Import them from: github.com/deckhouse/storage-foundation/api/v1alpha1
 // Use storagev1alpha1.ConditionTypeReady and storagev1alpha1.ConditionReason* instead of local constants
 
 // Label key constants

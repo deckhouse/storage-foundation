@@ -33,11 +33,11 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
-	storagev1alpha1 "fox.flant.com/deckhouse/storage/storage-foundation/api/v1alpha1"
+	storagev1alpha1 "github.com/deckhouse/storage-foundation/api/v1alpha1"
 	deckhousev1alpha1 "github.com/deckhouse/deckhouse/deckhouse-controller/pkg/apis/deckhouse.io/v1alpha1"
 	snapshotv1 "github.com/kubernetes-csi/external-snapshotter/client/v8/apis/volumesnapshot/v1"
 
-	"fox.flant.com/deckhouse/storage/storage-foundation/images/controller/pkg/config"
+	"github.com/deckhouse/storage-foundation/images/controller/pkg/config"
 )
 
 // Invariants (architectural guarantees):
@@ -99,32 +99,19 @@ func (r *VolumeCaptureRequestController) Reconcile(ctx context.Context, req ctrl
 		return ctrl.Result{}, err
 	}
 
-	l = l.WithValues("generation", vcr.Generation, "observedGeneration", vcr.Status.ObservedGeneration)
-
-	// Skip if already Ready
-	// NOTE: VCR is a fire-and-forget (one-time) operation. Once Ready, VCR will not be
+	// Skip if terminal (Ready=True or Ready=False)
+	// NOTE: VCR is a fire-and-forget (one-time) operation. Once terminal, VCR will not be
 	// reconciled again even if spec is changed. This is by design: VCR represents a single
 	// snapshot capture operation. To create a new snapshot, create a new VCR.
 	//
 	// IMPORTANT: Temporary VolumeSnapshot (proxy-VS) cleanup happens in step 12 of processSnapshotMode
 	// before VCR status is set to Ready. This ensures VS is deleted immediately upon VCR completion.
 	// If VCR is already Ready, VS should already be cleaned up (or never existed).
-	if isConditionTrue(vcr.Status.Conditions, storagev1alpha1.ConditionTypeReady) {
-		// VCR is Ready - TTL cleanup is handled by background TTL scanner, not in reconcile loop
+	if isTerminal(vcr.Status.Conditions, storagev1alpha1.ConditionTypeReady) {
+		// VCR is terminal - TTL cleanup is handled by background TTL scanner, not in reconcile loop
 		// This ensures reconcile loop doesn't block on TTL checks
-		l.V(1).Info("VCR is already Ready, skipping reconcile")
+		l.V(1).Info("VCR is terminal, skipping reconcile")
 		return ctrl.Result{}, nil
-	}
-
-	// Skip if already Failed and observed
-	// TTL cleanup is handled by background TTL scanner, not in reconcile loop
-	if isConditionFalse(vcr.Status.Conditions, storagev1alpha1.ConditionTypeReady) {
-		if vcr.Status.ObservedGeneration == vcr.Generation {
-			// VCR is Failed and observed - TTL cleanup is handled by background TTL scanner
-			l.V(1).Info("VCR is already Failed and observed, skipping reconcile")
-			return ctrl.Result{}, nil
-		}
-		l.Info("VCR is Failed but not observed, will retry", "observedGeneration", vcr.Status.ObservedGeneration, "generation", vcr.Generation)
 	}
 
 	// Handle deletion
@@ -147,34 +134,8 @@ func (r *VolumeCaptureRequestController) Reconcile(ctx context.Context, req ctrl
 		return r.processDetachMode(ctx, &vcr)
 	default:
 		l.Error(nil, "Unknown mode", "mode", vcr.Spec.Mode)
-		base := vcr.DeepCopy()
-		vcr.Status.ObservedGeneration = vcr.Generation
-		now := metav1.Now()
-		vcr.Status.CompletionTimestamp = &now
-		message := fmt.Sprintf("Unknown mode: %s", vcr.Spec.Mode)
-		setSingleCondition(&vcr.Status.Conditions, metav1.Condition{
-			Type:               storagev1alpha1.ConditionTypeReady,
-			Status:             metav1.ConditionFalse,
-			Reason:             storagev1alpha1.ConditionReasonInvalidMode,
-			Message:            message,
-			LastTransitionTime: now,
-			ObservedGeneration: vcr.Generation,
-		})
-		// Set TTL annotation when marking as Failed (same Patch as Ready condition)
-		// Use retry on conflict to handle concurrent updates
-		if err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
-			current := &storagev1alpha1.VolumeCaptureRequest{}
-			if err := r.Get(ctx, client.ObjectKeyFromObject(&vcr), current); err != nil {
-				return err
-			}
-			// Apply status changes
-			current.Status = vcr.Status
-			// Set TTL annotation
-			r.setTTLAnnotation(current)
-			// Patch both metadata (annotations) and status in the same operation
-			return r.Patch(ctx, current, client.MergeFrom(base))
-		}); err != nil {
-			return ctrl.Result{}, fmt.Errorf("failed to update VCR with Failed condition and TTL annotation: %w", err)
+		if err := r.finalizeVCR(ctx, &vcr, metav1.ConditionFalse, storagev1alpha1.ConditionReasonInvalidMode, fmt.Sprintf("Unknown mode: %s", vcr.Spec.Mode)); err != nil {
+			return ctrl.Result{}, err
 		}
 		return ctrl.Result{}, nil
 	}
@@ -474,45 +435,13 @@ func (r *VolumeCaptureRequestController) processSnapshotMode(ctx context.Context
 
 	// 9. Update VCR status (VSC is ready)
 	// VSC.status.readyToUse == true → mark VCR as Ready (terminal success state)
-	// VCR is fire-and-forget: once completed, we observe the current generation and never reconcile again
-	now := metav1.Now()
-	// Use retry on conflict to handle concurrent updates
-	// Use ObjectKeyFromObject to ensure we have correct namespace/name
-	if err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
-		current := &storagev1alpha1.VolumeCaptureRequest{}
-		if err := r.Get(ctx, client.ObjectKeyFromObject(vcr), current); err != nil {
-			return err
-		}
-		// Create base for status patch BEFORE mutating status
-		baseStatus := current.DeepCopy()
-		// Update status
-		current.Status.DataRef = &storagev1alpha1.ObjectReference{
-			Name: csiVSCName,
-			Kind: "VolumeSnapshotContent", // Explicitly set Kind according to ADR
-		}
-		// VCR is fire-and-forget: once completed, we observe the current generation and never reconcile again
-		current.Status.ObservedGeneration = current.Generation
-		current.Status.CompletionTimestamp = &now
-		setSingleCondition(&current.Status.Conditions, metav1.Condition{
-			Type:               storagev1alpha1.ConditionTypeReady,
-			Status:             metav1.ConditionTrue,
-			Reason:             storagev1alpha1.ConditionReasonCompleted,
-			Message:            fmt.Sprintf("CSI VolumeSnapshotContent %s ready", csiVSCName),
-			LastTransitionTime: now,
-			ObservedGeneration: current.Generation,
-		})
-		// Patch status using Status().Patch() to ensure proper subresource handling
-		if err := r.Status().Patch(ctx, current, client.MergeFrom(baseStatus)); err != nil {
-			return err
-		}
-		// After status patch, create new base for metadata patch (object state has changed)
-		baseMeta := current.DeepCopy()
-		// Set TTL annotation
-		r.setTTLAnnotation(current)
-		// Patch metadata (annotations) separately using fresh base
-		return r.Patch(ctx, current, client.MergeFrom(baseMeta))
-	}); err != nil {
-		return ctrl.Result{}, fmt.Errorf("failed to update VCR with Ready condition and TTL annotation: %w", err)
+	// Set DataRef before finalization
+	vcr.Status.DataRef = &storagev1alpha1.ObjectReference{
+		Name: csiVSCName,
+		Kind: "VolumeSnapshotContent", // Explicitly set Kind according to ADR
+	}
+	if err := r.finalizeVCR(ctx, vcr, metav1.ConditionTrue, storagev1alpha1.ConditionReasonCompleted, fmt.Sprintf("CSI VolumeSnapshotContent %s ready", csiVSCName)); err != nil {
+		return ctrl.Result{}, err
 	}
 
 	l.Info("VolumeCaptureRequest completed", "mode", "Snapshot", "csiVSC", csiVSCName)
@@ -616,37 +545,13 @@ func (r *VolumeCaptureRequestController) processDetachMode(ctx context.Context, 
 			l.Info("PV already detached but not by VCR", "pv", pv.Name)
 		}
 		// Already detached, update status
-		base := vcr.DeepCopy()
+		// Set DataRef before finalization
 		vcr.Status.DataRef = &storagev1alpha1.ObjectReference{
 			Name: pv.Name,
 			Kind: "PersistentVolume",
 		}
-		vcr.Status.ObservedGeneration = vcr.Generation
-		now := metav1.Now()
-		vcr.Status.CompletionTimestamp = &now
-		setSingleCondition(&vcr.Status.Conditions, metav1.Condition{
-			Type:               storagev1alpha1.ConditionTypeReady,
-			Status:             metav1.ConditionTrue,
-			Reason:             storagev1alpha1.ConditionReasonCompleted,
-			Message:            fmt.Sprintf("PV %s already detached", pv.Name),
-			LastTransitionTime: now,
-			ObservedGeneration: vcr.Generation,
-		})
-		// Set TTL annotation when marking as Ready (same Patch as Ready condition)
-		// Use retry on conflict to handle concurrent updates
-		if err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
-			current := &storagev1alpha1.VolumeCaptureRequest{}
-			if err := r.Get(ctx, client.ObjectKeyFromObject(vcr), current); err != nil {
-				return err
-			}
-			// Apply status changes
-			current.Status = vcr.Status
-			// Set TTL annotation
-			r.setTTLAnnotation(current)
-			// Patch both metadata (annotations) and status in the same operation
-			return r.Patch(ctx, current, client.MergeFrom(base))
-		}); err != nil {
-			return ctrl.Result{}, fmt.Errorf("failed to update VCR with Ready condition and TTL annotation: %w", err)
+		if err := r.finalizeVCR(ctx, vcr, metav1.ConditionTrue, storagev1alpha1.ConditionReasonCompleted, fmt.Sprintf("PV %s already detached", pv.Name)); err != nil {
+			return ctrl.Result{}, err
 		}
 		return ctrl.Result{}, nil
 	}
@@ -782,37 +687,13 @@ func (r *VolumeCaptureRequestController) processDetachMode(ctx context.Context, 
 	}
 
 	// 10. Update VCR status
-	vcrBase := vcr.DeepCopy()
+	// Set DataRef before finalization
 	vcr.Status.DataRef = &storagev1alpha1.ObjectReference{
 		Name: pv.Name,
 		Kind: "PersistentVolume", // Explicitly set Kind according to ADR
 	}
-	vcr.Status.ObservedGeneration = vcr.Generation
-	now := metav1.Now()
-	vcr.Status.CompletionTimestamp = &now
-	setSingleCondition(&vcr.Status.Conditions, metav1.Condition{
-		Type:               storagev1alpha1.ConditionTypeReady,
-		Status:             metav1.ConditionTrue,
-		Reason:             storagev1alpha1.ConditionReasonCompleted,
-		Message:            fmt.Sprintf("PV %s detached", pv.Name),
-		LastTransitionTime: now,
-		ObservedGeneration: vcr.Generation,
-	})
-	// Set TTL annotation when marking as Ready (same Patch as Ready condition)
-	// Use retry on conflict to handle concurrent updates
-	if err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
-		current := &storagev1alpha1.VolumeCaptureRequest{}
-		if err := r.Get(ctx, client.ObjectKeyFromObject(vcr), current); err != nil {
-			return err
-		}
-		// Apply status changes
-		current.Status = vcr.Status
-		// Set TTL annotation
-		r.setTTLAnnotation(current)
-		// Patch both metadata (annotations) and status in the same operation
-		return r.Patch(ctx, current, client.MergeFrom(vcrBase))
-	}); err != nil {
-		return ctrl.Result{}, fmt.Errorf("failed to update VCR with Ready condition and TTL annotation: %w", err)
+	if err := r.finalizeVCR(ctx, vcr, metav1.ConditionTrue, storagev1alpha1.ConditionReasonCompleted, fmt.Sprintf("PV %s detached", pv.Name)); err != nil {
+		return ctrl.Result{}, err
 	}
 
 	l.Info("VolumeCaptureRequest completed", "mode", "Detach", "pv", pv.Name)
@@ -870,26 +751,7 @@ func (r *VolumeCaptureRequestController) checkAndHandleTTL(ctx context.Context, 
 		l.Error(err, "Invalid TTL annotation format", "ttl", ttlStr)
 
 		// Set Ready=False condition to inform user about TTL issue
-		base := vcr.DeepCopy()
-		vcr.Status.ObservedGeneration = vcr.Generation
-		now := metav1.Now()
-		setSingleCondition(&vcr.Status.Conditions, metav1.Condition{
-			Type:               storagev1alpha1.ConditionTypeReady,
-			Status:             metav1.ConditionFalse,
-			Reason:             storagev1alpha1.ConditionReasonInvalidTTL,
-			Message:            fmt.Sprintf("Invalid TTL annotation format: %s (error: %v)", ttlStr, err),
-			LastTransitionTime: now,
-			ObservedGeneration: vcr.Generation,
-		})
-		// Use retry on conflict to handle concurrent updates
-		if patchErr := retry.RetryOnConflict(retry.DefaultRetry, func() error {
-			current := &storagev1alpha1.VolumeCaptureRequest{}
-			if getErr := r.Get(ctx, client.ObjectKeyFromObject(vcr), current); getErr != nil {
-				return getErr
-			}
-			current.Status = vcr.Status
-			return r.Status().Patch(ctx, current, client.MergeFrom(base))
-		}); patchErr != nil {
+		if patchErr := r.finalizeVCR(ctx, vcr, metav1.ConditionFalse, storagev1alpha1.ConditionReasonInvalidTTL, fmt.Sprintf("Invalid TTL annotation format: %s (error: %v)", ttlStr, err)); patchErr != nil {
 			l.Error(patchErr, "Failed to update status with InvalidTTL condition")
 			return false, 0, patchErr
 		}
@@ -952,6 +814,14 @@ func (r *VolumeCaptureRequestController) checkAndHandleTTL(ctx context.Context, 
 }
 
 func (r *VolumeCaptureRequestController) markFailed(ctx context.Context, vcr *storagev1alpha1.VolumeCaptureRequest, reason, message string) (ctrl.Result, error) {
+	if err := r.finalizeVCR(ctx, vcr, metav1.ConditionFalse, reason, message); err != nil {
+		return ctrl.Result{}, err
+	}
+	return ctrl.Result{}, nil
+}
+
+// markFailedOld is kept temporarily for reference - will be removed after full migration
+func (r *VolumeCaptureRequestController) markFailedOld(ctx context.Context, vcr *storagev1alpha1.VolumeCaptureRequest, reason, message string) (ctrl.Result, error) {
 	return r.markFailedSnapshot(ctx, vcr, "", reason, message)
 }
 
@@ -965,11 +835,6 @@ func (r *VolumeCaptureRequestController) markFailed(ctx context.Context, vcr *st
 //   - VCR does NOT try to "heal" VSC or recreate it
 //   - VSC.status.error is the single source of truth for snapshot errors
 func (r *VolumeCaptureRequestController) markFailedSnapshot(ctx context.Context, vcr *storagev1alpha1.VolumeCaptureRequest, vscName, reason, message string) (ctrl.Result, error) {
-	vcrBase := vcr.DeepCopy()
-	vcr.Status.ObservedGeneration = vcr.Generation
-	now := metav1.Now()
-	vcr.Status.CompletionTimestamp = &now
-
 	// Set DataRef to VSC if provided (for snapshot failures)
 	if vscName != "" {
 		vcr.Status.DataRef = &storagev1alpha1.ObjectReference{
@@ -978,31 +843,57 @@ func (r *VolumeCaptureRequestController) markFailedSnapshot(ctx context.Context,
 		}
 	}
 
+	if err := r.finalizeVCR(ctx, vcr, metav1.ConditionFalse, reason, message); err != nil {
+		return ctrl.Result{}, err
+	}
+	return ctrl.Result{}, nil
+}
+
+// finalizeVCR finalizes VCR by setting Ready condition, CompletionTimestamp, updating status, and TTL annotation.
+// This is a unified helper to eliminate code duplication across all finalization paths.
+func (r *VolumeCaptureRequestController) finalizeVCR(
+	ctx context.Context,
+	vcr *storagev1alpha1.VolumeCaptureRequest,
+	status metav1.ConditionStatus,
+	reason, message string,
+) error {
+	now := metav1.Now()
+	if vcr.Status.CompletionTimestamp == nil {
+		vcr.Status.CompletionTimestamp = &now
+	}
 	setSingleCondition(&vcr.Status.Conditions, metav1.Condition{
 		Type:               storagev1alpha1.ConditionTypeReady,
-		Status:             metav1.ConditionFalse,
+		Status:             status,
 		Reason:             reason,
 		Message:            message,
 		LastTransitionTime: now,
-		ObservedGeneration: vcr.Generation,
 	})
-	// Set TTL annotation when marking as Failed (same Patch as Ready condition)
-	// Use retry on conflict to handle concurrent updates
+
+	// Update status (retry only for status conflicts)
 	if err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
 		current := &storagev1alpha1.VolumeCaptureRequest{}
 		if err := r.Get(ctx, client.ObjectKeyFromObject(vcr), current); err != nil {
 			return err
 		}
-		// Apply status changes
+		base := current.DeepCopy()
 		current.Status = vcr.Status
-		// Set TTL annotation
-		r.setTTLAnnotation(current)
-		// Patch both metadata (annotations) and status in the same operation
-		return r.Patch(ctx, current, client.MergeFrom(vcrBase))
+		return r.Status().Patch(ctx, current, client.MergeFrom(base))
 	}); err != nil {
-		return ctrl.Result{}, fmt.Errorf("failed to update VCR with Failed condition and TTL annotation: %w", err)
+		if apierrors.IsNotFound(err) {
+			return nil // Object deleted - fine
+		}
+		return fmt.Errorf("failed to update VCR status: %w", err)
 	}
-	return ctrl.Result{}, nil
+
+	// Update TTL annotation (informational only, best-effort, no retry)
+	current := &storagev1alpha1.VolumeCaptureRequest{}
+	if err := r.Get(ctx, client.ObjectKeyFromObject(vcr), current); err == nil {
+		base := current.DeepCopy()
+		r.setTTLAnnotation(current)
+		_ = r.Patch(ctx, current, client.MergeFrom(base)) // Ignore errors - annotation is informational
+	}
+
+	return nil
 }
 
 // Helper functions for future use (e.g., VRR, metrics, reporting)

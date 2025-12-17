@@ -35,16 +35,16 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
-	storagev1alpha1 "fox.flant.com/deckhouse/storage/storage-foundation/api/v1alpha1"
-	"fox.flant.com/deckhouse/storage/storage-foundation/images/controller/pkg/config"
-	"fox.flant.com/deckhouse/storage/storage-foundation/images/controller/pkg/snapshotmeta"
+	storagev1alpha1 "github.com/deckhouse/storage-foundation/api/v1alpha1"
+	"github.com/deckhouse/storage-foundation/images/controller/pkg/config"
+	"github.com/deckhouse/storage-foundation/images/controller/pkg/snapshotmeta"
 	deckhousev1alpha1 "github.com/deckhouse/deckhouse/deckhouse-controller/pkg/apis/deckhouse.io/v1alpha1"
 	snapshotv1 "github.com/kubernetes-csi/external-snapshotter/client/v8/apis/volumesnapshot/v1"
 )
 
-func TestVolumeCaptureRequestSnapshotMode(t *testing.T) {
+func TestVolumeCaptureRequest(t *testing.T) {
 	RegisterFailHandler(Fail)
-	RunSpecs(t, "VolumeCaptureRequest Snapshot Mode Suite")
+	RunSpecs(t, "VolumeCaptureRequest Suite")
 }
 
 var _ = Describe("VolumeCaptureRequest Snapshot Mode", func() {
@@ -76,6 +76,7 @@ var _ = Describe("VolumeCaptureRequest Snapshot Mode", func() {
 		client = fake.NewClientBuilder().
 			WithScheme(scheme).
 			WithStatusSubresource(&snapshotv1.VolumeSnapshotContent{}).
+			WithStatusSubresource(&storagev1alpha1.VolumeCaptureRequest{}).
 			Build()
 
 		ctrl = &VolumeCaptureRequestController{
@@ -173,10 +174,20 @@ var _ = Describe("VolumeCaptureRequest Snapshot Mode", func() {
 		})
 
 		It("should create VSC directly without PVC annotations", func() {
-			// Execute
+			// Execute - may need multiple reconciles if ObjectKeeper UID is not populated
 			result, err := ctrl.processSnapshotMode(ctx, vcr)
 			Expect(err).ToNot(HaveOccurred())
-			Expect(result.Requeue).To(BeFalse())
+			// After creating ObjectKeeper or VSC, controller should requeue
+			// (either Requeue: true if ObjectKeeper UID not populated, or RequeueAfter > 0 after creating VSC)
+			Expect(result.Requeue || result.RequeueAfter > 0).To(BeTrue(), "Should requeue after creating ObjectKeeper or VSC")
+
+			// If Requeue was true (ObjectKeeper UID not populated), do another reconcile
+			if result.Requeue {
+				result, err = ctrl.processSnapshotMode(ctx, vcr)
+				Expect(err).ToNot(HaveOccurred())
+				// After second reconcile, should have RequeueAfter > 0 after creating VSC
+				Expect(result.RequeueAfter).To(BeNumerically(">", 0), "Should requeue after creating VSC")
+			}
 
 			// Verify: PVC should NOT have annotations (ADR: VCR creates VSC directly, no PVC annotations)
 			updatedPVC := &corev1.PersistentVolumeClaim{}
@@ -208,7 +219,17 @@ var _ = Describe("VolumeCaptureRequest Snapshot Mode", func() {
 			// Execute - ObjectKeeper will be created by processSnapshotMode
 			result, err := ctrl.processSnapshotMode(ctx, vcr)
 			Expect(err).ToNot(HaveOccurred())
-			Expect(result.Requeue).To(BeFalse())
+			// After creating ObjectKeeper or VSC, controller should requeue
+			// (either Requeue: true if ObjectKeeper UID not populated, or RequeueAfter > 0 after creating VSC)
+			Expect(result.Requeue || result.RequeueAfter > 0).To(BeTrue(), "Should requeue after creating ObjectKeeper or VSC")
+
+			// If Requeue was true (ObjectKeeper UID not populated), do another reconcile
+			if result.Requeue {
+				result, err = ctrl.processSnapshotMode(ctx, vcr)
+				Expect(err).ToNot(HaveOccurred())
+				// After second reconcile, should have RequeueAfter > 0 after creating VSC
+				Expect(result.RequeueAfter).To(BeNumerically(">", 0), "Should requeue after creating VSC")
+			}
 
 			// Verify ownerRefs
 			vscName := "snapshot-vcr-uid-123"
@@ -728,9 +749,6 @@ var _ = Describe("VolumeCaptureRequest Snapshot Mode", func() {
 				Expect(updatedVCR.Status.DataRef).ToNot(BeNil())
 				Expect(updatedVCR.Status.DataRef.Name).To(Equal(vscName))
 				Expect(updatedVCR.Status.DataRef.Kind).To(Equal("VolumeSnapshotContent"))
-
-				// Should have ObservedGeneration set
-				Expect(updatedVCR.Status.ObservedGeneration).To(Equal(updatedVCR.Generation))
 			})
 
 			It("should not requeue when VSC.status is nil (not terminal error)", func() {
@@ -784,7 +802,7 @@ var _ = Describe("VolumeCaptureRequest Snapshot Mode", func() {
 				Expect(readyCondition).To(BeNil(), "VCR should not have Ready condition when VSC.Status is nil")
 			})
 
-			It("should not change Failed condition on repeated reconcile", func() {
+			It("should not change Ready=False condition on repeated reconcile", func() {
 				// Create ObjectKeeper
 				retainerName := NamePrefixRetainer + "snapshot-vcr-uid-repeated-failed"
 				objectKeeper := &deckhousev1alpha1.ObjectKeeper{
@@ -864,10 +882,12 @@ var _ = Describe("VolumeCaptureRequest Snapshot Mode", func() {
 				updatedVCR := &storagev1alpha1.VolumeCaptureRequest{}
 				Expect(client.Get(ctx, types.NamespacedName{Name: "test-vcr-repeated-failed", Namespace: "default"}, updatedVCR)).To(Succeed())
 				originalTTL := updatedVCR.Annotations[AnnotationKeyTTL]
-				originalMessage := getCondition(updatedVCR.Status.Conditions, storagev1alpha1.ConditionTypeReady).Message
+				readyCondition := getCondition(updatedVCR.Status.Conditions, storagev1alpha1.ConditionTypeReady)
+				Expect(readyCondition).ToNot(BeNil(), "VCR should have Ready condition after failure")
+				originalMessage := readyCondition.Message
 				originalCompletionTime := updatedVCR.Status.CompletionTimestamp
 
-				// Second reconcile: should not change Failed condition or TTL
+				// Second reconcile: should not change Ready=False condition or TTL
 				_, err = ctrl.processSnapshotMode(ctx, updatedVCR)
 				Expect(err).ToNot(HaveOccurred())
 
@@ -1085,6 +1105,11 @@ var _ = Describe("VolumeCaptureRequest Snapshot Mode", func() {
 				// Second reconcile: should detach PV (remove ClaimRef)
 				result, err = ctrl.processDetachMode(ctx, detachVCR)
 				Expect(err).ToNot(HaveOccurred())
+				// If ObjectKeeper UID not populated, may need another reconcile
+				if result.Requeue {
+					result, err = ctrl.processDetachMode(ctx, detachVCR)
+					Expect(err).ToNot(HaveOccurred())
+				}
 
 				// Verify PV is detached
 				updatedPV := &corev1.PersistentVolume{}
@@ -1131,15 +1156,18 @@ var _ = Describe("VolumeCaptureRequest Snapshot Mode", func() {
 		})
 
 		Describe("TTL scenarios", func() {
-			It("should delete VCR when TTL expires", func() {
-				// Create completed VCR with TTL
+			It("should delete terminal VCR when TTL expired", func() {
+				// Create completed VCR with TTL expired
+				now := time.Now()
+				completionTime := metav1.NewTime(now.Add(-15 * time.Minute)) // 15 minutes ago, TTL=10m, so expired
+
 				vcr := &storagev1alpha1.VolumeCaptureRequest{
 					ObjectMeta: metav1.ObjectMeta{
 						Name:      "test-vcr-ttl-expire",
 						Namespace: "default",
 						UID:       types.UID("vcr-uid-ttl"),
 						Annotations: map[string]string{
-							AnnotationKeyTTL: "10m",
+							AnnotationKeyTTL: "10m", // Informational only
 						},
 					},
 					Spec: storagev1alpha1.VolumeCaptureRequestSpec{
@@ -1150,61 +1178,33 @@ var _ = Describe("VolumeCaptureRequest Snapshot Mode", func() {
 						},
 					},
 					Status: storagev1alpha1.VolumeCaptureRequestStatus{
-						CompletionTimestamp: &metav1.Time{Time: time.Now().Add(-11 * time.Minute)}, // Expired
+						CompletionTimestamp: &completionTime,
+						Conditions: []metav1.Condition{
+							{
+								Type:               storagev1alpha1.ConditionTypeReady,
+								Status:             metav1.ConditionTrue,
+								Reason:             storagev1alpha1.ConditionReasonCompleted,
+								LastTransitionTime: completionTime,
+							},
+						},
 					},
 				}
 				Expect(client.Create(ctx, vcr)).To(Succeed())
 
-				// Execute checkAndHandleTTL
-				shouldDelete, _, err := ctrl.checkAndHandleTTL(ctx, vcr)
-				Expect(err).ToNot(HaveOccurred())
-				Expect(shouldDelete).To(BeTrue(), "VCR should be deleted when TTL expires")
+				// Execute TTL scanner
+				ctrl.scanAndDeleteExpiredVCRs(ctx, client)
 
-				// Verify VCR is deleted
+				// Verify VCR is deleted (scanner used config TTL, not annotation TTL)
 				deletedVCR := &storagev1alpha1.VolumeCaptureRequest{}
-				err = client.Get(ctx, types.NamespacedName{Name: "test-vcr-ttl-expire", Namespace: "default"}, deletedVCR)
-				Expect(apierrors.IsNotFound(err)).To(BeTrue(), "VCR should be deleted")
+				err := client.Get(ctx, types.NamespacedName{Name: "test-vcr-ttl-expire", Namespace: "default"}, deletedVCR)
+				Expect(apierrors.IsNotFound(err)).To(BeTrue(), "VCR should be deleted because config TTL (10m) expired")
 			})
 
-			It("should set Ready=False with InvalidTTL reason when TTL annotation is invalid", func() {
-				// Create VCR with invalid TTL
-				vcr := &storagev1alpha1.VolumeCaptureRequest{
-					ObjectMeta: metav1.ObjectMeta{
-						Name:      "test-vcr-invalid-ttl",
-						Namespace: "default",
-						UID:       types.UID("vcr-uid-invalid-ttl"),
-						Annotations: map[string]string{
-							AnnotationKeyTTL: "invalid-ttl-format",
-						},
-					},
-					Spec: storagev1alpha1.VolumeCaptureRequestSpec{
-						Mode: ModeSnapshot,
-						PersistentVolumeClaimRef: &storagev1alpha1.ObjectReference{
-							Namespace: "default",
-							Name:      "test-pvc",
-						},
-					},
-					Status: storagev1alpha1.VolumeCaptureRequestStatus{
-						CompletionTimestamp: &metav1.Time{Time: time.Now()},
-					},
-				}
-				Expect(client.Create(ctx, vcr)).To(Succeed())
+			It("should NOT delete terminal VCR when TTL not expired", func() {
+				// Create completed VCR with TTL not expired
+				now := time.Now()
+				completionTime := metav1.NewTime(now.Add(-5 * time.Minute)) // 5 minutes ago, TTL=10m, so not expired
 
-				// Execute Reconcile (which calls checkAndHandleTTL)
-				// checkAndHandleTTL should set Ready=False with InvalidTTL reason, not delete VCR
-				req := reconcile.Request{NamespacedName: types.NamespacedName{Name: "test-vcr-invalid-ttl", Namespace: "default"}}
-				_, err := ctrl.Reconcile(ctx, req)
-				Expect(err).ToNot(HaveOccurred())
-
-				// Verify VCR still exists (not deleted)
-				updatedVCR := &storagev1alpha1.VolumeCaptureRequest{}
-				err = client.Get(ctx, types.NamespacedName{Name: "test-vcr-invalid-ttl", Namespace: "default"}, updatedVCR)
-				Expect(err).ToNot(HaveOccurred(), "VCR should not be deleted with invalid TTL")
-				Expect(updatedVCR).ToNot(BeNil(), "VCR should still exist")
-			})
-
-			It("should requeue when TTL not expired yet", func() {
-				// Create VCR with TTL that hasn't expired
 				vcr := &storagev1alpha1.VolumeCaptureRequest{
 					ObjectMeta: metav1.ObjectMeta{
 						Name:      "test-vcr-ttl-not-expired",
@@ -1222,21 +1222,251 @@ var _ = Describe("VolumeCaptureRequest Snapshot Mode", func() {
 						},
 					},
 					Status: storagev1alpha1.VolumeCaptureRequestStatus{
-						CompletionTimestamp: &metav1.Time{Time: time.Now().Add(-5 * time.Minute)}, // Not expired yet
+						CompletionTimestamp: &completionTime,
+						Conditions: []metav1.Condition{
+							{
+								Type:               storagev1alpha1.ConditionTypeReady,
+								Status:             metav1.ConditionTrue,
+								Reason:             storagev1alpha1.ConditionReasonCompleted,
+								LastTransitionTime: completionTime,
+							},
+						},
 					},
 				}
 				Expect(client.Create(ctx, vcr)).To(Succeed())
 
-				// Execute checkAndHandleTTL
-				shouldDelete, requeueAfter, err := ctrl.checkAndHandleTTL(ctx, vcr)
-				Expect(err).ToNot(HaveOccurred())
-				Expect(shouldDelete).To(BeFalse(), "VCR should NOT be deleted when TTL not expired")
-				Expect(requeueAfter).To(BeNumerically(">", 0), "Should requeue")
-				Expect(requeueAfter).To(BeNumerically("<=", 70*time.Second), "RequeueAfter should be <= 1m + 10% jitter")
+				// Execute TTL scanner
+				ctrl.scanAndDeleteExpiredVCRs(ctx, client)
 
 				// Verify VCR still exists
-				updatedVCR := &storagev1alpha1.VolumeCaptureRequest{}
-				Expect(client.Get(ctx, types.NamespacedName{Name: "test-vcr-ttl-not-expired", Namespace: "default"}, updatedVCR)).To(Succeed())
+				existingVCR := &storagev1alpha1.VolumeCaptureRequest{}
+				err := client.Get(ctx, types.NamespacedName{Name: "test-vcr-ttl-not-expired", Namespace: "default"}, existingVCR)
+				Expect(err).ToNot(HaveOccurred(), "VCR should NOT be deleted because config TTL (10m) not expired")
+			})
+
+			It("should NOT delete non-terminal VCR even if TTL expired", func() {
+				// Create non-terminal VCR with TTL expired
+				now := time.Now()
+				completionTime := metav1.NewTime(now.Add(-15 * time.Minute)) // 15 minutes ago
+
+				vcr := &storagev1alpha1.VolumeCaptureRequest{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "test-vcr-non-terminal",
+						Namespace: "default",
+						UID:       types.UID("vcr-uid-non-terminal"),
+						Annotations: map[string]string{
+							AnnotationKeyTTL: "10m",
+						},
+					},
+					Spec: storagev1alpha1.VolumeCaptureRequestSpec{
+						Mode: ModeSnapshot,
+						PersistentVolumeClaimRef: &storagev1alpha1.ObjectReference{
+							Namespace: "default",
+							Name:      "test-pvc",
+						},
+					},
+					Status: storagev1alpha1.VolumeCaptureRequestStatus{
+						CompletionTimestamp: &completionTime,
+						// No Ready condition - non-terminal
+					},
+				}
+				Expect(client.Create(ctx, vcr)).To(Succeed())
+
+				// Execute TTL scanner
+				ctrl.scanAndDeleteExpiredVCRs(ctx, client)
+
+				// Verify VCR still exists (non-terminal VCRs are not deleted)
+				existingVCR := &storagev1alpha1.VolumeCaptureRequest{}
+				err := client.Get(ctx, types.NamespacedName{Name: "test-vcr-non-terminal", Namespace: "default"}, existingVCR)
+				Expect(err).ToNot(HaveOccurred(), "Non-terminal VCR should NOT be deleted even if TTL expired")
+			})
+
+			It("should delete Ready=False VCR when TTL expired", func() {
+				// Create failed VCR with TTL expired
+				now := time.Now()
+				completionTime := metav1.NewTime(now.Add(-15 * time.Minute)) // 15 minutes ago
+
+				vcr := &storagev1alpha1.VolumeCaptureRequest{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "test-vcr-failed-ttl-expire",
+						Namespace: "default",
+						UID:       types.UID("vcr-uid-failed-ttl"),
+						Annotations: map[string]string{
+							AnnotationKeyTTL: "10m",
+						},
+					},
+					Spec: storagev1alpha1.VolumeCaptureRequestSpec{
+						Mode: ModeSnapshot,
+						PersistentVolumeClaimRef: &storagev1alpha1.ObjectReference{
+							Namespace: "default",
+							Name:      "test-pvc",
+						},
+					},
+					Status: storagev1alpha1.VolumeCaptureRequestStatus{
+						CompletionTimestamp: &completionTime,
+						Conditions: []metav1.Condition{
+							{
+								Type:               storagev1alpha1.ConditionTypeReady,
+								Status:             metav1.ConditionFalse,
+								Reason:             storagev1alpha1.ConditionReasonNotFound,
+								LastTransitionTime: completionTime,
+							},
+						},
+					},
+				}
+				Expect(client.Create(ctx, vcr)).To(Succeed())
+
+				// Execute TTL scanner
+				ctrl.scanAndDeleteExpiredVCRs(ctx, client)
+
+				// Verify VCR is deleted
+				deletedVCR := &storagev1alpha1.VolumeCaptureRequest{}
+				err := client.Get(ctx, types.NamespacedName{Name: "test-vcr-failed-ttl-expire", Namespace: "default"}, deletedVCR)
+				Expect(apierrors.IsNotFound(err)).To(BeTrue(), "Failed VCR should be deleted when TTL expired")
+			})
+
+			It("should use config TTL, not annotation TTL", func() {
+				// This test verifies that TTL scanner uses config.RequestTTL, not annotation TTL
+				now := time.Now()
+				completionTime := metav1.NewTime(now.Add(-15 * time.Minute)) // 15 minutes ago
+
+				// Create VCR with:
+				// - annotation TTL = 1h (should be ignored)
+				// - config TTL = 10m (should be used)
+				// - completionTime = 15m ago
+				// Expected: VCR should be deleted (15m > 10m config TTL)
+				vcr := &storagev1alpha1.VolumeCaptureRequest{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "test-vcr-config-ttl",
+						Namespace: "default",
+						UID:       types.UID("vcr-uid-config-ttl"),
+						Annotations: map[string]string{
+							AnnotationKeyTTL: "1h", // Annotation TTL - should be ignored
+						},
+					},
+					Spec: storagev1alpha1.VolumeCaptureRequestSpec{
+						Mode: ModeSnapshot,
+						PersistentVolumeClaimRef: &storagev1alpha1.ObjectReference{
+							Namespace: "default",
+							Name:      "test-pvc",
+						},
+					},
+					Status: storagev1alpha1.VolumeCaptureRequestStatus{
+						CompletionTimestamp: &completionTime,
+						Conditions: []metav1.Condition{
+							{
+								Type:               storagev1alpha1.ConditionTypeReady,
+								Status:             metav1.ConditionTrue,
+								Reason:             storagev1alpha1.ConditionReasonCompleted,
+								LastTransitionTime: completionTime,
+							},
+						},
+					},
+				}
+				Expect(client.Create(ctx, vcr)).To(Succeed())
+
+				// Execute scanAndDeleteExpiredVCRs
+				ctrl.scanAndDeleteExpiredVCRs(ctx, client)
+
+				// Verify VCR is deleted (scanner used config TTL, not annotation TTL)
+				deletedVCR := &storagev1alpha1.VolumeCaptureRequest{}
+				err := client.Get(ctx, types.NamespacedName{Name: "test-vcr-config-ttl", Namespace: "default"}, deletedVCR)
+				Expect(apierrors.IsNotFound(err)).To(BeTrue(), "VCR should be deleted because config TTL (10m) expired, not annotation TTL (1h)")
+			})
+
+			It("should not delete VCR when config TTL not expired, even if annotation TTL expired", func() {
+				// This test verifies that annotation TTL is ignored even when it's shorter than config TTL
+				now := time.Now()
+				completionTime := metav1.NewTime(now.Add(-5 * time.Minute)) // 5 minutes ago
+
+				// Create VCR with:
+				// - annotation TTL = 1m (expired, but should be ignored)
+				// - config TTL = 10m (not expired)
+				// - completionTime = 5m ago
+				// Expected: VCR should NOT be deleted (5m < 10m config TTL)
+				vcr := &storagev1alpha1.VolumeCaptureRequest{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "test-vcr-annotation-ignored",
+						Namespace: "default",
+						UID:       types.UID("vcr-uid-annotation-ignored"),
+						Annotations: map[string]string{
+							AnnotationKeyTTL: "1m", // Annotation TTL expired, but should be ignored
+						},
+					},
+					Spec: storagev1alpha1.VolumeCaptureRequestSpec{
+						Mode: ModeSnapshot,
+						PersistentVolumeClaimRef: &storagev1alpha1.ObjectReference{
+							Namespace: "default",
+							Name:      "test-pvc",
+						},
+					},
+					Status: storagev1alpha1.VolumeCaptureRequestStatus{
+						CompletionTimestamp: &completionTime,
+						Conditions: []metav1.Condition{
+							{
+								Type:               storagev1alpha1.ConditionTypeReady,
+								Status:             metav1.ConditionTrue,
+								Reason:             storagev1alpha1.ConditionReasonCompleted,
+								LastTransitionTime: completionTime,
+							},
+						},
+					},
+				}
+				Expect(client.Create(ctx, vcr)).To(Succeed())
+
+				// Execute scanAndDeleteExpiredVCRs
+				ctrl.scanAndDeleteExpiredVCRs(ctx, client)
+
+				// Verify VCR still exists (scanner ignored annotation TTL)
+				existingVCR := &storagev1alpha1.VolumeCaptureRequest{}
+				err := client.Get(ctx, types.NamespacedName{Name: "test-vcr-annotation-ignored", Namespace: "default"}, existingVCR)
+				Expect(err).ToNot(HaveOccurred(), "VCR should NOT be deleted because config TTL (10m) not expired, annotation TTL (1m) is ignored")
+			})
+		})
+
+		Describe("setTTLAnnotation", func() {
+			It("should set TTL annotation when not exists", func() {
+				vcr := &storagev1alpha1.VolumeCaptureRequest{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "test-vcr",
+						Namespace: "default",
+					},
+				}
+
+				ctrl.setTTLAnnotation(vcr)
+
+				Expect(vcr.Annotations).ToNot(BeNil())
+				Expect(vcr.Annotations[AnnotationKeyTTL]).To(Equal("10m"))
+			})
+
+			It("should not overwrite existing TTL annotation", func() {
+				vcr := &storagev1alpha1.VolumeCaptureRequest{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "test-vcr",
+						Namespace: "default",
+						Annotations: map[string]string{
+							AnnotationKeyTTL: "30m",
+						},
+					},
+				}
+
+				ctrl.setTTLAnnotation(vcr)
+
+				Expect(vcr.Annotations[AnnotationKeyTTL]).To(Equal("30m"))
+			})
+
+			It("should use config TTL when available", func() {
+				cfg.RequestTTLStr = "20m"
+				vcr := &storagev1alpha1.VolumeCaptureRequest{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "test-vcr",
+						Namespace: "default",
+					},
+				}
+
+				ctrl.setTTLAnnotation(vcr)
+
+				Expect(vcr.Annotations[AnnotationKeyTTL]).To(Equal("20m"))
 			})
 		})
 
@@ -1324,7 +1554,7 @@ var _ = Describe("VolumeCaptureRequest Snapshot Mode", func() {
 					ObjectMeta: metav1.ObjectMeta{
 						Name:      "test-vcr-error-scenarios",
 						Namespace: "default",
-						// Don't set UID - let apiserver assign it
+						UID:       types.UID("vcr-uid-error-scenarios"), // Set UID manually for fake client
 					},
 					Spec: storagev1alpha1.VolumeCaptureRequestSpec{
 						Mode: ModeSnapshot,
@@ -1335,9 +1565,9 @@ var _ = Describe("VolumeCaptureRequest Snapshot Mode", func() {
 					},
 				}
 				Expect(client.Create(ctx, vcr)).To(Succeed())
-				// Re-read to get actual UID assigned by apiserver
+				// Re-read to get actual UID (should be same as we set)
 				Expect(client.Get(ctx, types.NamespacedName{Name: "test-vcr-error-scenarios", Namespace: "default"}, vcr)).To(Succeed())
-				Expect(vcr.UID).ToNot(BeEmpty(), "VCR should have UID assigned by apiserver")
+				Expect(vcr.UID).ToNot(BeEmpty(), "VCR should have UID")
 			})
 
 			It("should fail VCR when secret is missing (secret not found error)", func() {
@@ -1367,7 +1597,15 @@ var _ = Describe("VolumeCaptureRequest Snapshot Mode", func() {
 				// First reconcile: should create VSC
 				result, err := ctrl.processSnapshotMode(ctx, vcr)
 				Expect(err).ToNot(HaveOccurred())
-				Expect(result.RequeueAfter).To(BeNumerically(">", 0), "Should requeue while waiting for snapshot-controller")
+				// After creating ObjectKeeper or VSC, controller should requeue
+				// (either Requeue: true if ObjectKeeper UID not populated, or RequeueAfter > 0 after creating VSC)
+				Expect(result.Requeue || result.RequeueAfter > 0).To(BeTrue(), "Should requeue after creating ObjectKeeper or VSC")
+				// If Requeue was true (ObjectKeeper UID not populated), do another reconcile
+				if result.Requeue {
+					result, err = ctrl.processSnapshotMode(ctx, vcr)
+					Expect(err).ToNot(HaveOccurred())
+					Expect(result.RequeueAfter).To(BeNumerically(">", 0), "Should requeue after creating VSC")
+				}
 
 				// Verify VSC exists (using actual VCR UID)
 				vscName := "snapshot-" + string(vcr.UID)
@@ -1393,14 +1631,13 @@ var _ = Describe("VolumeCaptureRequest Snapshot Mode", func() {
 
 				// Verify VCR is marked as failed
 				updatedVCR := &storagev1alpha1.VolumeCaptureRequest{}
-				Expect(client.Get(ctx, types.NamespacedName{Name: "test-vcr", Namespace: "default"}, updatedVCR)).To(Succeed())
+				Expect(client.Get(ctx, types.NamespacedName{Name: "test-vcr-error-scenarios", Namespace: "default"}, updatedVCR)).To(Succeed())
 
 				readyCondition := getCondition(updatedVCR.Status.Conditions, storagev1alpha1.ConditionTypeReady)
 				Expect(readyCondition).ToNot(BeNil())
 				Expect(readyCondition.Status).To(Equal(metav1.ConditionFalse))
 				Expect(readyCondition.Reason).To(Equal(storagev1alpha1.ConditionReasonSnapshotCreationFailed))
 				Expect(readyCondition.Message).To(ContainSubstring(errorMsg))
-				Expect(updatedVCR.Status.ObservedGeneration).To(Equal(updatedVCR.Generation))
 				Expect(updatedVCR.Status.CompletionTimestamp).ToNot(BeNil())
 				Expect(updatedVCR.Status.DataRef).ToNot(BeNil())
 				Expect(updatedVCR.Status.DataRef.Name).To(Equal(vscName))
@@ -1526,7 +1763,9 @@ var _ = Describe("VolumeCaptureRequest Snapshot Mode", func() {
 				// First reconcile: should create ObjectKeeper
 				result, err := ctrl.processSnapshotMode(ctx, vcr)
 				Expect(err).ToNot(HaveOccurred())
-				Expect(result.RequeueAfter).To(BeNumerically(">", 0))
+				// After creating ObjectKeeper or VSC, controller should requeue
+				// (either Requeue: true if ObjectKeeper UID not populated, or RequeueAfter > 0 after creating VSC)
+				Expect(result.Requeue || result.RequeueAfter > 0).To(BeTrue(), "Should requeue after creating ObjectKeeper or VSC")
 
 				// Verify ObjectKeeper was created by controller
 				Expect(client.Get(ctx, types.NamespacedName{Name: retainerName}, objectKeeper)).To(Succeed())
@@ -1545,7 +1784,15 @@ var _ = Describe("VolumeCaptureRequest Snapshot Mode", func() {
 				// First reconcile: create ObjectKeeper and VSC
 				result, err := ctrl.processSnapshotMode(ctx, vcr)
 				Expect(err).ToNot(HaveOccurred())
-				Expect(result.RequeueAfter).To(BeNumerically(">", 0))
+				// After creating ObjectKeeper or VSC, controller should requeue
+				// (either Requeue: true if ObjectKeeper UID not populated, or RequeueAfter > 0 after creating VSC)
+				Expect(result.Requeue || result.RequeueAfter > 0).To(BeTrue(), "Should requeue after creating ObjectKeeper or VSC")
+				// If Requeue was true (ObjectKeeper UID not populated), do another reconcile
+				if result.Requeue {
+					result, err = ctrl.processSnapshotMode(ctx, vcr)
+					Expect(err).ToNot(HaveOccurred())
+					Expect(result.RequeueAfter).To(BeNumerically(">", 0), "Should requeue after creating VSC")
+				}
 
 				// Simulate edge case: VSC has both ReadyToUse=true AND error
 				// This shouldn't happen in practice, but we handle it defensively
@@ -1586,7 +1833,15 @@ var _ = Describe("VolumeCaptureRequest Snapshot Mode", func() {
 				// First reconcile: create ObjectKeeper and VSC
 				result, err := ctrl.processSnapshotMode(ctx, vcr)
 				Expect(err).ToNot(HaveOccurred())
-				Expect(result.RequeueAfter).To(BeNumerically(">", 0))
+				// After creating ObjectKeeper or VSC, controller should requeue
+				// (either Requeue: true if ObjectKeeper UID not populated, or RequeueAfter > 0 after creating VSC)
+				Expect(result.Requeue || result.RequeueAfter > 0).To(BeTrue(), "Should requeue after creating ObjectKeeper or VSC")
+				// If Requeue was true (ObjectKeeper UID not populated), do another reconcile
+				if result.Requeue {
+					result, err = ctrl.processSnapshotMode(ctx, vcr)
+					Expect(err).ToNot(HaveOccurred())
+					Expect(result.RequeueAfter).To(BeNumerically(">", 0), "Should requeue after creating VSC")
+				}
 
 				// Verify ObjectKeeper exists
 				retainerName := NamePrefixRetainer + "snapshot-" + string(vcr.UID)
@@ -1658,7 +1913,15 @@ var _ = Describe("VolumeCaptureRequest Snapshot Mode", func() {
 				// Simulate leader 1: first reconcile creates ObjectKeeper and VSC
 				result, err := ctrl.processSnapshotMode(ctx, vcr)
 				Expect(err).ToNot(HaveOccurred())
-				Expect(result.RequeueAfter).To(BeNumerically(">", 0))
+				// After creating ObjectKeeper or VSC, controller should requeue
+				// (either Requeue: true if ObjectKeeper UID not populated, or RequeueAfter > 0 after creating VSC)
+				Expect(result.Requeue || result.RequeueAfter > 0).To(BeTrue(), "Should requeue after creating ObjectKeeper or VSC")
+				// If Requeue was true (ObjectKeeper UID not populated), do another reconcile
+				if result.Requeue {
+					result, err = ctrl.processSnapshotMode(ctx, vcr)
+					Expect(err).ToNot(HaveOccurred())
+					Expect(result.RequeueAfter).To(BeNumerically(">", 0), "Should requeue after creating VSC")
+				}
 
 				// Verify ObjectKeeper exists
 				retainerName := NamePrefixRetainer + "snapshot-" + string(vcr.UID)
