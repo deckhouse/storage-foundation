@@ -18,6 +18,7 @@ package controllers
 
 import (
 	"context"
+	"fmt"
 
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/manager"
@@ -31,10 +32,16 @@ import (
 // TTL scanner runs only on the leader replica to prevent duplicate deletion attempts.
 // When leadership changes, the scanner context is cancelled and scanner stops gracefully.
 func AddVolumeCaptureRequestControllerToManager(mgr ctrl.Manager, cfg *config.Options) error {
+	apiReader := mgr.GetAPIReader()
+	if apiReader == nil {
+		return fmt.Errorf("APIReader must not be nil: controllers require APIReader to read StorageClass")
+	}
+
 	reconciler := &VolumeCaptureRequestController{
-		Client: mgr.GetClient(),
-		Scheme: mgr.GetScheme(),
-		Config: cfg,
+		Client:    mgr.GetClient(),
+		APIReader: apiReader,
+		Scheme:    mgr.GetScheme(),
+		Config:    cfg,
 	}
 
 	if err := reconciler.SetupWithManager(mgr); err != nil {
@@ -60,9 +67,15 @@ func AddVolumeCaptureRequestControllerToManager(mgr ctrl.Manager, cfg *config.Op
 
 // AddVolumeRestoreRequestControllerToManager adds VolumeRestoreRequestController to the manager
 func AddVolumeRestoreRequestControllerToManager(mgr ctrl.Manager, cfg *config.Options) error {
+	apiReader := mgr.GetAPIReader()
+	if apiReader == nil {
+		return fmt.Errorf("APIReader must not be nil: controllers require APIReader to read StorageClass")
+	}
+
 	return (&VolumeRestoreRequestController{
-		Client: mgr.GetClient(),
-		Scheme: mgr.GetScheme(),
-		Config: cfg,
+		Client:    mgr.GetClient(),
+		APIReader: apiReader,
+		Scheme:    mgr.GetScheme(),
+		Config:    cfg,
 	}).SetupWithManager(mgr)
 }

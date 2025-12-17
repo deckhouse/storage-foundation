@@ -48,10 +48,16 @@ const (
 )
 
 // VolumeRestoreRequestController reconciles VolumeRestoreRequest objects
+//
+// StorageClass is read via APIReader (direct API, no cache) since it's cluster-level
+// configuration that doesn't need to be watched or cached.
+//
+// Controllers MUST read StorageClass via APIReader. APIReader is a required dependency.
 type VolumeRestoreRequestController struct {
 	client.Client
-	Scheme *runtime.Scheme
-	Config *config.Options
+	APIReader client.Reader // Required: for reading StorageClass directly from API server
+	Scheme    *runtime.Scheme
+	Config    *config.Options
 }
 
 func (r *VolumeRestoreRequestController) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
@@ -67,7 +73,7 @@ func (r *VolumeRestoreRequestController) Reconcile(ctx context.Context, req ctrl
 	}
 
 	// Skip if already Ready
-	if isConditionTrue(vrr.Status.Conditions, ConditionTypeReady) {
+	if isConditionTrue(vrr.Status.Conditions, storagev1alpha1.ConditionTypeReady) {
 		// Check TTL for completed VRR (after Ready short-circuit)
 		// This ensures TTL cleanup happens only after VRR is fully completed
 		if shouldDelete, requeueAfter, err := r.checkAndHandleTTL(ctx, &vrr); err != nil {
@@ -84,7 +90,7 @@ func (r *VolumeRestoreRequestController) Reconcile(ctx context.Context, req ctrl
 	}
 
 	// Skip if already Failed and observed
-	if isConditionFalse(vrr.Status.Conditions, ConditionTypeReady) {
+	if isConditionFalse(vrr.Status.Conditions, storagev1alpha1.ConditionTypeReady) {
 		if vrr.Status.ObservedGeneration == vrr.Generation {
 			// Check TTL for failed VRR (after Failed short-circuit)
 			// This ensures TTL cleanup happens only after VRR is fully failed
@@ -114,7 +120,7 @@ func (r *VolumeRestoreRequestController) Reconcile(ctx context.Context, req ctrl
 	case SourceKindPersistentVolume:
 		return r.processPersistentVolumeRestore(ctx, &vrr)
 	default:
-		return r.markFailed(ctx, &vrr, ErrorReasonInvalidSource, fmt.Sprintf("Unsupported source kind: %s", vrr.Spec.SourceRef.Kind))
+		return r.markFailed(ctx, &vrr, storagev1alpha1.ConditionReasonInvalidSource, fmt.Sprintf("Unsupported source kind: %s", vrr.Spec.SourceRef.Kind))
 	}
 }
 
@@ -130,7 +136,7 @@ func (r *VolumeRestoreRequestController) processVolumeSnapshotContentRestore(
 	csiVSC := &snapshotv1.VolumeSnapshotContent{}
 	if err := r.Get(ctx, client.ObjectKey{Name: vrr.Spec.SourceRef.Name}, csiVSC); err != nil {
 		if apierrors.IsNotFound(err) {
-			return r.markFailed(ctx, vrr, ErrorReasonNotFound, fmt.Sprintf("CSI VolumeSnapshotContent %s not found", vrr.Spec.SourceRef.Name))
+			return r.markFailed(ctx, vrr, storagev1alpha1.ConditionReasonNotFound, fmt.Sprintf("CSI VolumeSnapshotContent %s not found", vrr.Spec.SourceRef.Name))
 		}
 		return ctrl.Result{}, fmt.Errorf("failed to get CSI VolumeSnapshotContent: %w", err)
 	}
@@ -180,9 +186,9 @@ func (r *VolumeRestoreRequestController) processVolumeSnapshotContentRestore(
 			now := metav1.Now()
 			vrr.Status.CompletionTimestamp = &now
 			setSingleCondition(&vrr.Status.Conditions, metav1.Condition{
-				Type:               ConditionTypeReady,
+				Type:               storagev1alpha1.ConditionTypeReady,
 				Status:             metav1.ConditionTrue,
-				Reason:             ConditionReasonCompleted,
+				Reason:             storagev1alpha1.ConditionReasonCompleted,
 				Message:            fmt.Sprintf("PVC %s/%s restored successfully", vrr.Spec.TargetNamespace, vrr.Spec.TargetPVCName),
 				LastTransitionTime: now,
 				ObservedGeneration: vrr.Generation,
@@ -255,7 +261,7 @@ func (r *VolumeRestoreRequestController) processVolumeSnapshotContentRestore(
 		targetSC := &storagev1.StorageClass{}
 		if err := r.Get(ctx, client.ObjectKey{Name: vrr.Spec.StorageClassName}, targetSC); err != nil {
 			if apierrors.IsNotFound(err) {
-				return r.markFailed(ctx, vrr, ErrorReasonNotFound, fmt.Sprintf("StorageClass %s not found", vrr.Spec.StorageClassName))
+				return r.markFailed(ctx, vrr, storagev1alpha1.ConditionReasonNotFound, fmt.Sprintf("StorageClass %s not found", vrr.Spec.StorageClassName))
 			}
 			return ctrl.Result{}, fmt.Errorf("failed to get StorageClass: %w", err)
 		}
@@ -345,9 +351,9 @@ func (r *VolumeRestoreRequestController) processVolumeSnapshotContentRestore(
 	now := metav1.Now()
 	vrr.Status.CompletionTimestamp = &now
 	setSingleCondition(&vrr.Status.Conditions, metav1.Condition{
-		Type:               ConditionTypeReady,
+		Type:               storagev1alpha1.ConditionTypeReady,
 		Status:             metav1.ConditionTrue,
-		Reason:             ConditionReasonCompleted,
+		Reason:             storagev1alpha1.ConditionReasonCompleted,
 		Message:            fmt.Sprintf("PVC %s/%s restored successfully", vrr.Spec.TargetNamespace, vrr.Spec.TargetPVCName),
 		LastTransitionTime: now,
 		ObservedGeneration: vrr.Generation,
@@ -385,7 +391,7 @@ func (r *VolumeRestoreRequestController) processPersistentVolumeRestore(
 	pv := &corev1.PersistentVolume{}
 	if err := r.Get(ctx, client.ObjectKey{Name: vrr.Spec.SourceRef.Name}, pv); err != nil {
 		if apierrors.IsNotFound(err) {
-			return r.markFailed(ctx, vrr, ErrorReasonNotFound, fmt.Sprintf("PersistentVolume %s not found", vrr.Spec.SourceRef.Name))
+			return r.markFailed(ctx, vrr, storagev1alpha1.ConditionReasonNotFound, fmt.Sprintf("PersistentVolume %s not found", vrr.Spec.SourceRef.Name))
 		}
 		return ctrl.Result{}, fmt.Errorf("failed to get PersistentVolume: %w", err)
 	}
@@ -433,9 +439,9 @@ func (r *VolumeRestoreRequestController) processPersistentVolumeRestore(
 			now := metav1.Now()
 			vrr.Status.CompletionTimestamp = &now
 			setSingleCondition(&vrr.Status.Conditions, metav1.Condition{
-				Type:               ConditionTypeReady,
+				Type:               storagev1alpha1.ConditionTypeReady,
 				Status:             metav1.ConditionTrue,
-				Reason:             ConditionReasonCompleted,
+				Reason:             storagev1alpha1.ConditionReasonCompleted,
 				Message:            fmt.Sprintf("PVC %s/%s restored successfully from PV", vrr.Spec.TargetNamespace, vrr.Spec.TargetPVCName),
 				LastTransitionTime: now,
 				ObservedGeneration: vrr.Generation,
@@ -470,7 +476,7 @@ func (r *VolumeRestoreRequestController) processPersistentVolumeRestore(
 
 	// 4. Check if PV is available (not bound to another PVC)
 	if pv.Spec.ClaimRef != nil {
-		return r.markFailed(ctx, vrr, ErrorReasonPVBound, fmt.Sprintf("PersistentVolume %s is already bound to PVC %s/%s", pv.Name, pv.Spec.ClaimRef.Namespace, pv.Spec.ClaimRef.Name))
+		return r.markFailed(ctx, vrr, storagev1alpha1.ConditionReasonPVBound, fmt.Sprintf("PersistentVolume %s is already bound to PVC %s/%s", pv.Name, pv.Spec.ClaimRef.Namespace, pv.Spec.ClaimRef.Name))
 	}
 
 	// 5. Create temporary PVC in service namespace to bind to PV
@@ -540,9 +546,12 @@ func (r *VolumeRestoreRequestController) processPersistentVolumeRestore(
 	// According to ADR, cross-SC restore is not supported (VRR gets Incompatible condition)
 	if vrr.Spec.StorageClassName != "" {
 		targetSC := &storagev1.StorageClass{}
-		if err := r.Get(ctx, client.ObjectKey{Name: vrr.Spec.StorageClassName}, targetSC); err != nil {
+		// StorageClass is read via APIReader (direct API, no cache) since it's cluster-level
+		// configuration that doesn't need to be watched or cached.
+		// Controllers MUST read StorageClass via APIReader. APIReader is a required dependency.
+		if err := r.APIReader.Get(ctx, client.ObjectKey{Name: vrr.Spec.StorageClassName}, targetSC); err != nil {
 			if apierrors.IsNotFound(err) {
-				return r.markFailed(ctx, vrr, ErrorReasonNotFound, fmt.Sprintf("StorageClass %s not found", vrr.Spec.StorageClassName))
+				return r.markFailed(ctx, vrr, storagev1alpha1.ConditionReasonNotFound, fmt.Sprintf("StorageClass %s not found", vrr.Spec.StorageClassName))
 			}
 			return ctrl.Result{}, fmt.Errorf("failed to get StorageClass: %w", err)
 		}
@@ -609,9 +618,9 @@ func (r *VolumeRestoreRequestController) processPersistentVolumeRestore(
 	now := metav1.Now()
 	vrr.Status.CompletionTimestamp = &now
 	setSingleCondition(&vrr.Status.Conditions, metav1.Condition{
-		Type:               ConditionTypeReady,
+		Type:               storagev1alpha1.ConditionTypeReady,
 		Status:             metav1.ConditionTrue,
-		Reason:             ConditionReasonCompleted,
+		Reason:             storagev1alpha1.ConditionReasonCompleted,
 		Message:            fmt.Sprintf("PVC %s/%s restored successfully from PV", vrr.Spec.TargetNamespace, vrr.Spec.TargetPVCName),
 		LastTransitionTime: now,
 		ObservedGeneration: vrr.Generation,
@@ -851,9 +860,9 @@ func (r *VolumeRestoreRequestController) checkAndHandleTTL(ctx context.Context, 
 		vrr.Status.ObservedGeneration = vrr.Generation
 		now := metav1.Now()
 		setSingleCondition(&vrr.Status.Conditions, metav1.Condition{
-			Type:               ConditionTypeReady,
+			Type:               storagev1alpha1.ConditionTypeReady,
 			Status:             metav1.ConditionFalse,
-			Reason:             ConditionReasonInvalidTTL,
+			Reason:             storagev1alpha1.ConditionReasonInvalidTTL,
 			Message:            fmt.Sprintf("Invalid TTL annotation format: %s (error: %v)", ttlStr, err),
 			LastTransitionTime: now,
 			ObservedGeneration: vrr.Generation,
@@ -937,7 +946,7 @@ func (r *VolumeRestoreRequestController) markFailed(
 	now := metav1.Now()
 	vrr.Status.CompletionTimestamp = &now
 	setSingleCondition(&vrr.Status.Conditions, metav1.Condition{
-		Type:               ConditionTypeReady,
+		Type:               storagev1alpha1.ConditionTypeReady,
 		Status:             metav1.ConditionFalse,
 		Reason:             reason,
 		Message:            message,
@@ -975,9 +984,9 @@ func (r *VolumeRestoreRequestController) markIncompatible(
 	now := metav1.Now()
 	vrr.Status.CompletionTimestamp = &now
 	setSingleCondition(&vrr.Status.Conditions, metav1.Condition{
-		Type:               ConditionTypeReady,
+		Type:               storagev1alpha1.ConditionTypeReady,
 		Status:             metav1.ConditionFalse,
-		Reason:             ConditionReasonIncompatible,
+		Reason:             storagev1alpha1.ConditionReasonIncompatible,
 		Message:            message,
 		LastTransitionTime: now,
 		ObservedGeneration: vrr.Generation,

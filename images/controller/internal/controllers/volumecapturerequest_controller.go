@@ -73,10 +73,16 @@ import (
 // before creating VolumeCaptureRequest.
 //
 // Any misconfiguration is treated as terminal failure.
+//
+// StorageClass is read via APIReader (direct API, no cache) since it's cluster-level
+// configuration that doesn't need to be watched or cached.
+//
+// Controllers MUST read StorageClass via APIReader. APIReader is a required dependency.
 type VolumeCaptureRequestController struct {
 	client.Client
-	Scheme *runtime.Scheme
-	Config *config.Options
+	APIReader client.Reader // Required: for reading StorageClass directly from API server
+	Scheme    *runtime.Scheme
+	Config    *config.Options
 }
 
 func (r *VolumeCaptureRequestController) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
@@ -103,7 +109,7 @@ func (r *VolumeCaptureRequestController) Reconcile(ctx context.Context, req ctrl
 	// IMPORTANT: Temporary VolumeSnapshot (proxy-VS) cleanup happens in step 12 of processSnapshotMode
 	// before VCR status is set to Ready. This ensures VS is deleted immediately upon VCR completion.
 	// If VCR is already Ready, VS should already be cleaned up (or never existed).
-	if isConditionTrue(vcr.Status.Conditions, ConditionTypeReady) {
+	if isConditionTrue(vcr.Status.Conditions, storagev1alpha1.ConditionTypeReady) {
 		// VCR is Ready - TTL cleanup is handled by background TTL scanner, not in reconcile loop
 		// This ensures reconcile loop doesn't block on TTL checks
 		l.V(1).Info("VCR is already Ready, skipping reconcile")
@@ -112,7 +118,7 @@ func (r *VolumeCaptureRequestController) Reconcile(ctx context.Context, req ctrl
 
 	// Skip if already Failed and observed
 	// TTL cleanup is handled by background TTL scanner, not in reconcile loop
-	if isConditionFalse(vcr.Status.Conditions, ConditionTypeReady) {
+	if isConditionFalse(vcr.Status.Conditions, storagev1alpha1.ConditionTypeReady) {
 		if vcr.Status.ObservedGeneration == vcr.Generation {
 			// VCR is Failed and observed - TTL cleanup is handled by background TTL scanner
 			l.V(1).Info("VCR is already Failed and observed, skipping reconcile")
@@ -147,9 +153,9 @@ func (r *VolumeCaptureRequestController) Reconcile(ctx context.Context, req ctrl
 		vcr.Status.CompletionTimestamp = &now
 		message := fmt.Sprintf("Unknown mode: %s", vcr.Spec.Mode)
 		setSingleCondition(&vcr.Status.Conditions, metav1.Condition{
-			Type:               ConditionTypeReady,
+			Type:               storagev1alpha1.ConditionTypeReady,
 			Status:             metav1.ConditionFalse,
-			Reason:             ErrorReasonInvalidMode,
+			Reason:             storagev1alpha1.ConditionReasonInvalidMode,
 			Message:            message,
 			LastTransitionTime: now,
 			ObservedGeneration: vcr.Generation,
@@ -197,7 +203,7 @@ func (r *VolumeCaptureRequestController) processSnapshotMode(ctx context.Context
 	// 1. Validate spec
 	if vcr.Spec.PersistentVolumeClaimRef == nil {
 		l.Error(nil, "PersistentVolumeClaimRef is required")
-		return r.markFailed(ctx, vcr, ErrorReasonInternalError, "PersistentVolumeClaimRef is required")
+		return r.markFailed(ctx, vcr, storagev1alpha1.ConditionReasonInternalError, "PersistentVolumeClaimRef is required")
 	}
 	l = l.WithValues("pvc", fmt.Sprintf("%s/%s", vcr.Spec.PersistentVolumeClaimRef.Namespace, vcr.Spec.PersistentVolumeClaimRef.Name))
 
@@ -210,11 +216,11 @@ func (r *VolumeCaptureRequestController) processSnapshotMode(ctx context.Context
 	}, pvc); err != nil {
 		if apierrors.IsNotFound(err) {
 			l.Error(err, "PVC not found")
-			return r.markFailed(ctx, vcr, ErrorReasonNotFound, fmt.Sprintf("PVC %s/%s not found", vcr.Spec.PersistentVolumeClaimRef.Namespace, vcr.Spec.PersistentVolumeClaimRef.Name))
+			return r.markFailed(ctx, vcr, storagev1alpha1.ConditionReasonNotFound, fmt.Sprintf("PVC %s/%s not found", vcr.Spec.PersistentVolumeClaimRef.Namespace, vcr.Spec.PersistentVolumeClaimRef.Name))
 		}
 		if apierrors.IsForbidden(err) {
 			l.Error(err, "Access denied to PVC")
-			return r.markFailed(ctx, vcr, ErrorReasonRBACDenied, fmt.Sprintf("Access denied to PVC %s/%s", vcr.Spec.PersistentVolumeClaimRef.Namespace, vcr.Spec.PersistentVolumeClaimRef.Name))
+			return r.markFailed(ctx, vcr, storagev1alpha1.ConditionReasonRBACDenied, fmt.Sprintf("Access denied to PVC %s/%s", vcr.Spec.PersistentVolumeClaimRef.Namespace, vcr.Spec.PersistentVolumeClaimRef.Name))
 		}
 		l.Error(err, "Failed to get PVC")
 		return ctrl.Result{}, fmt.Errorf("failed to get PVC: %w", err)
@@ -224,7 +230,7 @@ func (r *VolumeCaptureRequestController) processSnapshotMode(ctx context.Context
 	// 3. Check if PVC is bound
 	if pvc.Spec.VolumeName == "" {
 		l.Error(nil, "PVC is not bound")
-		return r.markFailed(ctx, vcr, ErrorReasonInternalError, fmt.Sprintf("PVC %s/%s is not bound", pvc.Namespace, pvc.Name))
+		return r.markFailed(ctx, vcr, storagev1alpha1.ConditionReasonInternalError, fmt.Sprintf("PVC %s/%s is not bound", pvc.Namespace, pvc.Name))
 	}
 
 	// 4. Get PV to extract volume handle
@@ -233,7 +239,7 @@ func (r *VolumeCaptureRequestController) processSnapshotMode(ctx context.Context
 	if err = r.Get(ctx, client.ObjectKey{Name: pvc.Spec.VolumeName}, pv); err != nil {
 		if apierrors.IsNotFound(err) {
 			l.Error(err, "PV not found")
-			return r.markFailed(ctx, vcr, ErrorReasonNotFound, fmt.Sprintf("PV %s not found", pvc.Spec.VolumeName))
+			return r.markFailed(ctx, vcr, storagev1alpha1.ConditionReasonNotFound, fmt.Sprintf("PV %s not found", pvc.Spec.VolumeName))
 		}
 		l.Error(err, "Failed to get PV")
 		return ctrl.Result{}, fmt.Errorf("failed to get PV: %w", err)
@@ -242,7 +248,7 @@ func (r *VolumeCaptureRequestController) processSnapshotMode(ctx context.Context
 	// Check if PV has CSI volume handle
 	if pv.Spec.CSI == nil || pv.Spec.CSI.VolumeHandle == "" {
 		l.Error(nil, "PV does not have CSI volume handle", "pv", pv.Name, "hasCSI", pv.Spec.CSI != nil)
-		return r.markFailed(ctx, vcr, ErrorReasonInternalError, fmt.Sprintf("PV %s does not have CSI volume handle", pv.Name))
+		return r.markFailed(ctx, vcr, storagev1alpha1.ConditionReasonInternalError, fmt.Sprintf("PV %s does not have CSI volume handle", pv.Name))
 	}
 	l.Info("PV found", "driver", pv.Spec.CSI.Driver, "volumeHandle", pv.Spec.CSI.VolumeHandle)
 
@@ -251,19 +257,22 @@ func (r *VolumeCaptureRequestController) processSnapshotMode(ctx context.Context
 	// This is the Deckhouse way: StorageClass explicitly declares which VolumeSnapshotClass to use
 	if pvc.Spec.StorageClassName == nil || *pvc.Spec.StorageClassName == "" {
 		l.Error(nil, "PVC does not have StorageClassName")
-		return r.markFailed(ctx, vcr, ErrorReasonInternalError, "PVC does not have StorageClassName")
+		return r.markFailed(ctx, vcr, storagev1alpha1.ConditionReasonInternalError, "PVC does not have StorageClassName")
 	}
 	storageClassName := *pvc.Spec.StorageClassName
 	l.Info("Getting StorageClass", "storageClass", storageClassName)
 	storageClass := &storagev1.StorageClass{}
-	if err = r.Get(ctx, client.ObjectKey{Name: storageClassName}, storageClass); err != nil {
+	// StorageClass is read via APIReader (direct API, no cache) since it's cluster-level
+	// configuration that doesn't need to be watched or cached.
+	// Controllers MUST read StorageClass via APIReader. APIReader is a required dependency.
+	if err = r.APIReader.Get(ctx, client.ObjectKey{Name: storageClassName}, storageClass); err != nil {
 		if apierrors.IsNotFound(err) {
 			l.Error(err, "StorageClass not found")
-			return r.markFailed(ctx, vcr, ErrorReasonNotFound, fmt.Sprintf("StorageClass %s not found", storageClassName))
+			return r.markFailed(ctx, vcr, storagev1alpha1.ConditionReasonNotFound, fmt.Sprintf("StorageClass %s not found", storageClassName))
 		}
 		if apierrors.IsForbidden(err) {
 			l.Error(err, "Access denied to StorageClass")
-			return r.markFailed(ctx, vcr, ErrorReasonRBACDenied, fmt.Sprintf("Access denied to StorageClass %s", storageClassName))
+			return r.markFailed(ctx, vcr, storagev1alpha1.ConditionReasonRBACDenied, fmt.Sprintf("Access denied to StorageClass %s", storageClassName))
 		}
 		l.Error(err, "Failed to get StorageClass")
 		return ctrl.Result{}, fmt.Errorf("failed to get StorageClass: %w", err)
@@ -272,7 +281,7 @@ func (r *VolumeCaptureRequestController) processSnapshotMode(ctx context.Context
 	vscClassName, ok := storageClass.Annotations["storage.deckhouse.io/volumesnapshotclass"]
 	if !ok || vscClassName == "" {
 		l.Error(nil, "StorageClass does not have storage.deckhouse.io/volumesnapshotclass annotation", "storageClass", storageClassName)
-		return r.markFailed(ctx, vcr, ErrorReasonNotFound,
+		return r.markFailed(ctx, vcr, storagev1alpha1.ConditionReasonNotFound,
 			fmt.Sprintf("StorageClass %s does not have storage.deckhouse.io/volumesnapshotclass annotation", storageClassName))
 	}
 	l.Info("Found VolumeSnapshotClass name from StorageClass annotation", "vscClass", vscClassName)
@@ -281,11 +290,11 @@ func (r *VolumeCaptureRequestController) processSnapshotMode(ctx context.Context
 	if err = r.Get(ctx, client.ObjectKey{Name: vscClassName}, vscClass); err != nil {
 		if apierrors.IsNotFound(err) {
 			l.Error(err, "VolumeSnapshotClass not found")
-			return r.markFailed(ctx, vcr, ErrorReasonNotFound, fmt.Sprintf("VolumeSnapshotClass %s (from StorageClass %s annotation) not found", vscClassName, storageClassName))
+			return r.markFailed(ctx, vcr, storagev1alpha1.ConditionReasonNotFound, fmt.Sprintf("VolumeSnapshotClass %s (from StorageClass %s annotation) not found", vscClassName, storageClassName))
 		}
 		if apierrors.IsForbidden(err) {
 			l.Error(err, "Access denied to VolumeSnapshotClass")
-			return r.markFailed(ctx, vcr, ErrorReasonRBACDenied, fmt.Sprintf("Access denied to VolumeSnapshotClass %s (from StorageClass %s annotation)", vscClassName, storageClassName))
+			return r.markFailed(ctx, vcr, storagev1alpha1.ConditionReasonRBACDenied, fmt.Sprintf("Access denied to VolumeSnapshotClass %s (from StorageClass %s annotation)", vscClassName, storageClassName))
 		}
 		l.Error(err, "Failed to get VolumeSnapshotClass")
 		return ctrl.Result{}, fmt.Errorf("failed to get VolumeSnapshotClass: %w", err)
@@ -295,7 +304,7 @@ func (r *VolumeCaptureRequestController) processSnapshotMode(ctx context.Context
 	if vscClass.Driver != pvDriver {
 		l.Error(nil, "VolumeSnapshotClass driver does not match PV CSI driver",
 			"vscDriver", vscClass.Driver, "pvDriver", pvDriver)
-		return r.markFailed(ctx, vcr, ErrorReasonInternalError,
+		return r.markFailed(ctx, vcr, storagev1alpha1.ConditionReasonInternalError,
 			fmt.Sprintf("VolumeSnapshotClass %s driver %s does not match PV CSI driver %s", vscClassName, vscClass.Driver, pvDriver))
 	}
 	l.Info("Found VolumeSnapshotClass", "name", vscClass.Name, "driver", vscClass.Driver)
@@ -333,8 +342,14 @@ func (r *VolumeCaptureRequestController) processSnapshotMode(ctx context.Context
 			return ctrl.Result{}, fmt.Errorf("failed to create ObjectKeeper: %w", err)
 		}
 		l.Info("Created ObjectKeeper", "name", retainerName)
-		// After Create(), controller-runtime populates objectKeeper.UID automatically
-		// We rely on informer cache - if UID is not populated, it will be available on next reconcile
+		// HARD BARRIER: UID must exist before creating VSC with OwnerReference
+		// After Create(), controller-runtime populates objectKeeper.UID automatically,
+		// but we cannot rely on it being populated immediately in the same reconcile.
+		// Requeue to ensure UID is available on next reconcile.
+		if objectKeeper.UID == "" {
+			l.Info("ObjectKeeper UID not yet populated, requeueing", "name", retainerName)
+			return ctrl.Result{Requeue: true}, nil
+		}
 	} else if err != nil {
 		return ctrl.Result{}, fmt.Errorf("failed to get ObjectKeeper: %w", err)
 	} else {
@@ -443,7 +458,7 @@ func (r *VolumeCaptureRequestController) processSnapshotMode(ctx context.Context
 		}
 		// Mark VCR as failed with DataRef pointing to the problematic VSC
 		// This is a terminal error - VCR will not retry or recreate VSC
-		return r.markFailedSnapshot(ctx, vcr, csiVSCName, ErrorReasonSnapshotCreationFailed,
+		return r.markFailedSnapshot(ctx, vcr, csiVSCName, storagev1alpha1.ConditionReasonSnapshotCreationFailed,
 			fmt.Sprintf("CSI snapshot creation failed: %s", errorDetails))
 	}
 
@@ -479,9 +494,9 @@ func (r *VolumeCaptureRequestController) processSnapshotMode(ctx context.Context
 		current.Status.ObservedGeneration = current.Generation
 		current.Status.CompletionTimestamp = &now
 		setSingleCondition(&current.Status.Conditions, metav1.Condition{
-			Type:               ConditionTypeReady,
+			Type:               storagev1alpha1.ConditionTypeReady,
 			Status:             metav1.ConditionTrue,
-			Reason:             ConditionReasonCompleted,
+			Reason:             storagev1alpha1.ConditionReasonCompleted,
 			Message:            fmt.Sprintf("CSI VolumeSnapshotContent %s ready", csiVSCName),
 			LastTransitionTime: now,
 			ObservedGeneration: current.Generation,
@@ -512,7 +527,7 @@ func (r *VolumeCaptureRequestController) processDetachMode(ctx context.Context, 
 
 	// 1. Validate spec
 	if vcr.Spec.PersistentVolumeClaimRef == nil {
-		return r.markFailed(ctx, vcr, ErrorReasonInternalError, "PersistentVolumeClaimRef is required")
+		return r.markFailed(ctx, vcr, storagev1alpha1.ConditionReasonInternalError, "PersistentVolumeClaimRef is required")
 	}
 
 	// 2. Check RBAC: try to get PVC
@@ -550,7 +565,7 @@ func (r *VolumeCaptureRequestController) processDetachMode(ctx context.Context, 
 				return ctrl.Result{}, fmt.Errorf("failed to get PV %s: %w", pvName, err)
 			}
 		} else if apierrors.IsForbidden(err) {
-			return r.markFailed(ctx, vcr, ErrorReasonRBACDenied, fmt.Sprintf("Access denied to PVC %s/%s", vcr.Spec.PersistentVolumeClaimRef.Namespace, vcr.Spec.PersistentVolumeClaimRef.Name))
+			return r.markFailed(ctx, vcr, storagev1alpha1.ConditionReasonRBACDenied, fmt.Sprintf("Access denied to PVC %s/%s", vcr.Spec.PersistentVolumeClaimRef.Namespace, vcr.Spec.PersistentVolumeClaimRef.Name))
 		} else {
 			return ctrl.Result{}, fmt.Errorf("failed to get PVC: %w", err)
 		}
@@ -559,14 +574,14 @@ func (r *VolumeCaptureRequestController) processDetachMode(ctx context.Context, 
 	if !pvcNotFound {
 		// 3. Check if PVC is bound
 		if pvc.Spec.VolumeName == "" {
-			return r.markFailed(ctx, vcr, ErrorReasonInternalError, fmt.Sprintf("PVC %s/%s is not bound", pvc.Namespace, pvc.Name))
+			return r.markFailed(ctx, vcr, storagev1alpha1.ConditionReasonInternalError, fmt.Sprintf("PVC %s/%s is not bound", pvc.Namespace, pvc.Name))
 		}
 
 		// 4. Get PV and store its name in annotation for future reconciles
 		pv = &corev1.PersistentVolume{}
 		if err := r.Get(ctx, client.ObjectKey{Name: pvc.Spec.VolumeName}, pv); err != nil {
 			if apierrors.IsNotFound(err) {
-				return r.markFailed(ctx, vcr, ErrorReasonNotFound, fmt.Sprintf("PV %s not found", pvc.Spec.VolumeName))
+				return r.markFailed(ctx, vcr, storagev1alpha1.ConditionReasonNotFound, fmt.Sprintf("PV %s not found", pvc.Spec.VolumeName))
 			}
 			return ctrl.Result{}, fmt.Errorf("failed to get PV: %w", err)
 		}
@@ -610,9 +625,9 @@ func (r *VolumeCaptureRequestController) processDetachMode(ctx context.Context, 
 		now := metav1.Now()
 		vcr.Status.CompletionTimestamp = &now
 		setSingleCondition(&vcr.Status.Conditions, metav1.Condition{
-			Type:               ConditionTypeReady,
+			Type:               storagev1alpha1.ConditionTypeReady,
 			Status:             metav1.ConditionTrue,
-			Reason:             ConditionReasonCompleted,
+			Reason:             storagev1alpha1.ConditionReasonCompleted,
 			Message:            fmt.Sprintf("PV %s already detached", pv.Name),
 			LastTransitionTime: now,
 			ObservedGeneration: vcr.Generation,
@@ -718,6 +733,14 @@ func (r *VolumeCaptureRequestController) processDetachMode(ctx context.Context, 
 			return ctrl.Result{}, fmt.Errorf("failed to create ObjectKeeper: %w", err)
 		}
 		l.Info("Created ObjectKeeper", "name", retainerName)
+		// HARD BARRIER: UID must exist before setting PV OwnerReference
+		// After Create(), controller-runtime populates objectKeeper.UID automatically,
+		// but we cannot rely on it being populated immediately in the same reconcile.
+		// Requeue to ensure UID is available on next reconcile.
+		if objectKeeper.UID == "" {
+			l.Info("ObjectKeeper UID not yet populated, requeueing", "name", retainerName)
+			return ctrl.Result{Requeue: true}, nil
+		}
 	} else if err != nil {
 		return ctrl.Result{}, fmt.Errorf("failed to get ObjectKeeper: %w", err)
 	} else {
@@ -768,9 +791,9 @@ func (r *VolumeCaptureRequestController) processDetachMode(ctx context.Context, 
 	now := metav1.Now()
 	vcr.Status.CompletionTimestamp = &now
 	setSingleCondition(&vcr.Status.Conditions, metav1.Condition{
-		Type:               ConditionTypeReady,
+		Type:               storagev1alpha1.ConditionTypeReady,
 		Status:             metav1.ConditionTrue,
-		Reason:             ConditionReasonCompleted,
+		Reason:             storagev1alpha1.ConditionReasonCompleted,
 		Message:            fmt.Sprintf("PV %s detached", pv.Name),
 		LastTransitionTime: now,
 		ObservedGeneration: vcr.Generation,
@@ -851,9 +874,9 @@ func (r *VolumeCaptureRequestController) checkAndHandleTTL(ctx context.Context, 
 		vcr.Status.ObservedGeneration = vcr.Generation
 		now := metav1.Now()
 		setSingleCondition(&vcr.Status.Conditions, metav1.Condition{
-			Type:               ConditionTypeReady,
+			Type:               storagev1alpha1.ConditionTypeReady,
 			Status:             metav1.ConditionFalse,
-			Reason:             ConditionReasonInvalidTTL,
+			Reason:             storagev1alpha1.ConditionReasonInvalidTTL,
 			Message:            fmt.Sprintf("Invalid TTL annotation format: %s (error: %v)", ttlStr, err),
 			LastTransitionTime: now,
 			ObservedGeneration: vcr.Generation,
@@ -956,7 +979,7 @@ func (r *VolumeCaptureRequestController) markFailedSnapshot(ctx context.Context,
 	}
 
 	setSingleCondition(&vcr.Status.Conditions, metav1.Condition{
-		Type:               ConditionTypeReady,
+		Type:               storagev1alpha1.ConditionTypeReady,
 		Status:             metav1.ConditionFalse,
 		Reason:             reason,
 		Message:            message,
@@ -1048,7 +1071,7 @@ func (r *VolumeCaptureRequestController) StartTTLScanner(ctx context.Context, cl
 //
 // 1. Works only with terminal VCRs:
 //   - Ready=True (completed successfully)
-//   - Ready=False (failed)
+//   - Ready=False (failed, terminal error)
 //   - Non-terminal VCRs are never touched
 //
 // 2. TTL source:
@@ -1057,7 +1080,7 @@ func (r *VolumeCaptureRequestController) StartTTLScanner(ctx context.Context, cl
 //   - This ensures predictable cluster-wide retention policy
 //
 // 3. TTL calculation:
-//   - TTL starts counting from CompletionTimestamp (when VCR reaches Ready=True or Failed=True)
+//   - TTL starts counting from CompletionTimestamp (when VCR reaches Ready=True or Ready=False)
 //   - Expiration time = CompletionTimestamp + config.RequestTTL
 //   - Only VCRs with CompletionTimestamp are eligible for deletion
 //
@@ -1105,7 +1128,7 @@ func (r *VolumeCaptureRequestController) startTTLScanner(ctx context.Context, cl
 // - TTL is ALWAYS taken from controller configuration (config.RequestTTL), NOT from VCR annotations.
 // - TTL annotation (storage.deckhouse.io/ttl) is informational only and is IGNORED by the scanner.
 // - This ensures consistent cleanup behavior: all VCRs use the same TTL policy defined by controller config.
-// - TTL starts counting from CompletionTimestamp (when VCR reaches Ready=True or Failed=True).
+// - TTL starts counting from CompletionTimestamp (when VCR reaches Ready=True or Ready=False).
 func (r *VolumeCaptureRequestController) scanAndDeleteExpiredVCRs(ctx context.Context, client client.Client) {
 	// Get TTL from controller config (this is the ONLY source of TTL timing)
 	// TTL annotation is informational only and is ignored here
@@ -1128,8 +1151,8 @@ func (r *VolumeCaptureRequestController) scanAndDeleteExpiredVCRs(ctx context.Co
 	for i := range vcrList.Items {
 		vcr := &vcrList.Items[i]
 
-		// Skip if not terminal (Ready=True or Failed=True)
-		readyCondition := meta.FindStatusCondition(vcr.Status.Conditions, ConditionTypeReady)
+		// Skip if not terminal (Ready=True or Ready=False)
+		readyCondition := meta.FindStatusCondition(vcr.Status.Conditions, storagev1alpha1.ConditionTypeReady)
 		isTerminal := (readyCondition != nil && readyCondition.Status == metav1.ConditionTrue) ||
 			(readyCondition != nil && readyCondition.Status == metav1.ConditionFalse)
 

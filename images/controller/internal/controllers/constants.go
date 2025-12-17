@@ -28,30 +28,9 @@ const (
 	SourceKindPersistentVolume      = "PersistentVolume"
 )
 
-// Error reason constants
-const (
-	ErrorReasonInternalError          = "InternalError"
-	ErrorReasonNotFound               = "NotFound"
-	ErrorReasonRBACDenied             = "RBACDenied"
-	ErrorReasonInvalidMode            = "InvalidMode"
-	ErrorReasonInvalidSource          = "InvalidSource"
-	ErrorReasonPVBound                = "PVBound"
-	ErrorReasonIncompatible           = "Incompatible"           // For WFFC and cross-SC restore
-	ErrorReasonSnapshotCreationFailed = "SnapshotCreationFailed" // For CSI snapshot creation failures
-)
-
-// Condition type constants
-const (
-	ConditionTypeReady = "Ready"
-)
-
-// Condition reason constants
-const (
-	ConditionReasonCompleted    = "Completed"
-	ConditionReasonInvalidMode  = "InvalidMode"
-	ConditionReasonIncompatible = "Incompatible" // For WFFC and cross-SC restore
-	ConditionReasonInvalidTTL   = "InvalidTTL"   // For invalid TTL annotation format
-)
+// Condition type and reason constants are defined in api/v1alpha1/conditions.go
+// Import them from: fox.flant.com/deckhouse/storage/storage-foundation/api/v1alpha1
+// Use storagev1alpha1.ConditionTypeReady and storagev1alpha1.ConditionReason* instead of local constants
 
 // Label key constants
 const (

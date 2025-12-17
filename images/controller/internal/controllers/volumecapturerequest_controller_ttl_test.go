@@ -304,9 +304,9 @@ var _ = Describe("VolumeCaptureRequest TTL", func() {
 					CompletionTimestamp: &completionTime,
 					Conditions: []metav1.Condition{
 						{
-							Type:               ConditionTypeReady,
+							Type:               storagev1alpha1.ConditionTypeReady,
 							Status:             metav1.ConditionTrue,
-							Reason:             ConditionReasonCompleted,
+							Reason:             storagev1alpha1.ConditionReasonCompleted,
 							LastTransitionTime: completionTime,
 							ObservedGeneration: 1,
 						},
@@ -357,9 +357,9 @@ var _ = Describe("VolumeCaptureRequest TTL", func() {
 					CompletionTimestamp: &completionTime,
 					Conditions: []metav1.Condition{
 						{
-							Type:               ConditionTypeReady,
+							Type:               storagev1alpha1.ConditionTypeReady,
 							Status:             metav1.ConditionTrue,
-							Reason:             ConditionReasonCompleted,
+							Reason:             storagev1alpha1.ConditionReasonCompleted,
 							LastTransitionTime: completionTime,
 							ObservedGeneration: 1,
 						},
