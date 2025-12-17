@@ -49,14 +49,10 @@ func AddVolumeCaptureRequestControllerToManager(mgr ctrl.Manager, cfg *config.Op
 	}
 
 	// Start TTL scanner as leader-only runnable
-	// RunnableFunc is called only on the leader replica
-	// When leadership changes, ctx.Done() triggers graceful shutdown
-	// The scanner goroutine will exit when context is cancelled
+	// StartTTLScanner runs TTL scanner and blocks until ctx.Done()
+	// RunnableFunc ensures leader-only execution
 	if err := mgr.Add(manager.RunnableFunc(func(ctx context.Context) error {
 		reconciler.StartTTLScanner(ctx, mgr.GetClient())
-		// StartTTLScanner starts scanner in goroutine and returns immediately
-		// We need to wait for context cancellation to keep Runnable alive
-		<-ctx.Done()
 		return nil
 	})); err != nil {
 		return err
@@ -88,14 +84,10 @@ func AddVolumeRestoreRequestControllerToManager(mgr ctrl.Manager, cfg *config.Op
 	}
 
 	// Start TTL scanner as leader-only runnable
-	// RunnableFunc is called only on the leader replica
-	// When leadership changes, ctx.Done() triggers graceful shutdown
-	// The scanner goroutine will exit when context is cancelled
+	// StartTTLScanner runs TTL scanner and blocks until ctx.Done()
+	// RunnableFunc ensures leader-only execution
 	if err := mgr.Add(manager.RunnableFunc(func(ctx context.Context) error {
 		reconciler.StartTTLScanner(ctx, mgr.GetClient())
-		// StartTTLScanner starts scanner in goroutine and returns immediately
-		// We need to wait for context cancellation to keep Runnable alive
-		<-ctx.Done()
 		return nil
 	})); err != nil {
 		return err

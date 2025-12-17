@@ -56,8 +56,9 @@ const (
 // Name prefix constants
 const (
 	NamePrefixVCRCSIVS   = "vcr-csi-vs-"
-	NamePrefixRetainer   = "ret-"
-	NamePrefixRetainerPV = "ret-pv-"
+	NamePrefixRetainer     = "ret-"
+	NamePrefixRetainerPV   = "ret-pv-"
+	NamePrefixRetainerPVC  = "ret-pvc-"
 	NamePrefixVRRTempVS  = "vrr-temp-vs-"
 	NamePrefixTempVRR    = "temp-vrr-"
 )
@@ -69,6 +70,7 @@ const (
 	APIGroupDeckhouse        = "deckhouse.io/v1alpha1"
 	KindObjectKeeper         = "ObjectKeeper"
 	KindVolumeCaptureRequest = "VolumeCaptureRequest"
+	KindVolumeRestoreRequest = "VolumeRestoreRequest"
 	KindVolumeSnapshot       = "VolumeSnapshot"
 )
 

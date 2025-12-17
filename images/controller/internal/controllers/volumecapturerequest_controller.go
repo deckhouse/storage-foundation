@@ -19,7 +19,6 @@ package controllers
 import (
 	"context"
 	"fmt"
-	"math/rand"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
@@ -33,8 +32,8 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
-	storagev1alpha1 "github.com/deckhouse/storage-foundation/api/v1alpha1"
 	deckhousev1alpha1 "github.com/deckhouse/deckhouse/deckhouse-controller/pkg/apis/deckhouse.io/v1alpha1"
+	storagev1alpha1 "github.com/deckhouse/storage-foundation/api/v1alpha1"
 	snapshotv1 "github.com/kubernetes-csi/external-snapshotter/client/v8/apis/volumesnapshot/v1"
 
 	"github.com/deckhouse/storage-foundation/images/controller/pkg/config"
@@ -156,10 +155,19 @@ func (r *VolumeCaptureRequestController) Reconcile(ctx context.Context, req ctrl
 // - VCR is NOT owner of VSC/PV - ObjectKeeper is the only owner
 // - ObjectKeeper follows VCR lifecycle (automatically deleted when VCR is deleted)
 // - TTL and request cleanup are handled by VCR controller, not ObjectKeeper
+//
+// INVARIANT:
+// - VCR creates VSC exactly once
+// - Any error in VSC.status.error is terminal
+// - VCR never retries snapshot creation
 func (r *VolumeCaptureRequestController) processSnapshotMode(ctx context.Context, vcr *storagev1alpha1.VolumeCaptureRequest) (ctrl.Result, error) {
 	var err error
 	l := log.FromContext(ctx).WithValues("vcr", fmt.Sprintf("%s/%s", vcr.Namespace, vcr.Name), "mode", "Snapshot")
 	l.Info("Processing VolumeCaptureRequest in Snapshot mode")
+
+	// ============================================================================
+	// Stage 1: Validate inputs
+	// ============================================================================
 
 	// 1. Validate spec
 	if vcr.Spec.PersistentVolumeClaimRef == nil {
@@ -212,6 +220,10 @@ func (r *VolumeCaptureRequestController) processSnapshotMode(ctx context.Context
 		return r.markFailed(ctx, vcr, storagev1alpha1.ConditionReasonInternalError, fmt.Sprintf("PV %s does not have CSI volume handle", pv.Name))
 	}
 	l.Info("PV found", "driver", pv.Spec.CSI.Driver, "volumeHandle", pv.Spec.CSI.VolumeHandle)
+
+	// ============================================================================
+	// Stage 2: Resolve inputs (StorageClass, VolumeSnapshotClass)
+	// ============================================================================
 
 	// 5. Get VolumeSnapshotClass from StorageClass annotation (needed for VSC creation)
 	// VCR uses VolumeSnapshotClass specified in StorageClass annotation storage.deckhouse.io/volumesnapshotclass
@@ -270,60 +282,23 @@ func (r *VolumeCaptureRequestController) processSnapshotMode(ctx context.Context
 	}
 	l.Info("Found VolumeSnapshotClass", "name", vscClass.Name, "driver", vscClass.Driver)
 
-	// 6. Create ObjectKeeper FIRST - before creating VSC
-	l.Info("Creating ObjectKeeper")
-	// ObjectKeeper is a pure ownership anchor that follows VCR lifecycle.
-	// It owns resulting artifacts (VSC/PV) and is automatically deleted when VCR is deleted.
-	// TTL and request cleanup are handled by VCR controller, not ObjectKeeper.
+	// ============================================================================
+	// Stage 3: Ensure ownership (ObjectKeeper)
+	// ============================================================================
+
+	// 6. Ensure ObjectKeeper exists FIRST - before creating VSC
+	// INVARIANT: ObjectKeeper must exist before creating artifacts (VSC/PV)
+	// This ensures proper ownership chain: ObjectKeeper → VSC
 	csiVSCName := fmt.Sprintf("snapshot-%s", string(vcr.UID))
 	retainerName := NamePrefixRetainer + csiVSCName
-	objectKeeper := &deckhousev1alpha1.ObjectKeeper{}
-	err = r.Get(ctx, client.ObjectKey{Name: retainerName}, objectKeeper)
-	if apierrors.IsNotFound(err) {
-		objectKeeper = &deckhousev1alpha1.ObjectKeeper{
-			TypeMeta: metav1.TypeMeta{
-				APIVersion: APIGroupDeckhouse,
-				Kind:       KindObjectKeeper,
-			},
-			ObjectMeta: metav1.ObjectMeta{
-				Name: retainerName,
-			},
-			Spec: deckhousev1alpha1.ObjectKeeperSpec{
-				Mode: "FollowObject",
-				FollowObjectRef: &deckhousev1alpha1.FollowObjectRef{
-					APIVersion: APIGroupStorageDeckhouse,
-					Kind:       KindVolumeCaptureRequest,
-					Namespace:  vcr.Namespace,
-					Name:       vcr.Name,
-					UID:        string(vcr.UID),
-				},
-			},
-		}
-		if err := r.Create(ctx, objectKeeper); err != nil {
-			return ctrl.Result{}, fmt.Errorf("failed to create ObjectKeeper: %w", err)
-		}
-		l.Info("Created ObjectKeeper", "name", retainerName)
-		// HARD BARRIER: UID must exist before creating VSC with OwnerReference
-		// After Create(), controller-runtime populates objectKeeper.UID automatically,
-		// but we cannot rely on it being populated immediately in the same reconcile.
-		// Requeue to ensure UID is available on next reconcile.
-		if objectKeeper.UID == "" {
-			l.Info("ObjectKeeper UID not yet populated, requeueing", "name", retainerName)
-			return ctrl.Result{Requeue: true}, nil
-		}
-	} else if err != nil {
-		return ctrl.Result{}, fmt.Errorf("failed to get ObjectKeeper: %w", err)
-	} else {
-		// ObjectKeeper exists - validate it belongs to this VCR
-		// This protects against race conditions where VCR was deleted and recreated with same name
-		if objectKeeper.Spec.FollowObjectRef == nil {
-			return ctrl.Result{}, fmt.Errorf("ObjectKeeper %s has no FollowObjectRef", retainerName)
-		}
-		if objectKeeper.Spec.FollowObjectRef.UID != string(vcr.UID) {
-			return ctrl.Result{}, fmt.Errorf("ObjectKeeper %s belongs to another VCR (UID mismatch: expected %s, got %s)",
-				retainerName, string(vcr.UID), objectKeeper.Spec.FollowObjectRef.UID)
-		}
+	objectKeeper, err := r.ensureObjectKeeper(ctx, retainerName, vcr)
+	if err != nil {
+		return ctrl.Result{}, err
 	}
+
+	// ============================================================================
+	// Stage 4: Ensure VSC exists
+	// ============================================================================
 
 	// 7. Create VolumeSnapshotContent directly (VCR is the source of truth)
 	// According to ADR: VCR creates VSC directly, no snapshot-controller involvement
@@ -342,17 +317,18 @@ func (r *VolumeCaptureRequestController) processSnapshotMode(ctx context.Context
 		volumeHandle := pv.Spec.CSI.VolumeHandle
 		vscClassName := vscClass.Name // Use the found default VolumeSnapshotClass name
 		controllerTrue := true
-
+		blockOwnerDeletion := true
 		csiVSC = &snapshotv1.VolumeSnapshotContent{
 			ObjectMeta: metav1.ObjectMeta{
 				Name: csiVSCName,
 				OwnerReferences: []metav1.OwnerReference{
 					{
-						APIVersion: APIGroupDeckhouse,
-						Kind:       KindObjectKeeper,
-						Name:       retainerName,
-						UID:        objectKeeper.UID,
-						Controller: &controllerTrue, // ObjectKeeper is the only owner and controller
+						APIVersion:         APIGroupDeckhouse,
+						Kind:               KindObjectKeeper,
+						Name:               retainerName,
+						UID:                objectKeeper.UID,
+						Controller:         &controllerTrue,
+						BlockOwnerDeletion: &blockOwnerDeletion,
 					},
 				},
 			},
@@ -374,11 +350,15 @@ func (r *VolumeCaptureRequestController) processSnapshotMode(ctx context.Context
 		// After Create(), controller-runtime populates csiVSC.UID automatically
 		// We rely on informer cache - if UID is not populated, it will be available on next reconcile
 		// Newly created VSC won't have Status yet - requeue to let external-snapshotter process it
-		return ctrl.Result{RequeueAfter: 1 * time.Second}, nil
+		return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
 	} else if err != nil {
 		return ctrl.Result{}, fmt.Errorf("failed to get VolumeSnapshotContent: %w", err)
 	}
 	// VSC exists - continue to wait for ReadyToUse (idempotency)
+
+	// ============================================================================
+	// Stage 5: Wait for completion / finalize
+	// ============================================================================
 
 	// 8. Wait for external-snapshotter to set ReadyToUse=true on VSC
 	//
@@ -516,18 +496,29 @@ func (r *VolumeCaptureRequestController) processDetachMode(ctx context.Context, 
 		}
 
 		// Store PV name in annotation for future reconciles (when PVC is deleted)
-		if vcr.Annotations == nil {
-			vcr.Annotations = make(map[string]string)
-		}
-		if vcr.Annotations["storage.deckhouse.io/detach-pv-name"] != pv.Name {
-			vcr.Annotations["storage.deckhouse.io/detach-pv-name"] = pv.Name
-			if err := r.Update(ctx, vcr); err != nil {
-				return ctrl.Result{}, fmt.Errorf("failed to update VCR annotation: %w", err)
+		// Use Patch instead of Update to minimize conflicts and reduce churn
+		if vcr.Annotations == nil || vcr.Annotations["storage.deckhouse.io/detach-pv-name"] != pv.Name {
+			current := &storagev1alpha1.VolumeCaptureRequest{}
+			if err := r.Get(ctx, client.ObjectKeyFromObject(vcr), current); err != nil {
+				return ctrl.Result{}, fmt.Errorf("failed to get VCR for annotation patch: %w", err)
+			}
+			base := current.DeepCopy()
+			if current.Annotations == nil {
+				current.Annotations = make(map[string]string)
+			}
+			current.Annotations["storage.deckhouse.io/detach-pv-name"] = pv.Name
+			if err := r.Patch(ctx, current, client.MergeFrom(base)); err != nil {
+				return ctrl.Result{}, fmt.Errorf("failed to patch VCR annotation: %w", err)
 			}
 		}
 	}
 
-	// 5. Check if PV is already detached
+	// 5. Ensure PV is loaded (defensive check)
+	if pv == nil {
+		return ctrl.Result{}, fmt.Errorf("internal error: PV is nil (should not happen)")
+	}
+
+	// 6. Check if PV is already detached
 	// NOTE: If PV.Spec.PersistentVolumeReclaimPolicy != Retain, detaching may lead to
 	// PV deletion by kube-controller-manager. This is a known limitation and should be
 	// documented for users. In production, PV should have ReclaimPolicy=Retain for Detach mode.
@@ -556,7 +547,7 @@ func (r *VolumeCaptureRequestController) processDetachMode(ctx context.Context, 
 		return ctrl.Result{}, nil
 	}
 
-	// 6. Delete PVC according to ADR (only if PVC still exists)
+	// 7. Delete PVC according to ADR (only if PVC still exists)
 	// According to ADR, Detach mode should delete PVC
 	// PV will be retained due to ReclaimPolicy=Retain
 	if !pvcNotFound {
@@ -582,12 +573,21 @@ func (r *VolumeCaptureRequestController) processDetachMode(ctx context.Context, 
 				l.Info("Deleted PVC", "pvc", fmt.Sprintf("%s/%s", pvc.Namespace, pvc.Name))
 				// Wait for PVC deletion to complete before proceeding
 				// This ensures PV ClaimRef can be safely removed
-				return ctrl.Result{RequeueAfter: 1 * time.Second}, nil
+				return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
 			}
 		}
 	}
 
-	// 7. Detach PV from PVC (remove claimRef)
+	// 8. Ensure ObjectKeeper exists FIRST - before detaching PV
+	// INVARIANT: ObjectKeeper must exist before creating artifacts (PV)
+	// This ensures proper ownership chain: ObjectKeeper → PV
+	retainerName := NamePrefixRetainerPV + string(vcr.UID)
+	objectKeeper, err := r.ensureObjectKeeper(ctx, retainerName, vcr)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+
+	// 9. Detach PV from PVC and set ownerRef in a single Patch operation
 	// According to ADR, PV after Detach gets annotation storage.deckhouse.io/detached: "true"
 	// NOTE: PV should have ReclaimPolicy=Retain to prevent accidental deletion
 	// Re-read PV to get latest state before patching
@@ -596,32 +596,93 @@ func (r *VolumeCaptureRequestController) processDetachMode(ctx context.Context, 
 		return ctrl.Result{}, fmt.Errorf("failed to re-read PV before detach: %w", err)
 	}
 	base := updatedPV.DeepCopy()
+
+	// Detach PV: remove ClaimRef and set annotation
 	updatedPV.Spec.ClaimRef = nil
 	if updatedPV.Annotations == nil {
 		updatedPV.Annotations = make(map[string]string)
 	}
 	updatedPV.Annotations["storage.deckhouse.io/detached"] = "true"
 
-	if err := r.Patch(ctx, updatedPV, client.MergeFrom(base)); err != nil {
-		return ctrl.Result{}, fmt.Errorf("failed to detach PV: %w", err)
+	// Set ownerRef: ObjectKeeper → PV
+	// INVARIANT: PV can have only one controller owner - ObjectKeeper.
+	// If another controller needs to own PV, it must coordinate with ObjectKeeper.
+	// Check if ObjectKeeper ownerRef already exists (with UID check to prevent conflicts)
+	retainerOwnerRefExists := false
+	for _, ref := range updatedPV.OwnerReferences {
+		if ref.Kind == KindObjectKeeper && ref.Name == retainerName && ref.UID == objectKeeper.UID {
+			retainerOwnerRefExists = true
+			break
+		}
 	}
-	l.Info("Detached PV from PVC", "pv", updatedPV.Name)
+	if !retainerOwnerRefExists {
+		controllerTrue := true
+		blockOwnerDeletion := true
+		updatedPV.OwnerReferences = append(updatedPV.OwnerReferences, metav1.OwnerReference{
+			APIVersion:         APIGroupDeckhouse,
+			Kind:               KindObjectKeeper,
+			Name:               retainerName,
+			UID:                objectKeeper.UID,
+			Controller:         &controllerTrue,
+			BlockOwnerDeletion: &blockOwnerDeletion,
+		})
+	}
 
-	// 8. Create ObjectKeeper
-	// ObjectKeeper is a pure ownership anchor that follows VCR lifecycle.
-	// It owns resulting artifacts (VSC/PV) and is automatically deleted when VCR is deleted.
-	// TTL and request cleanup are handled by VCR controller, not ObjectKeeper.
-	retainerName := NamePrefixRetainerPV + string(vcr.UID)
+	// Single Patch operation for both detach and ownerRef
+	if err := r.Patch(ctx, updatedPV, client.MergeFrom(base)); err != nil {
+		return ctrl.Result{}, fmt.Errorf("failed to detach PV and set ownerRef: %w", err)
+	}
+	l.Info("Detached PV from PVC and set ownerRef", "pv", updatedPV.Name)
+
+	// 10. Update VCR status
+	// Set DataRef before finalization
+	vcr.Status.DataRef = &storagev1alpha1.ObjectReference{
+		Name: updatedPV.Name,
+		Kind: "PersistentVolume", // Explicitly set Kind according to ADR
+	}
+	if err := r.finalizeVCR(ctx, vcr, metav1.ConditionTrue, storagev1alpha1.ConditionReasonCompleted, fmt.Sprintf("PV %s detached", updatedPV.Name)); err != nil {
+		return ctrl.Result{}, err
+	}
+
+	l.Info("VolumeCaptureRequest completed", "mode", "Detach", "pv", updatedPV.Name)
+	return ctrl.Result{}, nil
+}
+
+// Helper functions
+
+// ensureObjectKeeper ensures ObjectKeeper exists for the given VCR.
+// ObjectKeeper is a pure ownership anchor that follows VCR lifecycle.
+// It owns resulting artifacts (VSC/PV) and is automatically deleted when VCR is deleted.
+//
+// INVARIANT:
+// - ObjectKeeper is created before any artifacts (VSC/PV)
+// - ObjectKeeper follows VCR lifecycle (FollowObject mode)
+// - ObjectKeeper has no TTL (TTL is managed by VCR controller)
+//
+// CONTRACT:
+// - Creates ObjectKeeper if it doesn't exist
+// - Validates that existing ObjectKeeper belongs to this VCR (UID check)
+// - Returns error if validation fails
+// - Does NOT check UID (UID is always present in real API server)
+// - Does NOT requeue (caller handles requeue logic)
+func (r *VolumeCaptureRequestController) ensureObjectKeeper(
+	ctx context.Context,
+	name string,
+	vcr *storagev1alpha1.VolumeCaptureRequest,
+) (*deckhousev1alpha1.ObjectKeeper, error) {
+	l := log.FromContext(ctx)
 	objectKeeper := &deckhousev1alpha1.ObjectKeeper{}
-	err := r.Get(ctx, client.ObjectKey{Name: retainerName}, objectKeeper)
+	err := r.Get(ctx, client.ObjectKey{Name: name}, objectKeeper)
+
 	if apierrors.IsNotFound(err) {
+		// Create ObjectKeeper
 		objectKeeper = &deckhousev1alpha1.ObjectKeeper{
 			TypeMeta: metav1.TypeMeta{
 				APIVersion: APIGroupDeckhouse,
 				Kind:       KindObjectKeeper,
 			},
 			ObjectMeta: metav1.ObjectMeta{
-				Name: retainerName,
+				Name: name,
 			},
 			Spec: deckhousev1alpha1.ObjectKeeperSpec{
 				Mode: "FollowObject",
@@ -635,72 +696,52 @@ func (r *VolumeCaptureRequestController) processDetachMode(ctx context.Context, 
 			},
 		}
 		if err := r.Create(ctx, objectKeeper); err != nil {
-			return ctrl.Result{}, fmt.Errorf("failed to create ObjectKeeper: %w", err)
+			return nil, fmt.Errorf("failed to create ObjectKeeper: %w", err)
 		}
-		l.Info("Created ObjectKeeper", "name", retainerName)
-		// HARD BARRIER: UID must exist before setting PV OwnerReference
-		// After Create(), controller-runtime populates objectKeeper.UID automatically,
-		// but we cannot rely on it being populated immediately in the same reconcile.
-		// Requeue to ensure UID is available on next reconcile.
-		if objectKeeper.UID == "" {
-			l.Info("ObjectKeeper UID not yet populated, requeueing", "name", retainerName)
-			return ctrl.Result{Requeue: true}, nil
+		l.Info("Created ObjectKeeper", "name", name)
+		// NOTE:
+		// UID is always set by real apiserver on Create.
+		// Re-read is kept for consistency and fake-client compatibility.
+		if err := r.Get(ctx, client.ObjectKey{Name: name}, objectKeeper); err != nil {
+			return nil, fmt.Errorf("failed to re-read ObjectKeeper after Create: %w", err)
 		}
-	} else if err != nil {
-		return ctrl.Result{}, fmt.Errorf("failed to get ObjectKeeper: %w", err)
-	} else {
-		// ObjectKeeper exists - validate it belongs to this VCR
-		// This protects against race conditions where VCR was deleted and recreated with same name
-		if objectKeeper.Spec.FollowObjectRef == nil {
-			return ctrl.Result{}, fmt.Errorf("ObjectKeeper %s has no FollowObjectRef", retainerName)
-		}
-		if objectKeeper.Spec.FollowObjectRef.UID != string(vcr.UID) {
-			return ctrl.Result{}, fmt.Errorf("ObjectKeeper %s belongs to another VCR (UID mismatch: expected %s, got %s)",
-				retainerName, string(vcr.UID), objectKeeper.Spec.FollowObjectRef.UID)
-		}
+		return objectKeeper, nil
 	}
 
-	// 9. Set ownerRef on PV: ObjectKeeper → PV
-	// INVARIANT: PV can have only one controller owner - ObjectKeeper.
-	// If another controller needs to own PV, it must coordinate with ObjectKeeper.
-	// Note: We append ownerRef instead of replacing to preserve existing ownerRefs
-	pvBase := pv.DeepCopy()
-	// Check if ObjectKeeper ownerRef already exists (with UID check to prevent conflicts)
-	retainerOwnerRefExists := false
-	for _, ref := range pv.OwnerReferences {
-		if ref.Kind == KindObjectKeeper && ref.Name == retainerName && ref.UID == objectKeeper.UID {
-			retainerOwnerRefExists = true
-			break
-		}
-	}
-	if !retainerOwnerRefExists {
-		pv.OwnerReferences = append(pv.OwnerReferences, metav1.OwnerReference{
-			APIVersion: APIGroupDeckhouse,
-			Kind:       KindObjectKeeper,
-			Name:       retainerName,
-			UID:        objectKeeper.UID,
-			Controller: func() *bool { b := true; return &b }(),
-		})
-	}
-	if err := r.Patch(ctx, pv, client.MergeFrom(pvBase)); err != nil {
-		return ctrl.Result{}, fmt.Errorf("failed to set ownerRef on PV: %w", err)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get ObjectKeeper: %w", err)
 	}
 
-	// 10. Update VCR status
-	// Set DataRef before finalization
-	vcr.Status.DataRef = &storagev1alpha1.ObjectReference{
-		Name: pv.Name,
-		Kind: "PersistentVolume", // Explicitly set Kind according to ADR
+	// ObjectKeeper exists - validate it belongs to this VCR
+	// This protects against race conditions where VCR was deleted and recreated with same name
+	if objectKeeper.Spec.FollowObjectRef == nil {
+		return nil, fmt.Errorf("ObjectKeeper %s has no FollowObjectRef", name)
 	}
-	if err := r.finalizeVCR(ctx, vcr, metav1.ConditionTrue, storagev1alpha1.ConditionReasonCompleted, fmt.Sprintf("PV %s detached", pv.Name)); err != nil {
-		return ctrl.Result{}, err
+	// Validate UID (primary check)
+	if objectKeeper.Spec.FollowObjectRef.UID != string(vcr.UID) {
+		return nil, fmt.Errorf("ObjectKeeper %s belongs to another VCR (UID mismatch: expected %s, got %s)",
+			name, string(vcr.UID), objectKeeper.Spec.FollowObjectRef.UID)
+	}
+	// Validate Mode (should be FollowObject)
+	if objectKeeper.Spec.Mode != "FollowObject" {
+		return nil, fmt.Errorf("ObjectKeeper %s has invalid mode: expected FollowObject, got %s", name, objectKeeper.Spec.Mode)
+	}
+	// Validate Kind, Namespace, and Name (additional cheap checks)
+	if objectKeeper.Spec.FollowObjectRef.Kind != KindVolumeCaptureRequest {
+		return nil, fmt.Errorf("ObjectKeeper %s FollowObjectRef.Kind mismatch: expected %s, got %s",
+			name, KindVolumeCaptureRequest, objectKeeper.Spec.FollowObjectRef.Kind)
+	}
+	if objectKeeper.Spec.FollowObjectRef.Namespace != vcr.Namespace {
+		return nil, fmt.Errorf("ObjectKeeper %s FollowObjectRef.Namespace mismatch: expected %s, got %s",
+			name, vcr.Namespace, objectKeeper.Spec.FollowObjectRef.Namespace)
+	}
+	if objectKeeper.Spec.FollowObjectRef.Name != vcr.Name {
+		return nil, fmt.Errorf("ObjectKeeper %s FollowObjectRef.Name mismatch: expected %s, got %s",
+			name, vcr.Name, objectKeeper.Spec.FollowObjectRef.Name)
 	}
 
-	l.Info("VolumeCaptureRequest completed", "mode", "Detach", "pv", pv.Name)
-	return ctrl.Result{}, nil
+	return objectKeeper, nil
 }
-
-// Helper functions
 
 // setTTLAnnotation sets TTL annotation on the object.
 // TTL annotation is informational only and does not affect deletion timing.
@@ -733,96 +774,11 @@ func (r *VolumeCaptureRequestController) setTTLAnnotation(vcr *storagev1alpha1.V
 	vcr.Annotations[AnnotationKeyTTL] = ttlStr
 }
 
-// checkAndHandleTTL checks if TTL has expired and deletes the object if needed
-// Returns (shouldDelete, requeueAfter, error)
-func (r *VolumeCaptureRequestController) checkAndHandleTTL(ctx context.Context, vcr *storagev1alpha1.VolumeCaptureRequest) (bool, time.Duration, error) {
-	// Check if TTL annotation exists
-	ttlStr, hasTTL := vcr.Annotations[AnnotationKeyTTL]
-	if !hasTTL {
-		// No TTL annotation, nothing to do
-		return false, 0, nil
-	}
-
-	// Parse TTL duration
-	ttl, err := time.ParseDuration(ttlStr)
-	if err != nil {
-		// Invalid TTL format - set Ready=False condition to inform user
-		l := log.FromContext(ctx)
-		l.Error(err, "Invalid TTL annotation format", "ttl", ttlStr)
-
-		// Set Ready=False condition to inform user about TTL issue
-		if patchErr := r.finalizeVCR(ctx, vcr, metav1.ConditionFalse, storagev1alpha1.ConditionReasonInvalidTTL, fmt.Sprintf("Invalid TTL annotation format: %s (error: %v)", ttlStr, err)); patchErr != nil {
-			l.Error(patchErr, "Failed to update status with InvalidTTL condition")
-			return false, 0, patchErr
-		}
-		return false, 0, nil
-	}
-
-	// Calculate expiration time: completionTimestamp + TTL
-	if vcr.Status.CompletionTimestamp == nil {
-		// No completion timestamp yet, TTL hasn't started
-		return false, 0, nil
-	}
-
-	completionTime := vcr.Status.CompletionTimestamp.Time
-	expirationTime := completionTime.Add(ttl)
-	now := time.Now()
-
-	// Check if TTL has expired
-	if now.After(expirationTime) {
-		// TTL expired, delete the object
-		// NOTE: VCR deletion is safe: ObjectKeeper follows VCR lifecycle.
-		// When VCR is deleted, ObjectKeeper is automatically deleted (follows object).
-		// When ObjectKeeper is deleted, GC deletes VSC/PV through ownerRef.
-		log.FromContext(ctx).Info("TTL expired, deleting VolumeCaptureRequest",
-			"namespace", vcr.Namespace,
-			"name", vcr.Name,
-			"completionTime", completionTime,
-			"expirationTime", expirationTime,
-		)
-		if err := r.Delete(ctx, vcr); err != nil {
-			if apierrors.IsNotFound(err) {
-				// Already deleted, that's fine (double-delete is safe)
-				return true, 0, nil
-			}
-			return false, 0, fmt.Errorf("failed to delete expired VolumeCaptureRequest: %w", err)
-		}
-		return true, 0, nil
-	}
-
-	// TTL not expired yet, calculate requeue time with jitter to avoid reconcile flood
-	timeUntilExpiration := expirationTime.Sub(now)
-	// Requeue after min(timeLeft, 1m), but not less than 30s
-	requeueAfter := timeUntilExpiration
-	if requeueAfter > time.Minute {
-		requeueAfter = time.Minute
-	}
-	if requeueAfter < 30*time.Second {
-		requeueAfter = 30 * time.Second
-	}
-
-	// Add jitter (±10%) to avoid reconcile flood when multiple VCR expire simultaneously
-	// This follows the pattern used by JobController, DeploymentController, etc.
-	jitterRange := requeueAfter / 10 // 10% jitter
-	jitter := time.Duration(rand.Int63n(int64(2*jitterRange))) - jitterRange
-	requeueAfter = requeueAfter + jitter
-	if requeueAfter < 30*time.Second {
-		requeueAfter = 30 * time.Second // Ensure minimum after jitter
-	}
-
-	return false, requeueAfter, nil
-}
-
 func (r *VolumeCaptureRequestController) markFailed(ctx context.Context, vcr *storagev1alpha1.VolumeCaptureRequest, reason, message string) (ctrl.Result, error) {
 	if err := r.finalizeVCR(ctx, vcr, metav1.ConditionFalse, reason, message); err != nil {
 		return ctrl.Result{}, err
 	}
 	return ctrl.Result{}, nil
-}
-
-// markFailedOld is kept temporarily for reference - will be removed after full migration
-func (r *VolumeCaptureRequestController) markFailedOld(ctx context.Context, vcr *storagev1alpha1.VolumeCaptureRequest, reason, message string) (ctrl.Result, error) {
-	return r.markFailedSnapshot(ctx, vcr, "", reason, message)
 }
 
 // markFailedSnapshot marks VCR as failed with optional DataRef pointing to VSC
@@ -896,62 +852,21 @@ func (r *VolumeCaptureRequestController) finalizeVCR(
 	return nil
 }
 
-// Helper functions for future use (e.g., VRR, metrics, reporting)
-// Currently unused but kept for potential future needs
-
-// getVolumeMode returns the volume mode of PVC (Block or Filesystem)
-func (r *VolumeCaptureRequestController) getVolumeMode(pvc *corev1.PersistentVolumeClaim) string {
-	if pvc.Spec.VolumeMode != nil && *pvc.Spec.VolumeMode == corev1.PersistentVolumeBlock {
-		return "Block"
-	}
-	return "Filesystem"
-}
-
-// getSize returns the size of PVC as a string
-func (r *VolumeCaptureRequestController) getSize(pvc *corev1.PersistentVolumeClaim) string {
-	if q, ok := pvc.Spec.Resources.Requests[corev1.ResourceStorage]; ok {
-		return q.String()
-	}
-	return "1Gi"
-}
-
-// getSizeBytes returns the size of snapshot in bytes from VolumeSnapshot status
-// NOTE: Currently unused - kept for potential future use when migrating to VSC-only workflow
-// or when implementing additional status reporting features
-func (r *VolumeCaptureRequestController) getSizeBytes(csiVS *snapshotv1.VolumeSnapshot) int64 {
-	// Get size from CSI VolumeSnapshot (RestoreSize is resource.Quantity)
-	if csiVS.Status != nil && csiVS.Status.RestoreSize != nil {
-		return csiVS.Status.RestoreSize.Value()
-	}
-	return 0
-}
-
-// getStorageSnapshotID returns the snapshot handle from bound VolumeSnapshotContent
-// NOTE: Currently unused - kept for potential future use when migrating to VSC-only workflow
-// or when implementing additional status reporting features
-func (r *VolumeCaptureRequestController) getStorageSnapshotID(csiVS *snapshotv1.VolumeSnapshot) string {
-	// Get snapshot handle from bound VolumeSnapshotContent
-	if csiVS.Status != nil && csiVS.Status.BoundVolumeSnapshotContentName != nil {
-		// The content name is the storage snapshot ID
-		return *csiVS.Status.BoundVolumeSnapshotContentName
-	}
-	return ""
-}
-
 func (r *VolumeCaptureRequestController) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&storagev1alpha1.VolumeCaptureRequest{}).
 		Complete(r)
 }
 
-// StartTTLScanner starts the TTL scanner in a background goroutine.
+// StartTTLScanner starts the TTL scanner.
 // Should be called from manager.RunnableFunc to ensure it runs only on the leader replica.
 // Scanner periodically lists all VCRs and deletes expired ones based on completionTimestamp + TTL.
 //
 // IMPORTANT: This method should be called from manager.RunnableFunc to ensure leader-only execution.
+// RunnableFunc already runs in a separate goroutine, so we don't need an additional go statement.
 // When leadership changes, ctx.Done() triggers graceful shutdown of the scanner.
 func (r *VolumeCaptureRequestController) StartTTLScanner(ctx context.Context, client client.Client) {
-	go r.startTTLScanner(ctx, client)
+	r.startTTLScanner(ctx, client)
 }
 
 // startTTLScanner runs a background scanner that periodically checks and deletes expired VCRs.
@@ -1026,6 +941,12 @@ func (r *VolumeCaptureRequestController) scanAndDeleteExpiredVCRs(ctx context.Co
 	defaultTTL := config.DefaultRequestTTL
 	if r.Config != nil && r.Config.RequestTTL > 0 {
 		defaultTTL = r.Config.RequestTTL
+	}
+
+	// Guard: if TTL is disabled (<= 0), skip scanning
+	if defaultTTL <= 0 {
+		log.FromContext(ctx).V(1).Info("TTL scanner disabled (ttl <= 0)")
+		return
 	}
 
 	// List all VCRs across all namespaces
