@@ -44,4 +44,6 @@ const (
 	ConditionReasonPVBound = "PVBound"
 	// ConditionReasonSnapshotCreationFailed indicates CSI snapshot creation failed
 	ConditionReasonSnapshotCreationFailed = "SnapshotCreationFailed"
+	// ConditionReasonRestoreFailed indicates restore operation failed
+	ConditionReasonRestoreFailed = "RestoreFailed"
 )

@@ -45,9 +45,10 @@ rules:
     resources: ["volumesnapshotcontents"]
     verbs: ["get", "list"]
   # VolumeRestoreRequest (VRR) support - required for VRR handler
+  # external-provisioner owns restore lifecycle and updates VRR status
   - apiGroups: ["storage.deckhouse.io"]
-    resources: ["volumerestorerequests"]
-    verbs: ["get", "list", "watch"]
+    resources: ["volumerestorerequests", "volumerestorerequests/status"]
+    verbs: ["get", "list", "watch", "update", "patch"]
   - apiGroups: ["storage.k8s.io"]
     resources: ["csinodes"]
     verbs: ["get", "list", "watch"]

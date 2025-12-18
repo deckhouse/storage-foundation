@@ -28,31 +28,35 @@ import (
 	"github.com/kubernetes-csi/csi-lib-utils/rpc"
 	snapclientset "github.com/kubernetes-csi/external-snapshotter/client/v8/clientset/versioned"
 	v1 "k8s.io/api/core/v1"
+	storagev1 "k8s.io/api/storage/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/kubernetes"
 	storagelistersv1 "k8s.io/client-go/listers/storage/v1"
 	"k8s.io/client-go/tools/record"
+	"k8s.io/client-go/util/retry"
 	"k8s.io/klog/v2"
-	storagev1 "k8s.io/api/storage/v1"
 
 	storagev1alpha1 "github.com/deckhouse/storage-foundation/api/v1alpha1"
 )
 
 // VRRHandler handles VolumeRestoreRequest objects.
 //
-// VRRHandler is a simple event handler, NOT a controller.
-// It reacts to VRR as an immutable input signal and performs best-effort execution:
+// VRRHandler is a controller-like component that manages restore operation lifecycle:
 // - Creates PV + PVC based on VRR
-// - Writes Events for communication
-// - Does NOT manage VRR lifecycle
-// - Does NOT update VRR.status (single-writer contract)
+// - Waits for PVC to become Bound
+// - Updates VRR.status on success (Ready=True) or failure (Ready=False)
+// - Determines terminal states (Ready/Failed)
 //
-// All "smart" decisions (orchestration, terminal states, retry policy) are made by VRR controller.
+// VRRHandler owns the restore operation lifecycle and is responsible for
+// completing the restore and updating VRR status accordingly.
 type VRRHandler struct {
 	dynamicClient          dynamic.Interface
 	kubeClient             kubernetes.Interface
@@ -131,8 +135,12 @@ func (h *VRRHandler) HandleVRR(ctx context.Context, obj any) {
 		return
 	}
 
-	// CRITICAL: Driver filter MUST be the first executable step after validation
-	// external-provisioner MUST ignore VRR unless StorageClass.provisioner == this.driverName
+	// CRITICAL SECURITY INVARIANT: Driver filter MUST be the first executable step after minimal validation.
+	// This prevents external-provisioner from accessing resources (PVC, VRR status) belonging to other CSI drivers
+	// in multi-CSI clusters. Without this check, a provisioner could:
+	// - Access PVCs in namespaces it shouldn't have access to
+	// - Attempt status updates on VRRs it doesn't own
+	// - Log information about VRRs from other drivers
 	sc, err := h.scLister.Get(vrr.Spec.StorageClassName)
 	if err != nil {
 		// Not our StorageClass, ignore silently
@@ -143,7 +151,16 @@ func (h *VRRHandler) HandleVRR(ctx context.Context, obj any) {
 		return
 	}
 
+	// Skip already-terminal VRRs (Ready=True or Ready=False)
+	// Terminal VRRs should not be reprocessed
+	// NOTE: This check happens AFTER driver filter to avoid logging about terminal VRRs from other drivers
+	if isTerminalVRR(vrr.Status.Conditions) {
+		klog.V(2).Infof("VRR %s/%s is already terminal, skipping", vrr.Namespace, vrr.Name)
+		return
+	}
+
 	// Check idempotency: if PVC already exists, skip (already processed)
+	// NOTE: This check happens AFTER driver filter to avoid accessing PVCs in namespaces we shouldn't access
 	targetPVC, err := h.kubeClient.CoreV1().PersistentVolumeClaims(vrr.Spec.TargetNamespace).Get(ctx, vrr.Spec.TargetPVCName, metav1.GetOptions{})
 	if err == nil && targetPVC != nil {
 		// PVC already exists, skip
@@ -159,6 +176,10 @@ func (h *VRRHandler) HandleVRR(ctx context.Context, obj any) {
 		h.eventRecorder.Eventf(vrr, v1.EventTypeWarning, "VRRRestoreFailed",
 			"Failed to restore volume from VRR: %v", err)
 		klog.Errorf("Failed to handle VRR %s/%s: %v", vrr.Namespace, vrr.Name, err)
+		// Update VRR status to Failed
+		if updateErr := h.updateVRRFailed(ctx, vrr, err); updateErr != nil {
+			klog.Warningf("Failed to update VRR %s/%s status to Failed: %v", vrr.Namespace, vrr.Name, updateErr)
+		}
 	}
 }
 
@@ -333,6 +354,17 @@ func (h *VRRHandler) restoreFromVSC(ctx context.Context, vrr *storagev1alpha1.Vo
 	// Step 4: Create PVC from VRR spec (always attempt, even if PV already existed)
 	if err := h.createPVCFromVRR(ctx, vrr, pv); err != nil {
 		return fmt.Errorf("failed to create PVC: %w", err)
+	}
+
+	// Step 5: Wait for PVC to become Bound
+	if err := h.waitForPVCBound(ctx, vrr); err != nil {
+		return fmt.Errorf("failed to wait for PVC Bound: %w", err)
+	}
+
+	// Step 6: Update VRR status to Ready=True
+	if err := h.updateVRRReady(ctx, vrr); err != nil {
+		// Log error but don't fail - status update is best-effort
+		klog.Warningf("Failed to update VRR %s/%s status to Ready: %v", vrr.Namespace, vrr.Name, err)
 	}
 
 	return nil
@@ -570,6 +602,17 @@ func (h *VRRHandler) restoreFromPV(ctx context.Context, vrr *storagev1alpha1.Vol
 		return fmt.Errorf("failed to create PVC: %w", err)
 	}
 
+	// Step 5: Wait for PVC to become Bound
+	if err := h.waitForPVCBound(ctx, vrr); err != nil {
+		return fmt.Errorf("failed to wait for PVC Bound: %w", err)
+	}
+
+	// Step 6: Update VRR status to Ready=True
+	if err := h.updateVRRReady(ctx, vrr); err != nil {
+		// Log error but don't fail - status update is best-effort
+		klog.Warningf("Failed to update VRR %s/%s status to Ready: %v", vrr.Namespace, vrr.Name, err)
+	}
+
 	return nil
 }
 
@@ -673,7 +716,7 @@ func createPVFromCSIResponse(
 	}
 
 	// Set topology/node affinity if available
-	if volume.AccessibleTopology != nil && len(volume.AccessibleTopology) > 0 {
+	if len(volume.AccessibleTopology) > 0 {
 		pv.Spec.NodeAffinity = GenerateVolumeNodeAffinity(volume.AccessibleTopology)
 	}
 
@@ -733,4 +776,152 @@ func (h *VRRHandler) getFSTypeFromPV(pv *v1.PersistentVolume) string {
 		return pv.Spec.CSI.FSType
 	}
 	return h.defaultFSType
+}
+
+// waitForPVCBound waits for PVC to become Bound with timeout.
+// Returns error if PVC does not become Bound within the timeout period.
+//
+// NOTE: PVC Bound waiting is implemented via polling (wait.PollUntilContextCancel),
+// not informer-based watching, to:
+// - avoid maintaining additional informers
+// - keep VRRHandler logic self-contained
+// - reduce memory footprint
+//
+// Polling interval and timeout are bounded and configurable.
+func (h *VRRHandler) waitForPVCBound(ctx context.Context, vrr *storagev1alpha1.VolumeRestoreRequest) error {
+	timeoutCtx, cancel := context.WithTimeout(ctx, h.timeout)
+	defer cancel()
+
+	// Poll every 1 second until PVC is Bound or timeout
+	err := wait.PollUntilContextCancel(timeoutCtx, 1*time.Second, true, func(ctx context.Context) (bool, error) {
+		pvc, err := h.kubeClient.CoreV1().PersistentVolumeClaims(vrr.Spec.TargetNamespace).Get(ctx, vrr.Spec.TargetPVCName, metav1.GetOptions{})
+		if err != nil {
+			if apierrors.IsNotFound(err) {
+				// PVC not found yet - continue polling
+				return false, nil
+			}
+			// Other error - stop polling
+			return false, fmt.Errorf("failed to get PVC %s/%s: %w", vrr.Spec.TargetNamespace, vrr.Spec.TargetPVCName, err)
+		}
+
+		// Check if PVC is Bound
+		if pvc.Status.Phase == v1.ClaimBound {
+			return true, nil
+		}
+
+		// Continue polling
+		return false, nil
+	})
+
+	if err != nil {
+		if err == context.DeadlineExceeded {
+			return fmt.Errorf("timeout waiting for PVC %s/%s to become Bound", vrr.Spec.TargetNamespace, vrr.Spec.TargetPVCName)
+		}
+		return err
+	}
+
+	klog.V(2).Infof("waitForPVCBound: PVC %s/%s is now Bound", vrr.Spec.TargetNamespace, vrr.Spec.TargetPVCName)
+	return nil
+}
+
+// updateVRRReady updates VRR status to Ready=True with completion timestamp.
+func (h *VRRHandler) updateVRRReady(ctx context.Context, vrr *storagev1alpha1.VolumeRestoreRequest) error {
+	return h.updateVRRStatus(ctx, vrr, metav1.ConditionTrue, storagev1alpha1.ConditionReasonCompleted, fmt.Sprintf("PVC %s/%s restored successfully", vrr.Spec.TargetNamespace, vrr.Spec.TargetPVCName))
+}
+
+// updateVRRFailed updates VRR status to Ready=False with error message.
+func (h *VRRHandler) updateVRRFailed(ctx context.Context, vrr *storagev1alpha1.VolumeRestoreRequest, err error) error {
+	return h.updateVRRStatus(ctx, vrr, metav1.ConditionFalse, storagev1alpha1.ConditionReasonRestoreFailed, err.Error())
+}
+
+// updateVRRStatus updates VRR status using dynamic client with retry-on-conflict.
+func (h *VRRHandler) updateVRRStatus(ctx context.Context, vrr *storagev1alpha1.VolumeRestoreRequest, status metav1.ConditionStatus, reason, message string) error {
+	// Get GVR for VolumeRestoreRequest
+	gvr := schema.GroupVersionResource{
+		Group:    storagev1alpha1.GroupVersion.Group,
+		Version:  storagev1alpha1.GroupVersion.Version,
+		Resource: "volumerestorerequests",
+	}
+
+	// Retry on conflict
+	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		// Get current VRR
+		unstructuredVRR, err := h.dynamicClient.Resource(gvr).Namespace(vrr.Namespace).Get(ctx, vrr.Name, metav1.GetOptions{})
+		if err != nil {
+			if apierrors.IsNotFound(err) {
+				// VRR deleted - nothing to update
+				return nil
+			}
+			return fmt.Errorf("failed to get VRR %s/%s: %w", vrr.Namespace, vrr.Name, err)
+		}
+
+		// Convert to typed object
+		var currentVRR storagev1alpha1.VolumeRestoreRequest
+		if err := runtime.DefaultUnstructuredConverter.FromUnstructured(unstructuredVRR.Object, &currentVRR); err != nil {
+			return fmt.Errorf("failed to convert VRR from unstructured: %w", err)
+		}
+
+		// Update status
+		now := metav1.Now()
+		if currentVRR.Status.CompletionTimestamp == nil {
+			currentVRR.Status.CompletionTimestamp = &now
+		}
+
+		// Set condition
+		setSingleCondition(&currentVRR.Status.Conditions, metav1.Condition{
+			Type:               storagev1alpha1.ConditionTypeReady,
+			Status:             status,
+			Reason:             reason,
+			Message:            message,
+			LastTransitionTime: now,
+		})
+
+		// Set TargetPVCRef on success
+		if status == metav1.ConditionTrue {
+			currentVRR.Status.TargetPVCRef = &storagev1alpha1.ObjectReference{
+				Name:      vrr.Spec.TargetPVCName,
+				Namespace: vrr.Spec.TargetNamespace,
+			}
+		}
+
+		// Convert back to unstructured
+		unstructuredStatus, err := runtime.DefaultUnstructuredConverter.ToUnstructured(&currentVRR.Status)
+		if err != nil {
+			return fmt.Errorf("failed to convert VRR status to unstructured: %w", err)
+		}
+
+		// Update status subresource
+		// NOTE: metadata reused from fetched object to preserve resourceVersion
+		_, err = h.dynamicClient.Resource(gvr).Namespace(vrr.Namespace).UpdateStatus(ctx, &unstructured.Unstructured{
+			Object: map[string]interface{}{
+				"apiVersion": unstructuredVRR.GetAPIVersion(),
+				"kind":       unstructuredVRR.GetKind(),
+				"metadata":   unstructuredVRR.Object["metadata"],
+				"status":     unstructuredStatus,
+			},
+		}, metav1.UpdateOptions{})
+
+		if err != nil {
+			if apierrors.IsNotFound(err) {
+				// VRR deleted - nothing to update
+				return nil
+			}
+			return err
+		}
+
+		klog.V(2).Infof("updateVRRStatus: successfully updated VRR %s/%s status: Ready=%v, reason=%s", vrr.Namespace, vrr.Name, status, reason)
+		return nil
+	})
+}
+
+// setSingleCondition sets a condition, removing any existing condition of the same type first.
+func setSingleCondition(conds *[]metav1.Condition, cond metav1.Condition) {
+	meta.RemoveStatusCondition(conds, cond.Type)
+	meta.SetStatusCondition(conds, cond)
+}
+
+// isTerminalVRR checks if VRR is in terminal state (Ready=True or Ready=False).
+func isTerminalVRR(conditions []metav1.Condition) bool {
+	cond := meta.FindStatusCondition(conditions, storagev1alpha1.ConditionTypeReady)
+	return cond != nil && (cond.Status == metav1.ConditionTrue || cond.Status == metav1.ConditionFalse)
 }

@@ -35,9 +35,13 @@ import (
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
+	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
+	"k8s.io/client-go/dynamic/fake"
 	"k8s.io/client-go/kubernetes"
 	fakeclientset "k8s.io/client-go/kubernetes/fake"
+	"k8s.io/client-go/kubernetes/scheme"
 	storagelistersv1 "k8s.io/client-go/listers/storage/v1"
+	k8stesting "k8s.io/client-go/testing"
 	"k8s.io/client-go/tools/record"
 
 	storagev1alpha1 "github.com/deckhouse/storage-foundation/api/v1alpha1"
@@ -247,6 +251,7 @@ func TestRestoreFromVSC_HappyPath(t *testing.T) {
 	}
 
 	handler := createTestVRRHandlerWithClients(mockCSIClient, mockSCLister, kubeClient, snapshotClient, eventRecorder)
+	addVRRToDynamicClient(t, handler, vrr)
 
 	err := handler.restoreFromVSC(context.Background(), vrr)
 	if err != nil {
@@ -295,6 +300,7 @@ func TestRestoreFromVSC_VSCNotFound(t *testing.T) {
 	mockSCLister.storageClasses[vrrTestStorageClass] = sc
 
 	handler := createTestVRRHandlerWithClients(mockCSIClient, mockSCLister, kubeClient, snapshotClient, eventRecorder)
+	addVRRToDynamicClient(t, handler, vrr)
 
 	err := handler.restoreFromVSC(context.Background(), vrr)
 	if err == nil {
@@ -368,6 +374,7 @@ func TestRestoreFromVSC_PVAlreadyExists_PVCCreated(t *testing.T) {
 	}
 
 	handler := createTestVRRHandlerWithClients(mockCSIClient, mockSCLister, kubeClient, snapshotClient, eventRecorder)
+	addVRRToDynamicClient(t, handler, vrr)
 
 	err = handler.restoreFromVSC(context.Background(), vrr)
 	if err != nil {
@@ -417,6 +424,7 @@ func TestRestoreFromVSC_VSCNotReady(t *testing.T) {
 	mockSCLister.storageClasses[vrrTestStorageClass] = sc
 
 	handler := createTestVRRHandlerWithClients(mockCSIClient, mockSCLister, kubeClient, snapshotClient, eventRecorder)
+	addVRRToDynamicClient(t, handler, vrr)
 
 	err := handler.restoreFromVSC(context.Background(), vrr)
 	if err == nil {
@@ -485,6 +493,7 @@ func TestRestoreFromPV_HappyPath(t *testing.T) {
 	}
 
 	handler := createTestVRRHandlerWithClients(mockCSIClient, mockSCLister, kubeClient, snapshotClient, eventRecorder)
+	addVRRToDynamicClient(t, handler, vrr)
 
 	err := handler.restoreFromPV(context.Background(), vrr)
 	if err != nil {
@@ -578,6 +587,7 @@ func TestRestoreFromPV_PVAlreadyExists_PVCCreated(t *testing.T) {
 	}
 
 	handler := createTestVRRHandlerWithClients(mockCSIClient, mockSCLister, kubeClient, snapshotClient, eventRecorder)
+	addVRRToDynamicClient(t, handler, vrr)
 
 	err = handler.restoreFromPV(context.Background(), vrr)
 	if err != nil {
@@ -660,6 +670,9 @@ func TestRestoreFromPV_PVAndPVCAAlreadyExist(t *testing.T) {
 		Spec: v1.PersistentVolumeClaimSpec{
 			VolumeName: pvName,
 		},
+		Status: v1.PersistentVolumeClaimStatus{
+			Phase: v1.ClaimBound, // PVC is already Bound
+		},
 	}
 
 	kubeClient := fakeclientset.NewSimpleClientset(sourcePV, existingPV, existingPVC)
@@ -669,6 +682,7 @@ func TestRestoreFromPV_PVAndPVCAAlreadyExist(t *testing.T) {
 	mockSCLister.storageClasses[vrrTestStorageClass] = sc
 
 	handler := createTestVRRHandlerWithClients(mockCSIClient, mockSCLister, kubeClient, snapshotClient, eventRecorder)
+	addVRRToDynamicClient(t, handler, vrr)
 
 	err = handler.restoreFromPV(context.Background(), vrr)
 	if err != nil {
@@ -941,8 +955,12 @@ func createTestVRRHandler(csiClient csi.ControllerClient, scLister storagelister
 	}
 	eventRecorder := record.NewFakeRecorder(10)
 
+	// Create fake dynamic client for VRR status updates
+	utilruntime.Must(storagev1alpha1.AddToScheme(scheme.Scheme))
+	dynamicClient := fake.NewSimpleDynamicClient(scheme.Scheme)
+
 	return NewVRRHandler(
-		nil, // dynamicClient not needed for these tests
+		dynamicClient,
 		kubeClient,
 		csiClient,
 		snapshotClient,
@@ -964,8 +982,42 @@ func createTestVRRHandlerWithClients(csiClient csi.ControllerClient, scLister st
 		eventRecorder = record.NewFakeRecorder(10)
 	}
 
-	return NewVRRHandler(
-		nil, // dynamicClient not needed for these tests
+	// Add reactor to fake client to automatically set PVC Phase to Bound when VolumeName is set
+	// This mimics real Kubernetes behavior where PVC becomes Bound when VolumeName is set
+	if fakeClient, ok := kubeClient.(*fakeclientset.Clientset); ok {
+		// Reactor for Get: return PVC with Bound phase if VolumeName is set
+		fakeClient.PrependReactor("get", "persistentvolumeclaims", func(action k8stesting.Action) (handled bool, ret runtime.Object, err error) {
+			getAction := action.(k8stesting.GetAction)
+			obj, err := fakeClient.Tracker().Get(action.GetResource(), action.GetNamespace(), getAction.GetName())
+			if err != nil {
+				return false, nil, err
+			}
+			pvc := obj.(*v1.PersistentVolumeClaim).DeepCopy()
+			// If PVC has VolumeName set, automatically set Phase to Bound
+			if pvc.Spec.VolumeName != "" && pvc.Status.Phase != v1.ClaimBound {
+				pvc.Status.Phase = v1.ClaimBound
+			}
+			return false, pvc, nil
+		})
+		// Reactor for Create: set Phase to Bound immediately if VolumeName is set
+		fakeClient.PrependReactor("create", "persistentvolumeclaims", func(action k8stesting.Action) (handled bool, ret runtime.Object, err error) {
+			createAction := action.(k8stesting.CreateAction)
+			obj := createAction.GetObject().(*v1.PersistentVolumeClaim)
+			// If PVC has VolumeName set, automatically set Phase to Bound
+			if obj.Spec.VolumeName != "" {
+				obj.Status.Phase = v1.ClaimBound
+			}
+			return false, nil, nil
+		})
+	}
+
+	// Create fake dynamic client for VRR status updates
+	// Add VRR to scheme for dynamic client
+	utilruntime.Must(storagev1alpha1.AddToScheme(scheme.Scheme))
+	dynamicClient := fake.NewSimpleDynamicClient(scheme.Scheme)
+
+	handler := NewVRRHandler(
+		dynamicClient,
 		kubeClient,
 		csiClient,
 		snapshotClient,
@@ -980,6 +1032,16 @@ func createTestVRRHandlerWithClients(csiClient csi.ControllerClient, scLister st
 		rpc.PluginCapabilitySet{},
 		rpc.ControllerCapabilitySet{},
 	)
+
+	return handler
+}
+
+// addVRRToDynamicClient adds VRR to fake dynamic client for status update tests
+func addVRRToDynamicClient(t *testing.T, handler *VRRHandler, vrr *storagev1alpha1.VolumeRestoreRequest) {
+	if fakeDynamicClient, ok := handler.dynamicClient.(*fake.FakeDynamicClient); ok {
+		vrrObj := toUnstructured(t, vrr)
+		_ = fakeDynamicClient.Tracker().Add(vrrObj)
+	}
 }
 
 func boolPtr(b bool) *bool {
