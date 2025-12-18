@@ -44,6 +44,10 @@ rules:
   - apiGroups: ["snapshot.storage.k8s.io"]
     resources: ["volumesnapshotcontents"]
     verbs: ["get", "list"]
+  # VolumeRestoreRequest (VRR) support - required for VRR handler
+  - apiGroups: ["storage.deckhouse.io"]
+    resources: ["volumerestorerequests"]
+    verbs: ["get", "list", "watch"]
   - apiGroups: ["storage.k8s.io"]
     resources: ["csinodes"]
     verbs: ["get", "list", "watch"]
