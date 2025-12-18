@@ -1,9 +1,10 @@
 module github.com/kubernetes-csi/external-provisioner/v5
 
-go 1.24.2
+go 1.24.9
 
 require (
 	github.com/container-storage-interface/spec v1.12.0
+	github.com/deckhouse/storage-foundation/api v0.0.0
 	github.com/golang/mock v1.6.0
 	github.com/google/uuid v1.6.0 // indirect
 	github.com/kubernetes-csi/csi-lib-utils v0.22.0
@@ -204,3 +205,5 @@ replace k8s.io/mount-utils => k8s.io/mount-utils v0.34.1
 replace k8s.io/pod-security-admission => k8s.io/pod-security-admission v0.34.0
 
 replace k8s.io/sample-apiserver => k8s.io/sample-apiserver v0.34.0
+
+replace github.com/deckhouse/storage-foundation/api => ../../../api

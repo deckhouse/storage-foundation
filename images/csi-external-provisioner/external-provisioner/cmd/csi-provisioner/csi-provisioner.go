@@ -43,12 +43,18 @@ import (
 	"k8s.io/apimachinery/pkg/util/validation"
 	server "k8s.io/apiserver/pkg/server"
 	utilfeature "k8s.io/apiserver/pkg/util/feature"
+	"k8s.io/client-go/dynamic"
+	"k8s.io/client-go/dynamic/dynamicinformer"
 	"k8s.io/client-go/informers"
 	"k8s.io/client-go/kubernetes"
+	"k8s.io/client-go/kubernetes/scheme"
+	corev1 "k8s.io/client-go/kubernetes/typed/core/v1"
 	listersv1 "k8s.io/client-go/listers/core/v1"
 	storagelistersv1 "k8s.io/client-go/listers/storage/v1"
 	"k8s.io/client-go/rest"
+	"k8s.io/client-go/tools/cache"
 	"k8s.io/client-go/tools/clientcmd"
+	"k8s.io/client-go/tools/record"
 	"k8s.io/client-go/util/workqueue"
 	utilflag "k8s.io/component-base/cli/flag"
 	"k8s.io/component-base/featuregate"
@@ -223,6 +229,12 @@ func main() {
 	snapClient, err := snapclientset.NewForConfig(config)
 	if err != nil {
 		klog.Fatalf("Failed to create snapshot client: %v", err)
+	}
+
+	// Create dynamic client for working with VRR (VolumeRestoreRequest)
+	dynamicClient, err := dynamic.NewForConfig(config)
+	if err != nil {
+		klog.Fatalf("Failed to create dynamic client: %v", err)
 	}
 
 	var gatewayClient gatewayclientset.Interface
@@ -411,6 +423,21 @@ func main() {
 	claimQueue := workqueue.NewTypedRateLimitingQueueWithConfig(claimRateLimiter, workqueue.TypedRateLimitingQueueConfig[string]{Name: "claims"})
 	claimInformer := factory.Core().V1().PersistentVolumeClaims().Informer()
 
+	// -------------------------------
+	// VolumeRestoreRequest (VRR) informer
+	vrrGVR := schema.GroupVersionResource{
+		Group:    "storage.deckhouse.io",
+		Version:  "v1alpha1",
+		Resource: "volumerestorerequests",
+	}
+	vrrInformerFactory := dynamicinformer.NewFilteredDynamicSharedInformerFactory(
+		dynamicClient,
+		ctrl.ResyncPeriodOfCsiNodeInformer,
+		v1.NamespaceAll,
+		nil,
+	)
+	vrrInformer := vrrInformerFactory.ForResource(vrrGVR).Informer()
+
 	// Setup options
 	provisionerOptions := []func(*controller.ProvisionController) error{
 		controller.LeaderElection(false), // Always disable leader election in provisioner lib. Leader election should be done here in the CSI provisioner level instead.
@@ -434,6 +461,12 @@ func main() {
 	if ctrl.SupportsTopology(pluginCapabilities) {
 		pvcNodeStore = ctrl.NewInMemoryStore()
 	}
+
+	// Create event recorder for VRR handler (shared with csiProvisioner)
+	broadcaster := record.NewBroadcaster()
+	broadcaster.StartLogging(klog.Infof)
+	broadcaster.StartRecordingToSink(&corev1.EventSinkImpl{Interface: clientset.CoreV1().Events(v1.NamespaceAll)})
+	eventRecorder := broadcaster.NewRecorder(scheme.Scheme, v1.EventSource{Component: "external-provisioner"})
 
 	// Create the provisioner: it implements the Provisioner interface expected by
 	// the controller
@@ -653,6 +686,30 @@ func main() {
 		controllerCapabilities,
 	)
 
+	// Create VRR handler for handling VolumeRestoreRequest
+	vrrHandler := ctrl.NewVRRHandler(
+		dynamicClient,
+		clientset,
+		csi.NewControllerClient(grpcClient),
+		snapClient,
+		provisionerName,
+		identity,
+		*operationTimeout,
+		*volumeNamePrefix,
+		*volumeNameUUIDLength,
+		*defaultFSType,
+		scLister,
+		eventRecorder,
+		pluginCapabilities,
+		controllerCapabilities,
+	)
+
+	// Register VRR event handler
+	vrrInformer.AddEventHandler(cache.ResourceEventHandlerFuncs{
+		AddFunc:    func(obj any) { vrrHandler.HandleVRR(ctx, obj) },
+		UpdateFunc: func(_ any, newObj any) { vrrHandler.HandleVRR(ctx, newObj) },
+	})
+
 	// handle SIGTERM and SIGINT by cancelling the context.
 	var (
 		terminate       func()          // called when all controllers are finished
@@ -684,6 +741,8 @@ func main() {
 			// wait for sync.
 			factoryForNamespace.Start(ctx.Done())
 		}
+		// Start VRR informer factory
+		vrrInformerFactory.Start(ctx.Done())
 		cacheSyncResult := factory.WaitForCacheSync(ctx.Done())
 		for _, v := range cacheSyncResult {
 			if !v {

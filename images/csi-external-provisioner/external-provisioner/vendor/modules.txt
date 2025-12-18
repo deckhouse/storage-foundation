@@ -32,6 +32,9 @@ github.com/coreos/go-systemd/v22/journal
 # github.com/davecgh/go-spew v1.1.2-0.20180830191138-d8f796af33cc
 ## explicit
 github.com/davecgh/go-spew/spew
+# github.com/deckhouse/storage-foundation/api v0.0.0 => ../../../api
+## explicit; go 1.24.9
+github.com/deckhouse/storage-foundation/api/v1alpha1
 # github.com/distribution/reference v0.6.0
 ## explicit; go 1.20
 github.com/distribution/reference
@@ -1598,3 +1601,4 @@ sigs.k8s.io/yaml
 # k8s.io/mount-utils => k8s.io/mount-utils v0.34.1
 # k8s.io/pod-security-admission => k8s.io/pod-security-admission v0.34.0
 # k8s.io/sample-apiserver => k8s.io/sample-apiserver v0.34.0
+# github.com/deckhouse/storage-foundation/api => ../../../api
