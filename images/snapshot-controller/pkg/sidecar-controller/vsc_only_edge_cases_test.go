@@ -23,6 +23,7 @@ import (
 
 	crdv1 "github.com/kubernetes-csi/external-snapshotter/client/v8/apis/volumesnapshot/v1"
 	"github.com/kubernetes-csi/external-snapshotter/v8/pkg/utils"
+	v1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
@@ -90,6 +91,9 @@ func TestVSCOnly_CreateSnapshotFinalError(t *testing.T) {
 					parameters: map[string]string{
 						utils.PrefixedVolumeSnapshotContentNameKey: "content-error-1",
 					},
+					secrets: map[string]string{
+						"foo": "bar",
+					},
 					creationTime: timeNow,
 					readyToUse:   false,
 					err:          errors.New("invalid volume handle"),
@@ -98,6 +102,7 @@ func TestVSCOnly_CreateSnapshotFinalError(t *testing.T) {
 			expectedListCalls: []listCall{},
 			expectSuccess:     false, // Error is returned from syncContent
 			expectRequeue:     true,  // Error causes requeue
+			initialSecrets:    []*v1.Secret{secret()},
 			errors:            noerrors,
 			test:              testSyncContent,
 		},

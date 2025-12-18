@@ -40,6 +40,11 @@ git:
 {{- end }}
 {{- if $is_dev }}
 git:
+- add: /api
+  to: /api
+  stageDependencies:
+    install:
+    - '**/*'
 - add: /images/csi-external-provisioner/external-provisioner
   to: /src
   excludePaths:
@@ -76,6 +81,12 @@ import:
   add: /src
   to: /src
   before: install
+{{- if $is_dev }}
+- image: {{ $.ModuleNamePrefix }}{{ $.ImageName }}-src-artifact-{{ $version | replace "." "-" }}
+  add: /api
+  to: /api
+  before: install
+{{- end }}
 secrets:
 - id: GOPROXY
   value: {{ $.GOPROXY }}
