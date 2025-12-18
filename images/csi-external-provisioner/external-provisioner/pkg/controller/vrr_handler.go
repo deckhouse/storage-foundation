@@ -282,6 +282,17 @@ func (h *VRRHandler) restoreFromVSC(ctx context.Context, vrr *storagev1alpha1.Vo
 			capacityBytes = *vsc.Status.RestoreSize
 		}
 
+		// Resolve provisioner secret credentials from StorageClass
+		// Note: We pass nil for PVC since it doesn't exist yet - secret templates can use PV name
+		provisionerSecretRef, err := getSecretReference(provisionerSecretParams, sc.Parameters, pvName, nil)
+		if err != nil {
+			return fmt.Errorf("failed to get provisioner secret reference: %w", err)
+		}
+		provisionerCredentials, err := getCredentials(ctx, h.kubeClient, provisionerSecretRef)
+		if err != nil {
+			return fmt.Errorf("failed to get provisioner credentials: %w", err)
+		}
+
 		// Build CreateVolumeRequest
 		req := csi.CreateVolumeRequest{
 			Name:               pvName,
@@ -297,6 +308,7 @@ func (h *VRRHandler) restoreFromVSC(ctx context.Context, vrr *storagev1alpha1.Vo
 					},
 				},
 			},
+			Secrets: provisionerCredentials,
 		}
 
 		// Call CSI CreateVolume with timeout
@@ -528,6 +540,17 @@ func (h *VRRHandler) restoreFromPV(ctx context.Context, vrr *storagev1alpha1.Vol
 			capacityBytes = capacity.Value()
 		}
 
+		// Resolve provisioner secret credentials from StorageClass
+		// Note: We pass nil for PVC since it doesn't exist yet - secret templates can use PV name
+		provisionerSecretRef, err := getSecretReference(provisionerSecretParams, sc.Parameters, pvName, nil)
+		if err != nil {
+			return fmt.Errorf("failed to get provisioner secret reference: %w", err)
+		}
+		provisionerCredentials, err := getCredentials(ctx, h.kubeClient, provisionerSecretRef)
+		if err != nil {
+			return fmt.Errorf("failed to get provisioner credentials: %w", err)
+		}
+
 		// Build CreateVolumeRequest for clone
 		req := csi.CreateVolumeRequest{
 			Name:               pvName,
@@ -543,6 +566,7 @@ func (h *VRRHandler) restoreFromPV(ctx context.Context, vrr *storagev1alpha1.Vol
 					},
 				},
 			},
+			Secrets: provisionerCredentials,
 		}
 
 		// Call CSI CreateVolume with timeout
