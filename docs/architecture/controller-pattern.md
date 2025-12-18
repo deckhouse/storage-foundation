@@ -42,7 +42,12 @@ Fire-and-Forget означает:
 
 ### Реализация
 
-Контроллеры создают артефакты (VSC/PVC, ManifestCheckpoint, ObjectKeeper) и транслируют статусы внешних объектов в Status Request-ресурса.
+Контроллеры создают артефакты (VSC/PV, ManifestCheckpoint, ObjectKeeper) и транслируют статусы внешних объектов в Status Request-ресурса.
+
+**Важно:** Контроллеры **не создают** некоторые артефакты напрямую:
+- `VolumeRestoreRequestController` **не создаёт** PVC — это делает external-provisioner
+- `VolumeCaptureRequestController` создаёт VSC напрямую (без VolumeSnapshot)
+- `VolumeRestoreRequestController` **не создаёт** VolumeSnapshot (запрещено архитектурой)
 
 **Примеры:**
 - `VolumeCaptureRequestController`, `VolumeRestoreRequestController` (storage-foundation)
@@ -106,20 +111,28 @@ Reconcile обязан немедленно завершаться без обр
 
 | Роль | Кто |
 |------|-----|
-| Инициатор | VCR / MCR |
+| Инициатор | VCR / VRR / MCR |
 | Владение артефактами | ObjectKeeper |
-| Исполнение | CSI / snapshot-controller / kubelet |
+| Создание артефактов | VCR (VSC/PV) / external-provisioner (PVC/PV для restore) / MCR (ManifestCheckpoint) |
+| Исполнение | CSI / snapshot-controller / external-provisioner / kubelet |
 | Очистка | kube-GC |
 
 ### Инварианты
 
 - Request не владеет артефактами
-- ObjectKeeper — единственный controller owner
+- ObjectKeeper — единственный controller owner артефактов
 - GC всегда стандартный, без финалайзеров
+- **VRR не создаёт PVC** — это делает external-provisioner (патченный)
+- **VCR создаёт VSC напрямую** (без VolumeSnapshot)
 
 ### Реализация
 
-Request создаёт ObjectKeeper, который становится controller owner артефактов (VSC/PV, ManifestCheckpoint). При удалении Request автоматически удаляются ObjectKeeper и все артефакты через стандартный Kubernetes GC.
+Request создаёт ObjectKeeper, который становится controller owner артефактов (VSC/PV, PVC, ManifestCheckpoint). При удалении Request автоматически удаляются ObjectKeeper и все артефакты через стандартный Kubernetes GC.
+
+**Важно:** Разные Request-ресурсы создают разные артефакты:
+- `VolumeCaptureRequest` создаёт VSC/PV напрямую
+- `VolumeRestoreRequest` **не создаёт** PVC — это делает external-provisioner, который наблюдает за VRR
+- `ManifestCaptureRequest` создаёт ManifestCheckpoint
 
 ```
 Request
@@ -128,7 +141,7 @@ Request
 ObjectKeeper (FollowObject)
    |
    v
-Artifacts (VSC / MCP / Chunks)
+Artifacts (VSC / PV / PVC / MCP / Chunks)
 ```
 
 ---
@@ -169,52 +182,46 @@ ObjectKeeper создается с режимом `FollowObject` и не име�
 
 ### Решение
 
-После `Create()` необходимо гарантировать получение UID перед использованием в OwnerReference. Два допустимых подхода:
+После `Create()` необходимо гарантировать получение UID перед использованием в OwnerReference.
 
-#### Подход A: Requeue
+**Единый подход, реализованный в обоих модулях (storage-foundation и state-snapshotter):**
 
 ```go
 if err := r.Create(ctx, objectKeeper); err != nil {
-    return ctrl.Result{}, fmt.Errorf("failed to create ObjectKeeper: %w", err)
+    return nil, ctrl.Result{}, fmt.Errorf("failed to create ObjectKeeper: %w", err)
+}
+l.Info("Created ObjectKeeper", "name", name)
+
+// Re-read ObjectKeeper to get UID populated by apiserver/fake client
+if err := r.Get(ctx, client.ObjectKey{Name: name}, objectKeeper); err != nil {
+    return nil, ctrl.Result{}, fmt.Errorf("failed to re-read ObjectKeeper after Create: %w", err)
 }
 
-// HARD BARRIER: UID must exist before creating VSC with OwnerReference
+// HARD BARRIER: UID must exist before creating artifacts with OwnerReference
+// If UID is still not populated (shouldn't happen with real apiserver, but possible with fake client), requeue
 if objectKeeper.UID == "" {
-    l.Info("ObjectKeeper UID not yet populated, requeueing", "name", retainerName)
-    return ctrl.Result{Requeue: true}, nil
+    l.Info("ObjectKeeper UID not assigned yet, requeue", "name", name)
+    return nil, ctrl.Result{RequeueAfter: time.Second}, nil
 }
 
 // UID гарантированно заполнен, можно использовать
-vsc.OwnerReferences = []metav1.OwnerReference{{
+artifact.OwnerReferences = []metav1.OwnerReference{{
     UID: objectKeeper.UID,
     // ...
 }}
 ```
 
-#### Подход B: APIReader
-
-```go
-if err := r.Create(ctx, objectKeeper); err != nil {
-    return ctrl.Result{}, fmt.Errorf("failed to create ObjectKeeper: %w", err)
-}
-
-// After create, ensure it's observable via apiserver (UID barrier pattern)
-// Always read via APIReader (direct API, no cache) to ensure read-after-write consistency
-// This guarantees that ObjectKeeper is visible in apiserver before proceeding
-if err := r.APIReader.Get(ctx, client.ObjectKey{Name: retainerName}, objectKeeper); err != nil {
-    // UID barrier: if object is not yet observable via APIReader, requeue briefly
-    // This ensures read-after-write consistency for ownerRef UID
-    return ctrl.Result{RequeueAfter: 200 * time.Millisecond}, nil
-}
-
-// UID гарантированно заполнен, можно использовать
-```
+**Идемпотентность:**
+- При повторном reconcile ObjectKeeper уже существует (проверка `IsNotFound`)
+- Если ObjectKeeper существует, но UID пустой — requeue с `RequeueAfter: time.Second`
+- На следующем reconcile ObjectKeeper уже будет иметь UID (либо из cache, либо из API server)
 
 ### Требования
 
-1. **Обязательно:** Гарантировать получение UID после `Create()` перед использованием в OwnerReference
-2. **Обязательно:** Получение UID перед использованием в OwnerReference
-3. **Запрещено:** Использование пустого UID в OwnerReference (приведёт к ошибке)
+1. **Обязательно:** После `Create()` выполнить `Get()` для получения UID из API server
+2. **Обязательно:** Проверить `objectKeeper.UID == ""` и вернуть `ctrl.Result{RequeueAfter: time.Second}` если пустой
+3. **Обязательно:** Использовать UID только после гарантированного получения
+4. **Запрещено:** Использование пустого UID в OwnerReference (приведёт к некорректной работе ownerRef и Kubernetes GC, иногда без явной ошибки)
 
 ### Почему это важно
 
@@ -297,7 +304,9 @@ func AddControllerToManager(mgr ctrl.Manager, cfg *config.Options) error {
 
 ### Реализация
 
-APIReader используется для чтения cluster-level конфигурации (StorageClass, SnapshotClass, CRD-конфиг) и для UID barrier после создания ObjectKeeper. Валидация APIReader выполняется при создании контроллера или в `AddControllerToManager`.
+APIReader используется для чтения cluster-level конфигурации (StorageClass, SnapshotClass, CRD-конфиг). 
+
+**Примечание:** APIReader может использоваться для UID barrier после создания ObjectKeeper, но в текущих модулях (storage-foundation и state-snapshotter) выбран requeue-based barrier через обычный `Get()` с проверкой пустого UID. Валидация APIReader выполняется при создании контроллера или в `AddControllerToManager`.
 
 ---
 
@@ -406,6 +415,74 @@ Terminal = immutable (request-style)
 
 ---
 
+## Lifecycle diagram
+
+```
+Create Request
+   ↓
+Create ObjectKeeper
+   ↓ (UID barrier)
+Create Artifact (VSC/PV/ManifestCheckpoint)
+   ↓
+External controller works (CSI / snapshot-controller / external-provisioner)
+   ↓
+Ready=True / Ready=False (terminal state)
+   ↓
+TTL scanner (leader-only)
+   ↓
+Delete Request → GC (ObjectKeeper → Artifacts)
+```
+
+---
+
+## Антипаттерны (запрещено)
+
+### Ownership
+
+- ❌ **OwnerReference от Request напрямую к артефактам**
+  - Правильно: Request → ObjectKeeper → Artifacts
+  - Неправильно: Request → Artifacts
+
+- ❌ **Finalizer вместо GC**
+  - Правильно: стандартный Kubernetes GC через ownerRef
+  - Неправильно: кастомные finalizers для управления жизненным циклом
+
+### Retry и state machine
+
+- ❌ **Retry state machine внутри reconcile**
+  - Правильно: ошибка → Ready=False (terminal)
+  - Неправильно: попытки "исправить" или повторить операцию
+
+- ❌ **Пересоздание артефактов после ошибки**
+  - Правильно: транслировать ошибку в Ready=False
+  - Неправильно: удалять и пересоздавать артефакты
+
+### Архитектурные нарушения
+
+- ❌ **Использование VolumeSnapshot в VCR**
+  - Правильно: VCR создаёт VSC напрямую
+  - Неправильно: создание VolumeSnapshot как промежуточного объекта
+
+- ❌ **Patch Status из внешних контроллеров**
+  - Правильно: внешние контроллеры обновляют статусы своих объектов (PVC/PV/VSC)
+  - Неправильно: external-provisioner обновляет VRR.status напрямую
+
+- ❌ **Использование пустого UID в OwnerReference**
+  - Правильно: UID barrier после Create() → Get() → проверка → requeue если пустой
+  - Неправильно: использование objectKeeper.UID сразу после Create()
+
+### TTL и cleanup
+
+- ❌ **TTL логика в reconcile**
+  - Правильно: отдельный TTL scanner (leader-only)
+  - Неправильно: проверка TTL в reconcile loop
+
+- ❌ **Использование annotation TTL для timing**
+  - Правильно: TTL из конфига контроллера, annotation только informational
+  - Неправильно: чтение TTL из annotation для принятия решений
+
+---
+
 ## Общие моменты реализации
 
 ### 1. Структура контроллера
@@ -485,3 +562,38 @@ func NewController(
   - `state-snapshotter`: `github.com/deckhouse/state-snapshotter/api/v1alpha1/conditions.go`
 - **Использование:** Все константы используются через префикс `storagev1alpha1.`
 - **Запрещено:** Использование захардкоженных строк вместо констант
+
+### 7. Single-writer contract для статусов Request-ресурсов
+
+**Критически важно:** Статусы Request-ресурсов (VCR, VRR, MCR) управляются **исключительно** их контроллерами.
+
+#### Правило
+
+- **Единственный writer:** Только контроллер Request-ресурса может обновлять его Status
+- **Внешние контроллеры:** Не должны обновлять Status Request-ресурсов
+- **Коммуникация:** Внешние контроллеры должны использовать статусы своих объектов (PVC/PV/VSC) или Kubernetes events
+
+#### Примеры
+
+**Правильно:**
+- `VolumeRestoreRequestController` обновляет VRR.status на основе наблюдения за PVC/PV
+- `external-provisioner` создаёт PVC/PV и обновляет их статусы
+- `VolumeRestoreRequestController` читает PVC.status и транслирует в VRR.status
+
+**Неправильно:**
+- `external-provisioner` обновляет VRR.status напрямую (запрещено)
+- Любой другой контроллер обновляет VCR.status (запрещено)
+
+#### Зачем это нужно
+
+- Предотвращение race conditions
+- Предсказуемое поведение
+- Единая точка ответственности за статус
+- Упрощение отладки
+
+#### Реализация
+
+Если внешний контроллер (например, external-provisioner) должен сообщить об ошибке:
+1. Обновить статус своего объекта (PVC/PV)
+2. Использовать Kubernetes events
+3. Request-контроллер наблюдает за этими изменениями и транслирует в свой Status

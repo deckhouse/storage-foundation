@@ -196,8 +196,8 @@ var _ = Describe("VolumeRestoreRequest", func() {
 			if err != nil {
 				return result, err
 			}
-			// If Requeue is true, ObjectKeeper was created but UID not populated by fake client
-			if result.Requeue {
+			// If RequeueAfter is set (due to empty UID), ObjectKeeper was created but UID not populated by fake client
+			if result.RequeueAfter > 0 && result.RequeueAfter == time.Second {
 				retainerName := NamePrefixRetainerPVC + string(vrrUID)
 				objectKeeper := &deckhousev1alpha1.ObjectKeeper{}
 				if err := client.Get(ctx, types.NamespacedName{Name: retainerName}, objectKeeper); err != nil {

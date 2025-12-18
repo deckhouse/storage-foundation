@@ -235,9 +235,33 @@ var _ = Describe("VolumeCaptureRequest Controller", func() {
 			}
 
 			// Reconcile
-			_, err := ctrl.Reconcile(ctx, reconcile.Request{NamespacedName: types.NamespacedName{Name: currentVCR.Name, Namespace: currentVCR.Namespace}})
+			result, err := ctrl.Reconcile(ctx, reconcile.Request{NamespacedName: types.NamespacedName{Name: currentVCR.Name, Namespace: currentVCR.Namespace}})
 			if err != nil {
 				return err
+			}
+
+			// Workaround for fake client: if RequeueAfter is set due to empty UID, set UID and continue
+			if result.RequeueAfter > 0 && result.RequeueAfter == time.Second {
+				if currentVCR.Spec.Mode == ModeSnapshot {
+					csiVSCName := fmt.Sprintf("snapshot-%s", string(currentVCR.UID))
+					retainerName := NamePrefixRetainer + csiVSCName
+					ok := &deckhousev1alpha1.ObjectKeeper{}
+					if err := client.Get(ctx, types.NamespacedName{Name: retainerName}, ok); err == nil && ok.UID == "" {
+						ok.UID = types.UID("ok-uid-" + string(currentVCR.UID))
+						_ = client.Update(ctx, ok) // Ignore errors
+						// Continue loop to reconcile again with UID set
+						continue
+					}
+				} else if currentVCR.Spec.Mode == ModeDetach {
+					retainerName := NamePrefixRetainerPV + string(currentVCR.UID)
+					ok := &deckhousev1alpha1.ObjectKeeper{}
+					if err := client.Get(ctx, types.NamespacedName{Name: retainerName}, ok); err == nil && ok.UID == "" {
+						ok.UID = types.UID("ok-uid-" + string(currentVCR.UID))
+						_ = client.Update(ctx, ok) // Ignore errors
+						// Continue loop to reconcile again with UID set
+						continue
+					}
+				}
 			}
 
 			// Workaround for fake client: ensure ObjectKeeper has UID AFTER reconcile
@@ -327,10 +351,19 @@ var _ = Describe("VolumeCaptureRequest Controller", func() {
 
 				// When: reconcile until VSC is created (but not terminal yet - waiting for ReadyToUse)
 				csiVSCName := fmt.Sprintf("snapshot-%s", string(vcr.UID))
+				retainerName := NamePrefixRetainer + csiVSCName
 				// Reconcile a few times to ensure VSC is created
 				for i := 0; i < 5; i++ {
-					_, err := ctrl.Reconcile(ctx, reconcile.Request{NamespacedName: types.NamespacedName{Name: vcr.Name, Namespace: vcr.Namespace}})
+					result, err := ctrl.Reconcile(ctx, reconcile.Request{NamespacedName: types.NamespacedName{Name: vcr.Name, Namespace: vcr.Namespace}})
 					Expect(err).ToNot(HaveOccurred())
+					// Handle requeue due to empty UID (fake client workaround)
+					if result.RequeueAfter > 0 && result.RequeueAfter == time.Second {
+						ok := &deckhousev1alpha1.ObjectKeeper{}
+						if err := client.Get(ctx, types.NamespacedName{Name: retainerName}, ok); err == nil && ok.UID == "" {
+							ok.UID = types.UID("ok-uid-" + string(vcr.UID))
+							_ = client.Update(ctx, ok) // Ignore errors
+						}
+					}
 				}
 
 				// Simulate external-snapshotter setting ReadyToUse=true
@@ -346,7 +379,6 @@ var _ = Describe("VolumeCaptureRequest Controller", func() {
 
 				// Then: verify invariants
 				// ObjectKeeper exists
-				retainerName := NamePrefixRetainer + csiVSCName
 				objectKeeper := &deckhousev1alpha1.ObjectKeeper{}
 				Expect(client.Get(ctx, types.NamespacedName{Name: retainerName}, objectKeeper)).To(Succeed())
 
@@ -815,9 +847,18 @@ var _ = Describe("VolumeCaptureRequest Controller", func() {
 
 			// Reconcile until VSC is created
 			csiVSCName := fmt.Sprintf("snapshot-%s", string(vcr.UID))
+			retainerName := NamePrefixRetainer + csiVSCName
 			for i := 0; i < 5; i++ {
-				_, err := ctrl.Reconcile(ctx, reconcile.Request{NamespacedName: types.NamespacedName{Name: vcr.Name, Namespace: vcr.Namespace}})
+				result, err := ctrl.Reconcile(ctx, reconcile.Request{NamespacedName: types.NamespacedName{Name: vcr.Name, Namespace: vcr.Namespace}})
 				Expect(err).ToNot(HaveOccurred())
+				// Handle requeue due to empty UID (fake client workaround)
+				if result.RequeueAfter > 0 && result.RequeueAfter == time.Second {
+					ok := &deckhousev1alpha1.ObjectKeeper{}
+					if err := client.Get(ctx, types.NamespacedName{Name: retainerName}, ok); err == nil && ok.UID == "" {
+						ok.UID = types.UID("ok-uid-" + string(vcr.UID))
+						_ = client.Update(ctx, ok) // Ignore errors
+					}
+				}
 			}
 
 			// Set ReadyToUse=true to allow terminal state
@@ -832,8 +873,6 @@ var _ = Describe("VolumeCaptureRequest Controller", func() {
 			Expect(reconcileUntilTerminal(vcr, 5)).To(Succeed())
 
 			// Then: verify ownership chain
-			retainerName := NamePrefixRetainer + csiVSCName
-
 			objectKeeper := &deckhousev1alpha1.ObjectKeeper{}
 			Expect(client.Get(ctx, types.NamespacedName{Name: retainerName}, objectKeeper)).To(Succeed())
 

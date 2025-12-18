@@ -291,9 +291,12 @@ func (r *VolumeCaptureRequestController) processSnapshotMode(ctx context.Context
 	// This ensures proper ownership chain: ObjectKeeper → VSC
 	csiVSCName := fmt.Sprintf("snapshot-%s", string(vcr.UID))
 	retainerName := NamePrefixRetainer + csiVSCName
-	objectKeeper, err := r.ensureObjectKeeper(ctx, retainerName, vcr)
+	objectKeeper, result, err := r.ensureObjectKeeper(ctx, retainerName, vcr)
 	if err != nil {
 		return ctrl.Result{}, err
+	}
+	if result.Requeue || result.RequeueAfter > 0 {
+		return result, nil
 	}
 
 	// ============================================================================
@@ -582,9 +585,12 @@ func (r *VolumeCaptureRequestController) processDetachMode(ctx context.Context, 
 	// INVARIANT: ObjectKeeper must exist before creating artifacts (PV)
 	// This ensures proper ownership chain: ObjectKeeper → PV
 	retainerName := NamePrefixRetainerPV + string(vcr.UID)
-	objectKeeper, err := r.ensureObjectKeeper(ctx, retainerName, vcr)
+	objectKeeper, result, err := r.ensureObjectKeeper(ctx, retainerName, vcr)
 	if err != nil {
 		return ctrl.Result{}, err
+	}
+	if result.Requeue || result.RequeueAfter > 0 {
+		return result, nil
 	}
 
 	// 9. Detach PV from PVC and set ownerRef in a single Patch operation
@@ -663,13 +669,13 @@ func (r *VolumeCaptureRequestController) processDetachMode(ctx context.Context, 
 // - Creates ObjectKeeper if it doesn't exist
 // - Validates that existing ObjectKeeper belongs to this VCR (UID check)
 // - Returns error if validation fails
-// - Does NOT check UID (UID is always present in real API server)
-// - Does NOT requeue (caller handles requeue logic)
+// - Enforces UID barrier (may return RequeueAfter if UID not yet populated)
+// - Caller MUST respect returned ctrl.Result before proceeding
 func (r *VolumeCaptureRequestController) ensureObjectKeeper(
 	ctx context.Context,
 	name string,
 	vcr *storagev1alpha1.VolumeCaptureRequest,
-) (*deckhousev1alpha1.ObjectKeeper, error) {
+) (*deckhousev1alpha1.ObjectKeeper, ctrl.Result, error) {
 	l := log.FromContext(ctx)
 	objectKeeper := &deckhousev1alpha1.ObjectKeeper{}
 	err := r.Get(ctx, client.ObjectKey{Name: name}, objectKeeper)
@@ -696,51 +702,61 @@ func (r *VolumeCaptureRequestController) ensureObjectKeeper(
 			},
 		}
 		if err := r.Create(ctx, objectKeeper); err != nil {
-			return nil, fmt.Errorf("failed to create ObjectKeeper: %w", err)
+			return nil, ctrl.Result{}, fmt.Errorf("failed to create ObjectKeeper: %w", err)
 		}
 		l.Info("Created ObjectKeeper", "name", name)
-		// NOTE:
-		// UID is always set by real apiserver on Create.
-		// Re-read is kept for consistency and fake-client compatibility.
+		// Re-read ObjectKeeper to get UID populated by apiserver/fake client
 		if err := r.Get(ctx, client.ObjectKey{Name: name}, objectKeeper); err != nil {
-			return nil, fmt.Errorf("failed to re-read ObjectKeeper after Create: %w", err)
+			return nil, ctrl.Result{}, fmt.Errorf("failed to re-read ObjectKeeper after Create: %w", err)
 		}
-		return objectKeeper, nil
+		// HARD BARRIER: UID must exist before creating artifacts with OwnerReference
+		// If UID is still not populated (shouldn't happen with real apiserver, but possible with fake client), requeue
+		if objectKeeper.UID == "" {
+			l.Info("ObjectKeeper UID not assigned yet, requeue", "name", name)
+			return nil, ctrl.Result{RequeueAfter: time.Second}, nil
+		}
+		return objectKeeper, ctrl.Result{}, nil
 	}
 
 	if err != nil {
-		return nil, fmt.Errorf("failed to get ObjectKeeper: %w", err)
+		return nil, ctrl.Result{}, fmt.Errorf("failed to get ObjectKeeper: %w", err)
 	}
 
 	// ObjectKeeper exists - validate it belongs to this VCR
 	// This protects against race conditions where VCR was deleted and recreated with same name
 	if objectKeeper.Spec.FollowObjectRef == nil {
-		return nil, fmt.Errorf("ObjectKeeper %s has no FollowObjectRef", name)
+		return nil, ctrl.Result{}, fmt.Errorf("ObjectKeeper %s has no FollowObjectRef", name)
 	}
 	// Validate UID (primary check)
 	if objectKeeper.Spec.FollowObjectRef.UID != string(vcr.UID) {
-		return nil, fmt.Errorf("ObjectKeeper %s belongs to another VCR (UID mismatch: expected %s, got %s)",
+		return nil, ctrl.Result{}, fmt.Errorf("ObjectKeeper %s belongs to another VCR (UID mismatch: expected %s, got %s)",
 			name, string(vcr.UID), objectKeeper.Spec.FollowObjectRef.UID)
 	}
 	// Validate Mode (should be FollowObject)
 	if objectKeeper.Spec.Mode != "FollowObject" {
-		return nil, fmt.Errorf("ObjectKeeper %s has invalid mode: expected FollowObject, got %s", name, objectKeeper.Spec.Mode)
+		return nil, ctrl.Result{}, fmt.Errorf("ObjectKeeper %s has invalid mode: expected FollowObject, got %s", name, objectKeeper.Spec.Mode)
+	}
+	// HARD BARRIER: UID must exist before creating artifacts with OwnerReference
+	// If ObjectKeeper exists but UID is not populated (e.g., from fake client in tests), requeue
+	if objectKeeper.UID == "" {
+		l.Info("ObjectKeeper exists but UID not assigned yet, requeue", "name", name)
+		return nil, ctrl.Result{RequeueAfter: time.Second}, nil
 	}
 	// Validate Kind, Namespace, and Name (additional cheap checks)
 	if objectKeeper.Spec.FollowObjectRef.Kind != KindVolumeCaptureRequest {
-		return nil, fmt.Errorf("ObjectKeeper %s FollowObjectRef.Kind mismatch: expected %s, got %s",
+		return nil, ctrl.Result{}, fmt.Errorf("ObjectKeeper %s FollowObjectRef.Kind mismatch: expected %s, got %s",
 			name, KindVolumeCaptureRequest, objectKeeper.Spec.FollowObjectRef.Kind)
 	}
 	if objectKeeper.Spec.FollowObjectRef.Namespace != vcr.Namespace {
-		return nil, fmt.Errorf("ObjectKeeper %s FollowObjectRef.Namespace mismatch: expected %s, got %s",
+		return nil, ctrl.Result{}, fmt.Errorf("ObjectKeeper %s FollowObjectRef.Namespace mismatch: expected %s, got %s",
 			name, vcr.Namespace, objectKeeper.Spec.FollowObjectRef.Namespace)
 	}
 	if objectKeeper.Spec.FollowObjectRef.Name != vcr.Name {
-		return nil, fmt.Errorf("ObjectKeeper %s FollowObjectRef.Name mismatch: expected %s, got %s",
+		return nil, ctrl.Result{}, fmt.Errorf("ObjectKeeper %s FollowObjectRef.Name mismatch: expected %s, got %s",
 			name, vcr.Name, objectKeeper.Spec.FollowObjectRef.Name)
 	}
 
-	return objectKeeper, nil
+	return objectKeeper, ctrl.Result{}, nil
 }
 
 // setTTLAnnotation sets TTL annotation on the object.
@@ -865,11 +881,6 @@ func (r *VolumeCaptureRequestController) SetupWithManager(mgr ctrl.Manager) erro
 // IMPORTANT: This method should be called from manager.RunnableFunc to ensure leader-only execution.
 // RunnableFunc already runs in a separate goroutine, so we don't need an additional go statement.
 // When leadership changes, ctx.Done() triggers graceful shutdown of the scanner.
-func (r *VolumeCaptureRequestController) StartTTLScanner(ctx context.Context, client client.Client) {
-	r.startTTLScanner(ctx, client)
-}
-
-// startTTLScanner runs a background scanner that periodically checks and deletes expired VCRs.
 // Scanner uses List() to get all VCRs and checks completionTimestamp + TTL from controller config.
 // This approach is simpler than per-object reconcile and doesn't block the reconcile loop.
 //
@@ -899,7 +910,7 @@ func (r *VolumeCaptureRequestController) StartTTLScanner(ctx context.Context, cl
 // 5. Leader-only execution:
 //   - Scanner runs only on the leader replica (enforced by manager.RunnableFunc)
 //   - When leadership changes, ctx.Done() triggers graceful shutdown
-func (r *VolumeCaptureRequestController) startTTLScanner(ctx context.Context, client client.Client) {
+func (r *VolumeCaptureRequestController) StartTTLScanner(ctx context.Context, client client.Client) {
 	// Scanner interval: check every 5 minutes
 	// This is a reasonable balance between responsiveness and API load
 	scannerInterval := 5 * time.Minute

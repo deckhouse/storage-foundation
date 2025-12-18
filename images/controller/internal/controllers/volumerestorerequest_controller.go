@@ -176,8 +176,8 @@ func (r *VolumeRestoreRequestController) ensureObjectKeeper(
 		}
 		// If UID is still not populated (shouldn't happen with real apiserver, but possible with fake client), requeue
 		if objectKeeper.UID == "" {
-			l.Info("ObjectKeeper UID not yet populated after re-read, requeueing", "name", retainerName)
-			return nil, ctrl.Result{Requeue: true}, nil
+			l.Info("ObjectKeeper UID not assigned yet, requeue", "name", retainerName)
+			return nil, ctrl.Result{RequeueAfter: time.Second}, nil
 		}
 	} else if err != nil {
 		return nil, ctrl.Result{}, fmt.Errorf("failed to get ObjectKeeper: %w", err)
@@ -187,15 +187,33 @@ func (r *VolumeRestoreRequestController) ensureObjectKeeper(
 		if objectKeeper.Spec.FollowObjectRef == nil {
 			return nil, ctrl.Result{}, fmt.Errorf("ObjectKeeper %s has no FollowObjectRef", retainerName)
 		}
+		// Validate UID (primary check)
 		if objectKeeper.Spec.FollowObjectRef.UID != string(vrr.UID) {
 			return nil, ctrl.Result{}, fmt.Errorf("ObjectKeeper %s belongs to another VRR (UID mismatch: expected %s, got %s)",
 				retainerName, string(vrr.UID), objectKeeper.Spec.FollowObjectRef.UID)
 		}
+		// Validate Mode (should be FollowObject)
+		if objectKeeper.Spec.Mode != "FollowObject" {
+			return nil, ctrl.Result{}, fmt.Errorf("ObjectKeeper %s has invalid mode: expected FollowObject, got %s", retainerName, objectKeeper.Spec.Mode)
+		}
 		// HARD BARRIER: UID must exist before creating PVC with OwnerReference
 		// If ObjectKeeper exists but UID is not populated (e.g., from fake client in tests), requeue
 		if objectKeeper.UID == "" {
-			l.Info("ObjectKeeper exists but UID not yet populated, requeueing", "name", retainerName)
-			return nil, ctrl.Result{Requeue: true}, nil
+			l.Info("ObjectKeeper exists but UID not assigned yet, requeue", "name", retainerName)
+			return nil, ctrl.Result{RequeueAfter: time.Second}, nil
+		}
+		// Validate Kind, Namespace, and Name (additional cheap checks)
+		if objectKeeper.Spec.FollowObjectRef.Kind != KindVolumeRestoreRequest {
+			return nil, ctrl.Result{}, fmt.Errorf("ObjectKeeper %s FollowObjectRef.Kind mismatch: expected %s, got %s",
+				retainerName, KindVolumeRestoreRequest, objectKeeper.Spec.FollowObjectRef.Kind)
+		}
+		if objectKeeper.Spec.FollowObjectRef.Namespace != vrr.Namespace {
+			return nil, ctrl.Result{}, fmt.Errorf("ObjectKeeper %s FollowObjectRef.Namespace mismatch: expected %s, got %s",
+				retainerName, vrr.Namespace, objectKeeper.Spec.FollowObjectRef.Namespace)
+		}
+		if objectKeeper.Spec.FollowObjectRef.Name != vrr.Name {
+			return nil, ctrl.Result{}, fmt.Errorf("ObjectKeeper %s FollowObjectRef.Name mismatch: expected %s, got %s",
+				retainerName, vrr.Name, objectKeeper.Spec.FollowObjectRef.Name)
 		}
 	}
 
@@ -253,7 +271,7 @@ func (r *VolumeRestoreRequestController) processVolumeSnapshotContentRestore(
 	if err != nil {
 		return ctrl.Result{}, err
 	}
-	if result.Requeue {
+	if result.RequeueAfter > 0 {
 		return result, nil
 	}
 
@@ -331,7 +349,7 @@ func (r *VolumeRestoreRequestController) processPersistentVolumeRestore(
 	if err != nil {
 		return ctrl.Result{}, err
 	}
-	if result.Requeue {
+	if result.RequeueAfter > 0 {
 		return result, nil
 	}
 
@@ -465,17 +483,13 @@ func (r *VolumeRestoreRequestController) SetupWithManager(mgr ctrl.Manager) erro
 		Complete(r)
 }
 
-// StartTTLScanner starts the TTL scanner in a background goroutine.
+// StartTTLScanner starts the TTL scanner.
 // Should be called from manager.RunnableFunc to ensure it runs only on the leader replica.
 // Scanner periodically lists all VRRs and deletes expired ones based on completionTimestamp + TTL.
 //
 // IMPORTANT: This method should be called from manager.RunnableFunc to ensure leader-only execution.
+// RunnableFunc already runs in a separate goroutine, so we don't need an additional go statement.
 // When leadership changes, ctx.Done() triggers graceful shutdown of the scanner.
-func (r *VolumeRestoreRequestController) StartTTLScanner(ctx context.Context, client client.Client) {
-	go r.startTTLScanner(ctx, client)
-}
-
-// startTTLScanner runs a background scanner that periodically checks and deletes expired VRRs.
 // Scanner uses List() to get all VRRs and checks completionTimestamp + TTL from controller config.
 // This approach is simpler than per-object reconcile and doesn't block the reconcile loop.
 //
@@ -505,7 +519,7 @@ func (r *VolumeRestoreRequestController) StartTTLScanner(ctx context.Context, cl
 // 5. Leader-only execution:
 //   - Scanner runs only on the leader replica (enforced by manager.RunnableFunc)
 //   - When leadership changes, ctx.Done() triggers graceful shutdown
-func (r *VolumeRestoreRequestController) startTTLScanner(ctx context.Context, client client.Client) {
+func (r *VolumeRestoreRequestController) StartTTLScanner(ctx context.Context, client client.Client) {
 	// Scanner interval: check every 5 minutes
 	// This is a reasonable balance between responsiveness and API load
 	scannerInterval := 5 * time.Minute
@@ -547,6 +561,12 @@ func (r *VolumeRestoreRequestController) scanAndDeleteExpiredVRRs(ctx context.Co
 	defaultTTL := config.DefaultRequestTTL
 	if r.Config != nil && r.Config.RequestTTL > 0 {
 		defaultTTL = r.Config.RequestTTL
+	}
+
+	// Guard: if TTL is disabled (<= 0), skip scanning
+	if defaultTTL <= 0 {
+		log.FromContext(ctx).V(1).Info("TTL scanner disabled (ttl <= 0)")
+		return
 	}
 
 	// List all VRRs across all namespaces
