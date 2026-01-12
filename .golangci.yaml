@@ -1,0 +1,40 @@
+run:
+  timeout: 10m
+  allow-parallel-runners: true
+
+issues:
+  exclude:
+    - ST1005.*
+    - "should not use dot imports"
+    - "don't use an underscore in package name"
+    - "exported: .*"
+
+linters-settings:
+  gci:
+    sections:
+      - standard
+      - default
+      - prefix(fox.flant.com/deckhouse/storage)
+
+  errcheck:
+    ignore: fmt:.*,[rR]ead|[wW]rite|[cC]lose,io:Copy
+
+linters:
+  disable-all: true
+  enable:
+    - dogsled
+    - errcheck
+    - gci
+    - gocritic
+    - gofmt
+    - gosimple
+    - govet
+    - ineffassign
+    - misspell
+    - revive
+    - staticcheck
+    - typecheck
+    - unconvert
+    - unparam
+    - whitespace
+    - copyloopvar

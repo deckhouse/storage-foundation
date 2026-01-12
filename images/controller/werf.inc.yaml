@@ -1,0 +1,66 @@
+---
+image: {{ .ModuleNamePrefix }}{{ .ImageName }}-src-artifact
+fromImage: builder/src
+final: false
+
+git:
+  - add: {{ .ModuleDir }}/api
+    to: /src/api
+    stageDependencies:
+      install:
+        - '**/*'
+  - add: {{ .ModuleDir }}/images/{{ $.ImageName }}
+    to: /src/images/{{ $.ImageName }}
+    stageDependencies:
+      install:
+        - '**/*'
+    excludePaths:
+      - werf.yaml
+
+shell:
+  install:
+    - echo "src artifact"
+
+---
+image: {{ .ModuleNamePrefix }}{{ .ImageName }}-golang-artifact
+fromImage: {{ eq .SVACE_ENABLED "false" | ternary "builder/golang-alpine" "builder/golang-alt-svace" }}
+final: false
+
+import:
+  - image: {{ .ModuleNamePrefix }}{{ .ImageName }}-src-artifact
+    add: /src
+    to: /src
+    before: install
+
+mount:
+{{ include "mount points for golang builds" . }}
+
+secrets:
+- id: GOPROXY
+  value: {{ .GOPROXY }}
+
+shell:
+  setup:
+    - apk update
+    - apk add --no-cache git
+    - cd /src/images/{{ $.ImageName }}
+    - git clone https://github.com/deckhouse/deckhouse.git deckhouse
+    - echo "replace github.com/deckhouse/deckhouse => ./deckhouse" >> go.mod
+    - export GOOS=linux GOARCH=amd64 CGO_ENABLED=0
+    - |
+      {{- include "image-build.build" (set $ "BuildCommand" (printf `go build -ldflags="-s -w" -o /%s ./cmd` $.ImageName)) | nindent 6 }}
+    - chmod +x /{{ $.ImageName }}
+
+---
+image: {{ .ModuleNamePrefix }}{{ .ImageName }}
+fromImage: base/distroless
+
+import:
+  - image: {{ .ModuleNamePrefix }}{{ .ImageName }}-golang-artifact
+    add: /{{ $.ImageName }}
+    to: /{{ $.ImageName }}
+    before: setup
+
+imageSpec:
+  config:
+    entrypoint: ["/{{ $.ImageName }}"]

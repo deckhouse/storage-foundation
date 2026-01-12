@@ -1,0 +1,18 @@
+project: storage-foundation
+configVersion: 1
+build:
+  imageSpec:
+    author: "Deckhouse Kubernetes Platform <contact@deckhouse.io>"
+    clearHistory: true
+    config:
+      keepEssentialWerfLabels: true
+      removeLabels:
+        - /.*/
+---
+{{ tpl (.Files.Get ".werf/base-images.yaml") $ }}
+{{ tpl (.Files.Get ".werf/consts.yaml") $ }}
+{{ tpl (.Files.Get ".werf/choose-edition.yaml") $ }}
+{{ tpl (.Files.Get ".werf/images.yaml") $ }}
+{{ tpl (.Files.Get ".werf/images-digests.yaml") $ }}
+{{ tpl (.Files.Get ".werf/bundle.yaml") $ }}
+{{ tpl (.Files.Get ".werf/release.yaml") $ }}

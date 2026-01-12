@@ -1,0 +1,133 @@
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: controller
+  namespace: d8-{{ .Chart.Name }}
+  {{- include "helm_lib_module_labels" (list . (dict "app" "controller")) | nindent 2 }}
+
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: d8:{{ .Chart.Name }}:controller
+  {{- include "helm_lib_module_labels" (list . (dict "app" "controller")) | nindent 2 }}
+rules:
+# VolumeCaptureRequest (namespaced)
+- apiGroups: ["storage.deckhouse.io"]
+  resources: ["volumecapturerequests"]
+  verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+
+# VolumeCaptureRequest status
+- apiGroups: ["storage.deckhouse.io"]
+  resources: ["volumecapturerequests/status"]
+  verbs: ["get", "update", "patch"]
+
+# VolumeRestoreRequest (namespaced)
+- apiGroups: ["storage.deckhouse.io"]
+  resources: ["volumerestorerequests"]
+  verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+
+# VolumeRestoreRequest status
+- apiGroups: ["storage.deckhouse.io"]
+  resources: ["volumerestorerequests/status"]
+  verbs: ["get", "update", "patch"]
+
+# ObjectKeeper (cluster-scoped)
+- apiGroups: ["deckhouse.io"]
+  resources: ["objectkeepers"]
+  verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+
+# ObjectKeeper status
+- apiGroups: ["deckhouse.io"]
+  resources: ["objectkeepers/status"]
+  verbs: ["get", "update", "patch"]
+
+# VolumeSnapshotContent (cluster-scoped)
+- apiGroups: ["snapshot.storage.k8s.io"]
+  resources: ["volumesnapshotcontents"]
+  verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+
+# VolumeSnapshotContent status
+- apiGroups: ["snapshot.storage.k8s.io"]
+  resources: ["volumesnapshotcontents/status"]
+  verbs: ["get", "update", "patch"]
+
+# VolumeSnapshotClass (cluster-scoped)
+- apiGroups: ["snapshot.storage.k8s.io"]
+  resources: ["volumesnapshotclasses"]
+  verbs: ["get", "list", "watch"]
+
+# PersistentVolume (cluster-scoped)
+- apiGroups: [""]
+  resources: ["persistentvolumes"]
+  verbs: ["get", "list", "watch", "update", "patch"]
+
+# PersistentVolumeClaim (namespaced)
+- apiGroups: [""]
+  resources: ["persistentvolumeclaims"]
+  verbs: ["get", "list", "watch", "delete"]
+
+# Allow controller-runtime to watch namespaces
+- apiGroups: [""]
+  resources: ["namespaces"]
+  verbs: ["get", "list", "watch"]
+
+# Allow controller-runtime to watch configmaps (needed for informer cache)
+- apiGroups: [""]
+  resources: ["configmaps"]
+  verbs: ["get", "list", "watch"]
+# Core Kubernetes resources (temporary wide permissions)
+- apiGroups: ["*"]
+  resources: ["*"]
+  verbs: ["get", "list"]
+# Core Kubernetes resources (temporary wide permissions)
+- apiGroups: ["*"]
+  resources: ["*"]
+  verbs: ["get", "list"]
+
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: controller-leader-election
+  namespace: d8-{{ .Chart.Name }}
+  {{- include "helm_lib_module_labels" (list . (dict "app" "controller")) | nindent 2 }}
+rules:
+- apiGroups: ["coordination.k8s.io"]
+  resources: ["leases"]
+  verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+# Allow controller to create Events in its namespace
+- apiGroups: [""]
+  resources: ["events"]
+  verbs: ["create", "patch"]
+
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: controller-leader-election
+  namespace: d8-{{ .Chart.Name }}
+  {{- include "helm_lib_module_labels" (list . (dict "app" "controller")) | nindent 2 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: controller-leader-election
+subjects:
+  - kind: ServiceAccount
+    name: controller
+    namespace: d8-{{ .Chart.Name }}
+
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: d8:{{ .Chart.Name }}:controller
+  {{- include "helm_lib_module_labels" (list . (dict "app" "controller")) | nindent 2 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: d8:{{ .Chart.Name }}:controller
+subjects:
+  - kind: ServiceAccount
+    name: controller
+    namespace: d8-{{ .Chart.Name }}
