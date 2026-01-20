@@ -1,4 +1,4 @@
-module fox.flant.com/deckhouse/storage/storage-foundation/api
+module github.com/deckhouse/storage-foundation/api
 
 go 1.24.9
 

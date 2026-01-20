@@ -133,7 +133,7 @@ func main() {
 		fmt.Println(os.Args[0], version)
 		os.Exit(0)
 	}
-	klog.InfoS("Version TEST-AZ", "version", version)
+	klog.InfoS("Version DEV-STORAGE", "version", version)
 
 	// If distributed snapshotting is enabled and leaderElection is also set to true, return
 	if *enableNodeDeployment && *leaderElection {

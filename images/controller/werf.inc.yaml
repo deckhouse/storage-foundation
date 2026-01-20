@@ -46,6 +46,7 @@ shell:
     - cd /src/images/{{ $.ImageName }}
     - git clone https://github.com/deckhouse/deckhouse.git deckhouse
     - echo "replace github.com/deckhouse/deckhouse => ./deckhouse" >> go.mod
+    - go mod tidy
     - export GOOS=linux GOARCH=amd64 CGO_ENABLED=0
     - |
       {{- include "image-build.build" (set $ "BuildCommand" (printf `go build -ldflags="-s -w" -o /%s ./cmd` $.ImageName)) | nindent 6 }}

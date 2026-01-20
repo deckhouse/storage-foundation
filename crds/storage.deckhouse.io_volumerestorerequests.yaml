@@ -149,11 +149,6 @@ spec:
                   - type
                   type: object
                 type: array
-              observedGeneration:
-                description: ObservedGeneration is the generation of the resource
-                  that was last processed
-                format: int64
-                type: integer
               targetPVCRef:
                 description: TargetPVCRef references the created target PVC
                 properties:

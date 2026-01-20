@@ -28,6 +28,7 @@ import (
 
 	crdv1 "github.com/kubernetes-csi/external-snapshotter/client/v8/apis/volumesnapshot/v1"
 	"github.com/kubernetes-csi/external-snapshotter/v8/pkg/snapshotter"
+	"github.com/kubernetes-csi/external-snapshotter/v8/pkg/vscmode"
 )
 
 // Handler is responsible for handling VolumeSnapshot events from informer.
@@ -49,6 +50,7 @@ type csiHandler struct {
 	snapshotNameUUIDLength      int
 	groupSnapshotNamePrefix     string
 	groupSnapshotNameUUIDLength int
+	vscMode                     vscmode.VSCMode
 }
 
 // NewCSIHandler returns a handler which includes the csi connection and Snapshot name details
@@ -60,6 +62,7 @@ func NewCSIHandler(
 	snapshotNameUUIDLength int,
 	groupSnapshotNamePrefix string,
 	groupSnapshotNameUUIDLength int,
+	vscMode vscmode.VSCMode,
 ) Handler {
 	return &csiHandler{
 		snapshotter:                 snapshotter,
@@ -69,6 +72,7 @@ func NewCSIHandler(
 		snapshotNameUUIDLength:      snapshotNameUUIDLength,
 		groupSnapshotNamePrefix:     groupSnapshotNamePrefix,
 		groupSnapshotNameUUIDLength: groupSnapshotNameUUIDLength,
+		vscMode:                     vscMode,
 	}
 }
 
@@ -76,19 +80,10 @@ func (handler *csiHandler) CreateSnapshot(content *crdv1.VolumeSnapshotContent, 
 	ctx, cancel := context.WithTimeout(context.Background(), handler.timeout)
 	defer cancel()
 
-	// VSC-only model: VolumeSnapshotRef.UID may be empty. In this case, use VSC.UID for snapshot name.
-	// This allows VSC-only snapshots (created by VCR) to work without VolumeSnapshot.
-	// NOTE: We use content.UID (not content.Name) to match legacy behavior where VolumeSnapshotRef.UID is used.
-	// content.UID is stable for the lifetime of the object, but changes if VSC is recreated.
-	// Alternative: Using content.Name would be more stable across VSC recreations, but would diverge from legacy behavior.
-	var snapshotUID string
-	if content.Spec.VolumeSnapshotRef.UID != "" {
-		// Legacy mode: VolumeSnapshotRef is set - use it
-		snapshotUID = string(content.Spec.VolumeSnapshotRef.UID)
-	} else {
-		// VSC-only mode: VolumeSnapshotRef is empty - use VSC.UID
-		snapshotUID = string(content.UID)
-	}
+	// Use VSCMode to determine snapshot UID for name generation.
+	// SnapshotUID may come from VolumeSnapshotRef.UID (legacy/upstream) or from content.UID (VSC-only).
+	// VSCMode handles this selection based on the content's mode.
+	snapshotUID := handler.vscMode.SnapshotUID(content)
 
 	if content.Spec.Source.VolumeHandle == nil {
 		return "", "", time.Time{}, 0, false, fmt.Errorf("cannot create snapshot. Volume handle not found in snapshot content %s", content.Name)
@@ -145,9 +140,16 @@ func (handler *csiHandler) GetSnapshotStatus(content *crdv1.VolumeSnapshotConten
 	return csiSnapshotStatus, timestamp, size, groupSnapshotID, nil
 }
 
+// makeSnapshotName creates a deterministic snapshot name based on prefix and snapshotUID.
+// The snapshotUID may come from VolumeSnapshotRef.UID (legacy/upstream) or from
+// VolumeSnapshotContent.UID (VSC-only downstream extension). VSCMode handles the selection
+// of which UID to use, ensuring consistent snapshot naming across modes.
+//
+// This deterministic naming allows CSI drivers to identify and manage snapshots consistently,
+// even across controller restarts or when snapshots are created asynchronously.
 func makeSnapshotName(prefix, snapshotUID string, snapshotNameUUIDLength int) (string, error) {
 	// create persistent name based on a volumeNamePrefix and volumeNameUUIDLength
-	// of PVC's UID
+	// of snapshot UID (from VolumeSnapshotRef.UID in legacy mode, or content.UID in VSC-only mode)
 	if len(snapshotUID) == 0 {
 		return "", fmt.Errorf("Corrupted snapshot object, it is missing UID")
 	}

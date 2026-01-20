@@ -179,8 +179,7 @@ func main() {
 		fmt.Println(os.Args[0], version)
 		os.Exit(0)
 	}
-	klog.InfoS("Version", "version", version)
-	klog.InfoS("TEST", "test", "test")
+	klog.InfoS("Version", "version", version, "flavor", "dev-storage-foundation")
 
 	// Create the client config. Use kubeconfig if given, otherwise assume in-cluster.
 	config, err := buildConfig(*kubeconfig)
