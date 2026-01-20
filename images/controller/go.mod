@@ -1,6 +1,6 @@
 module github.com/deckhouse/storage-foundation/images/controller
 
-go 1.24.9
+go 1.24.11
 
 require (
 	github.com/deckhouse/deckhouse v1.67.7-0.20251212134859-497a0dab9fc0
