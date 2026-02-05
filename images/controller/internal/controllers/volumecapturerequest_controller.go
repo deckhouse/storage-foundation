@@ -19,6 +19,7 @@ package controllers
 import (
 	"context"
 	"fmt"
+	"strings"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
@@ -1003,6 +1004,13 @@ func (r *VolumeCaptureRequestController) scanAndDeleteExpiredVCRs(ctx context.Co
 				"expirationTime", expirationTime,
 				"ttl", defaultTTL)
 
+			// Best-effort cleanup of artifacts that have no ownerRef
+			if err := r.cleanupArtifactsForVCR(ctx, vcr); err != nil {
+				log.FromContext(ctx).Error(err, "Failed to cleanup VCR artifacts (ownerRef missing)",
+					"namespace", vcr.Namespace,
+					"name", vcr.Name)
+			}
+
 			if err := client.Delete(ctx, vcr); err != nil {
 				if apierrors.IsNotFound(err) {
 					// Already deleted, that's fine (double-delete is safe)
@@ -1026,4 +1034,54 @@ func (r *VolumeCaptureRequestController) scanAndDeleteExpiredVCRs(ctx context.Co
 			"deleted", deletedCount,
 			"skipped", skippedCount)
 	}
+}
+
+// cleanupArtifactsForVCR deletes VCR-created artifacts if they have no ownerRef.
+// This is a best-effort cleanup used by the TTL scanner to avoid orphaned artifacts.
+func (r *VolumeCaptureRequestController) cleanupArtifactsForVCR(ctx context.Context, vcr *storagev1alpha1.VolumeCaptureRequest) error {
+	if vcr.Status.DataRef == nil || vcr.Status.DataRef.Name == "" {
+		return nil
+	}
+
+	switch vcr.Status.DataRef.Kind {
+	case "VolumeSnapshotContent":
+		content := &snapshotv1.VolumeSnapshotContent{}
+		if err := r.Client.Get(ctx, client.ObjectKey{Name: vcr.Status.DataRef.Name}, content); err != nil {
+			if apierrors.IsNotFound(err) {
+				return nil
+			}
+			return err
+		}
+		if hasSnapshotContentOwnerRef(content.OwnerReferences) {
+			return nil
+		}
+		if err := r.Client.Delete(ctx, content); err != nil && !apierrors.IsNotFound(err) {
+			return err
+		}
+	case "PersistentVolume":
+		pv := &corev1.PersistentVolume{}
+		if err := r.Client.Get(ctx, client.ObjectKey{Name: vcr.Status.DataRef.Name}, pv); err != nil {
+			if apierrors.IsNotFound(err) {
+				return nil
+			}
+			return err
+		}
+		if hasSnapshotContentOwnerRef(pv.OwnerReferences) {
+			return nil
+		}
+		if err := r.Client.Delete(ctx, pv); err != nil && !apierrors.IsNotFound(err) {
+			return err
+		}
+	}
+
+	return nil
+}
+
+func hasSnapshotContentOwnerRef(refs []metav1.OwnerReference) bool {
+	for _, ref := range refs {
+		if strings.HasSuffix(ref.Kind, "SnapshotContent") {
+			return true
+		}
+	}
+	return false
 }

@@ -284,13 +284,20 @@ func (h *VRRHandler) restoreFromVSC(ctx context.Context, vrr *storagev1alpha1.Vo
 
 		// Resolve provisioner secret credentials from StorageClass
 		// Note: We pass nil for PVC since it doesn't exist yet - secret templates can use PV name
+		// Some drivers don't require secrets, so missing secret reference is OK
+		var provisionerCredentials map[string]string
 		provisionerSecretRef, err := getSecretReference(provisionerSecretParams, sc.Parameters, pvName, nil)
 		if err != nil {
-			return fmt.Errorf("failed to get provisioner secret reference: %w", err)
-		}
-		provisionerCredentials, err := getCredentials(ctx, h.kubeClient, provisionerSecretRef)
-		if err != nil {
-			return fmt.Errorf("failed to get provisioner credentials: %w", err)
+			// Secret reference not found or invalid - this is OK, some drivers don't need secrets
+			klog.V(5).Infof("restoreFromVSC: no secret reference found in StorageClass parameters for VRR %s/%s: %v", vrr.Namespace, vrr.Name, err)
+			provisionerCredentials = nil
+		} else if provisionerSecretRef != nil {
+			// Found secret reference in StorageClass parameters - read the secret
+			provisionerCredentials, err = getCredentials(ctx, h.kubeClient, provisionerSecretRef)
+			if err != nil {
+				return fmt.Errorf("failed to get provisioner credentials: %w", err)
+			}
+			klog.V(5).Infof("restoreFromVSC: successfully read credentials from StorageClass parameters for VRR %s/%s", vrr.Namespace, vrr.Name)
 		}
 
 		// Build CreateVolumeRequest
@@ -542,13 +549,20 @@ func (h *VRRHandler) restoreFromPV(ctx context.Context, vrr *storagev1alpha1.Vol
 
 		// Resolve provisioner secret credentials from StorageClass
 		// Note: We pass nil for PVC since it doesn't exist yet - secret templates can use PV name
+		// Some drivers don't require secrets, so missing secret reference is OK
+		var provisionerCredentials map[string]string
 		provisionerSecretRef, err := getSecretReference(provisionerSecretParams, sc.Parameters, pvName, nil)
 		if err != nil {
-			return fmt.Errorf("failed to get provisioner secret reference: %w", err)
-		}
-		provisionerCredentials, err := getCredentials(ctx, h.kubeClient, provisionerSecretRef)
-		if err != nil {
-			return fmt.Errorf("failed to get provisioner credentials: %w", err)
+			// Secret reference not found or invalid - this is OK, some drivers don't need secrets
+			klog.V(5).Infof("restoreFromPV: no secret reference found in StorageClass parameters for VRR %s/%s: %v", vrr.Namespace, vrr.Name, err)
+			provisionerCredentials = nil
+		} else if provisionerSecretRef != nil {
+			// Found secret reference in StorageClass parameters - read the secret
+			provisionerCredentials, err = getCredentials(ctx, h.kubeClient, provisionerSecretRef)
+			if err != nil {
+				return fmt.Errorf("failed to get provisioner credentials: %w", err)
+			}
+			klog.V(5).Infof("restoreFromPV: successfully read credentials from StorageClass parameters for VRR %s/%s", vrr.Namespace, vrr.Name)
 		}
 
 		// Build CreateVolumeRequest for clone
