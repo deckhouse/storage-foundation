@@ -46,6 +46,7 @@ import (
 	snapshotlisters "github.com/kubernetes-csi/external-snapshotter/client/v8/listers/volumesnapshot/v1"
 	"github.com/kubernetes-csi/external-snapshotter/v8/pkg/snapshotter"
 	"github.com/kubernetes-csi/external-snapshotter/v8/pkg/utils"
+	"github.com/kubernetes-csi/external-snapshotter/v8/pkg/vscmode"
 )
 
 type csiSnapshotSideCarController struct {
@@ -64,6 +65,7 @@ type csiSnapshotSideCarController struct {
 	contentStore cache.Store
 
 	handler Handler
+	vscMode vscmode.VSCMode
 
 	resyncPeriod time.Duration
 
@@ -104,12 +106,14 @@ func NewCSISnapshotSideCarController(
 	var eventRecorder record.EventRecorder
 	eventRecorder = broadcaster.NewRecorder(scheme.Scheme, v1.EventSource{Component: fmt.Sprintf("csi-snapshotter %s", driverName)})
 
+	vscMode := vscmode.GetVSCMode()
 	ctrl := &csiSnapshotSideCarController{
 		clientset:     clientset,
 		client:        client,
 		driverName:    driverName,
 		eventRecorder: eventRecorder,
-		handler:       NewCSIHandler(snapshotter, groupSnapshotter, timeout, snapshotNamePrefix, snapshotNameUUIDLength, groupSnapshotNamePrefix, groupSnapshotNameUUIDLength),
+		handler:       NewCSIHandler(snapshotter, groupSnapshotter, timeout, snapshotNamePrefix, snapshotNameUUIDLength, groupSnapshotNamePrefix, groupSnapshotNameUUIDLength, vscMode),
+		vscMode:       vscMode,
 		resyncPeriod:  resyncPeriod,
 		contentStore:  cache.NewStore(cache.DeletionHandlingMetaNamespaceKeyFunc),
 		contentQueue: workqueue.NewTypedRateLimitingQueueWithConfig(
@@ -332,11 +336,20 @@ func (ctrl *csiSnapshotSideCarController) syncContentByKey(key string) (requeue 
 }
 
 // isDriverMatch verifies whether the driver specified in VolumeSnapshotContent
-// or VolumeGroupSnapshotContent matches the controller's driver name
+// or VolumeGroupSnapshotContent matches the controller's driver name.
+//
+// Upstream logic filters out contents without any source (VolumeHandle or SnapshotHandle)
+// only for legacy mode. Downstream (VSC-only) needs to see such objects in sync for
+// proper handling, even though they may be skipped later in syncContent via ShouldSkip().
+//
+// This method determines which objects should be added to the controller's work queue.
+// The actual processing logic (including skipping) is handled in syncContent.
 func (ctrl *csiSnapshotSideCarController) isDriverMatch(object interface{}) bool {
 	if content, ok := object.(*crdv1.VolumeSnapshotContent); ok {
-		if content.Spec.Source.VolumeHandle == nil && content.Spec.Source.SnapshotHandle == nil {
-			// Skip this snapshot content if it does not have a valid source
+		// Use VSCMode to determine if content should be considered for reconciliation.
+		// Upstream (legacy) filters out content without VolumeHandle/SnapshotHandle.
+		// Downstream (VSC-only) allows such content to be processed (skipping happens in syncContent).
+		if !ctrl.vscMode.IsValidContentForReconcile(content) {
 			return false
 		}
 		if content.Spec.Driver != ctrl.driverName {

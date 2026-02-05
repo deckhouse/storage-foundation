@@ -31,7 +31,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
-	v1alpha1 "fox.flant.com/deckhouse/storage/storage-foundation/api/v1alpha1"
+	v1alpha1 "github.com/deckhouse/storage-foundation/api/v1alpha1"
 )
 
 func TestController(t *testing.T) {
