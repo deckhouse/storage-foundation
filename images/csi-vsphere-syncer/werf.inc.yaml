@@ -1,0 +1,73 @@
+# Based on https://github.com/deckhouse/deckhouse/tree/main/modules/000-common/images/csi-vsphere-syncer
+{{- range $key, $value := .k8s }}
+  {{- $version := toString $key }}
+  {{- if $value.csi.vsphere }}
+    {{- $src_version := toString $value.csi.vsphere }}
+    {{- $patches := (printf "/images/%s" $.ImageName) }}
+    {{- $patch := false }}
+    {{- range $path, $_ := $.Files.Glob (printf "%s/*" $patches) }}
+      {{- if contains $src_version $path }}
+        {{- $patch = true }}
+      {{- end }}
+    {{- end }}
+---
+image: {{ $.ModuleNamePrefix }}{{ $.ImageName }}-ForK8SGE-{{ $version | replace "." "-" }}
+fromImage: base/distroless
+import:
+- image: {{ $.ModuleNamePrefix }}{{ $.ImageName }}-artifact-{{ $version | replace "." "-" }}
+  add: /vsphere-syncer
+  to: /bin/vsphere-syncer
+  before: setup
+git:
+{{- include "image mount points" $ }}
+imageSpec:
+  config:
+    entrypoint: ["/bin/vsphere-syncer"]
+---
+image: {{ $.ModuleNamePrefix }}{{ $.ImageName }}-src-artifact-{{ $version | replace "." "-" }}
+fromImage: builder/src
+final: false
+    {{- if $patch }}
+git:
+- add: {{ $patches }}/patches/{{ $src_version }}
+  to: /patches
+  stageDependencies:
+    install:
+    - '**/*'
+    {{- end }}
+secrets:
+- id: SOURCE_REPO
+  value: {{ $.SOURCE_REPO }}
+shell:
+  install:
+  - cd /src
+  - git clone --depth 1 --branch {{ $src_version }} $(cat /run/secrets/SOURCE_REPO)/kubernetes-sigs/vsphere-csi-driver.git .
+  {{- if $patch }}
+  - git apply /patches/*.patch --verbose
+  {{- end }}
+  - rm -rf vendor
+  - rm -rf .git
+---
+image: {{ $.ModuleNamePrefix }}{{ $.ImageName }}-artifact-{{ $version | replace "." "-" }}
+fromImage: {{ eq .SVACE_ENABLED "false" | ternary "builder/golang-alpine" "builder/golang-alt-svace" }}
+final: false
+mount:
+{{ include "mount points for golang builds" . }}
+import:
+- image: {{ $.ModuleNamePrefix }}{{ $.ImageName }}-src-artifact-{{ $version | replace "." "-" }}
+  add: /src
+  to: /src
+  before: install
+secrets:
+- id: GOPROXY
+  value: {{ $.GOPROXY }}
+shell:
+  install:
+    - export GO_VERSION=${GOLANG_VERSION} CGO_ENABLED=0 GOOS=linux GOARCH=amd64
+    - cd /src
+    - GOPROXY=$(cat /run/secrets/GOPROXY) go mod download
+    - go build -a -ldflags="-w -s -extldflags=static -X sigs.k8s.io/vsphere-csi-driver/v3/pkg/syncer.Version={{ $version }}" -o /vsphere-syncer ./cmd/syncer
+    - chown 64535:64535 /vsphere-syncer
+    - chmod 0755 /vsphere-syncer
+  {{- end }}
+{{- end }}

@@ -3,3 +3,47 @@
   description: The controller is required for CSI snapshotting to work and is not specific to any CSI driver.
   logo: https://avatars.githubusercontent.com/u/52698954?s=200&v=4
   license: Apache License 2.0
+  id: external-snapshotter
+  version: 8.5.0
+- name: CSI External Provisioner
+  link: https://github.com/kubernetes-csi/external-provisioner
+  description: Sidecar container that watches Kubernetes PersistentVolumeClaim objects and triggers CreateVolume/DeleteVolume against a CSI endpoint.
+  logo: https://avatars.githubusercontent.com/u/52698954?s=200&v=4
+  license: Apache License 2.0
+  id: external-provisioner
+  version: 5.3.0
+- name: CSI External Resizer
+  link: https://github.com/kubernetes-csi/external-resizer
+  description: Sidecar container that watches Kubernetes PersistentVolumeClaim objects and triggers ControllerExpandVolume against a CSI endpoint.
+  logo: https://avatars.githubusercontent.com/u/52698954?s=200&v=4
+  license: Apache License 2.0
+  id: external-resizer
+  version: 1.14.0
+- name: CSI External Attacher
+  link: https://github.com/kubernetes-csi/external-attacher
+  description: Sidecar container that watches Kubernetes VolumeAttachment objects and triggers ControllerPublish/Unpublish against a CSI endpoint.
+  logo: https://avatars.githubusercontent.com/u/52698954?s=200&v=4
+  license: Apache License 2.0
+  id: external-attacher
+  version: 4.11.0
+- name: CSI Node Driver Registrar
+  link: https://github.com/kubernetes-csi/node-driver-registrar
+  description: Sidecar container that registers a CSI driver with the kubelet using the kubelet plugin registration mechanism.
+  logo: https://avatars.githubusercontent.com/u/52698954?s=200&v=4
+  license: Apache License 2.0
+  id: node-driver-registrar
+  version: 2.16.0
+- name: CSI Livenessprobe
+  link: https://github.com/kubernetes-csi/livenessprobe
+  description: Sidecar container that monitors the health of the CSI driver and reports it to Kubernetes via the Liveness Probe mechanism.
+  logo: https://avatars.githubusercontent.com/u/52698954?s=200&v=4
+  license: Apache License 2.0
+  id: livenessprobe
+  version: 2.18.0
+- name: vSphere CSI Driver
+  link: https://github.com/kubernetes-sigs/vsphere-csi-driver
+  description: vSphere storage Container Storage Interface (CSI) plugin. The syncer component handles metadata synchronization between vSphere and Kubernetes.
+  logo: https://avatars.githubusercontent.com/u/36015203?s=200&v=4
+  license: Apache License 2.0
+  id: vsphere-csi-driver
+  version: 3.0.3
