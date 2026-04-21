@@ -1,7 +1,6 @@
 module github.com/deckhouse/storage-foundation/hooks/go
 
-go 1.24.9
-
+go 1.25.9
 require github.com/deckhouse/module-sdk v0.2.0
 
 require (
