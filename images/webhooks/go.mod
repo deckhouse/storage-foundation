@@ -1,7 +1,6 @@
 module github.com/deckhouse/storage-foundation/images/webhooks
 
-go 1.24.9
-
+go 1.25.9
 require (
 	github.com/deckhouse/sds-common-lib v0.5.0
 	github.com/sirupsen/logrus v1.9.3
