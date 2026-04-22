@@ -1,0 +1,16 @@
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: d8:use:role:user:storage-foundation
+  labels:
+    heritage: deckhouse
+    module: storage-foundation
+    rbac.deckhouse.io/kind: use
+    rbac.deckhouse.io/aggregate-to-storage-foundation-as: manager
+    rbac.deckhouse.io/aggregate-to-all-as: user
+aggregationRule:
+  clusterRoleSelectors:
+    - matchLabels:
+        rbac.deckhouse.io/kind: use
+        rbac.deckhouse.io/aggregate-to-storage-foundation-as: user
+rules: []
