@@ -4,7 +4,7 @@ metadata:
   labels:
     heritage: deckhouse
     module: storage-foundation
-    rbac.deckhouse.io/aggregate-to-storage-foundation-as: viewer
+    rbac.deckhouse.io/aggregate-to-storage-as: viewer
     rbac.deckhouse.io/kind: use
   name: d8:use:capability:storage-foundation:view_resources
 rules:
