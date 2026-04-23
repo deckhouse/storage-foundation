@@ -4,7 +4,7 @@ metadata:
   labels:
     heritage: deckhouse
     module: storage-foundation
-    rbac.deckhouse.io/aggregate-to-storage-as: manager
+    rbac.deckhouse.io/aggregate-to-kubernetes-as: manager
     rbac.deckhouse.io/kind: use
   name: d8:use:capability:storage-foundation:manage_resources
 rules:
