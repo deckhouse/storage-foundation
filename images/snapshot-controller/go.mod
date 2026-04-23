@@ -1,9 +1,7 @@
 module github.com/kubernetes-csi/external-snapshotter/v8
 
-go 1.24.0
-
-toolchain go1.24.6
-
+go 1.25.9
+toolchain go1.25.9
 require (
 	github.com/container-storage-interface/spec v1.12.0
 	github.com/evanphx/json-patch v5.9.0+incompatible
