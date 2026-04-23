@@ -6,7 +6,7 @@ metadata:
     module: storage-foundation
     rbac.deckhouse.io/aggregate-to-kubernetes-as: viewer
     rbac.deckhouse.io/kind: use
-  name: d8:use:capability:storage-foundation:view_resources
+  name: d8:use:capability:module:storage-foundation:view
 rules:
   - apiGroups:
       - storage.deckhouse.io
