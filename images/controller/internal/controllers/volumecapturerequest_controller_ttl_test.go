@@ -18,7 +18,6 @@ package controllers
 
 import (
 	"context"
-	"testing"
 	"time"
 
 	. "github.com/onsi/ginkgo/v2"
@@ -33,10 +32,9 @@ import (
 	"github.com/deckhouse/storage-foundation/images/controller/pkg/config"
 )
 
-func TestVolumeRequestTTL(t *testing.T) {
-	RegisterFailHandler(Fail)
-	RunSpecs(t, "VolumeRequest TTL Suite")
-}
+// All Describe/It blocks register globally with ginkgo and are picked up
+// by the single RunSpecs invocation in volumecapturerequest_controller_snapshot_test.go.
+// Calling RunSpecs more than once per package is unsupported by ginkgo.
 
 var _ = Describe("VolumeCaptureRequest TTL", func() {
 	var (
