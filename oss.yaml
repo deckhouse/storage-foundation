@@ -39,14 +39,14 @@
 
 - name: external-snapshotter (csi-snapshotter sidecar)
   link: https://github.com/kubernetes-csi/external-snapshotter
-  description: CSI external-snapshotter sidecar (csi-snapshotter binary). The "dev" version means the binary is built from the local /images/snapshot-controller source tree (see images/csi-external-snapshotter/werf.inc.yaml).
+  description: CSI external-snapshotter sidecar (csi-snapshotter binary). Built by cloning the upstream tag and applying CVE patches under images/csi-external-snapshotter/patches/<version>/.
   logo: https://avatars.githubusercontent.com/u/52698954?s=200&v=4
   license: Apache License 2.0
   id: csi-external-snapshotter
   versions:
     - condition:
         k8s: ["1.20"]
-      version: dev
+      version: v8.5.0
 
 - name: livenessprobe
   link: https://github.com/kubernetes-csi/livenessprobe
@@ -72,11 +72,11 @@
 
 - name: snapshot-controller
   link: https://github.com/kubernetes-csi/external-snapshotter
-  description: The controller is required for CSI snapshotting to work and is not specific to any CSI driver. Built from the local source under /images/snapshot-controller.
+  description: The controller is required for CSI snapshotting to work and is not specific to any CSI driver. Built by cloning the upstream tag and applying CVE patches under images/snapshot-controller/patches/.
   logo: https://avatars.githubusercontent.com/u/52698954?s=200&v=4
   license: Apache License 2.0
   id: snapshot-controller
-  version: v8.4.0
+  version: v8.5.0
 
 - name: vsphere-csi-driver (vsphere-syncer)
   link: https://github.com/kubernetes-sigs/vsphere-csi-driver
