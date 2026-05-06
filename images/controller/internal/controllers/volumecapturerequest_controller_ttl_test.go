@@ -18,7 +18,6 @@ package controllers
 
 import (
 	"context"
-	"testing"
 	"time"
 
 	. "github.com/onsi/ginkgo/v2"
@@ -29,14 +28,13 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
-	storagev1alpha1 "fox.flant.com/deckhouse/storage/storage-foundation/api/v1alpha1"
-	"fox.flant.com/deckhouse/storage/storage-foundation/images/controller/pkg/config"
+	storagev1alpha1 "github.com/deckhouse/storage-foundation/api/v1alpha1"
+	"github.com/deckhouse/storage-foundation/images/controller/pkg/config"
 )
 
-func TestVolumeRequestTTL(t *testing.T) {
-	RegisterFailHandler(Fail)
-	RunSpecs(t, "VolumeRequest TTL Suite")
-}
+// All Describe/It blocks register globally with ginkgo and are picked up
+// by the single RunSpecs invocation in volumecapturerequest_controller_snapshot_test.go.
+// Calling RunSpecs more than once per package is unsupported by ginkgo.
 
 var _ = Describe("VolumeCaptureRequest TTL", func() {
 	var (
@@ -223,11 +221,10 @@ var _ = Describe("VolumeCaptureRequest TTL", func() {
 			shouldDelete, requeueAfter, err := ctrl.checkAndHandleTTL(ctx, vcr)
 
 			// Function should handle invalid TTL gracefully
-			// It may return error if Get fails in retry, but should not delete object
-			if err != nil {
-				// If error occurs (e.g., Get fails in retry), that's acceptable for this test
-				// The important part is that object is not deleted
-			} else {
+			// It may return error if Get fails in retry, but should not delete object.
+			// If err != nil (e.g., Get fails in retry), that's acceptable for this test.
+			// The important part is that object is not deleted (verified below).
+			if err == nil {
 				Expect(shouldDelete).To(BeFalse())
 				Expect(requeueAfter).To(Equal(time.Duration(0)))
 			}

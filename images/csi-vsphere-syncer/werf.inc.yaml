@@ -1,8 +1,9 @@
-# Based on https://github.com/kubernetes-csi/external-snapshotter/blob/master/cmd/csi-snapshotter/Dockerfile
+# Based on https://github.com/deckhouse/deckhouse/blob/main/modules/000-common/images/csi-vsphere-syncer/werf.inc.yaml
+# Upstream: https://github.com/kubernetes-sigs/vsphere-csi-driver (./cmd/syncer)
 {{- range $key, $value := .k8s }}
   {{- $version := toString $key }}
-  {{- if $value.csi.snapshotter }}
-    {{- $src_version := toString $value.csi.snapshotter }}
+  {{- if $value.csi.vsphere }}
+    {{- $src_version := toString $value.csi.vsphere }}
     {{- $patches := (printf "/images/%s" $.ImageName) }}
     {{- $patch := false }}
     {{- range $path, $_ := $.Files.Glob (printf "%s/*" $patches) }}
@@ -15,33 +16,33 @@ image: {{ $.ModuleNamePrefix }}{{ $.ImageName }}-ForK8SGE-{{ $version | replace 
 fromImage: base/distroless
 import:
 - image: {{ $.ModuleNamePrefix }}{{ $.ImageName }}-artifact-{{ $version | replace "." "-" }}
-  add: /csi-snapshotter
-  to: /csi-snapshotter
+  add: /vsphere-syncer
+  to: /vsphere-syncer
   before: setup
 git:
 {{- include "image mount points" $ }}
 imageSpec:
   config:
-    entrypoint: ["/csi-snapshotter"]
+    entrypoint: ["/vsphere-syncer"]
 ---
 image: {{ $.ModuleNamePrefix }}{{ $.ImageName }}-src-artifact-{{ $version | replace "." "-" }}
 fromImage: builder/src
 final: false
-{{- if $patch }}
+    {{- if $patch }}
 git:
 - add: {{ $patches }}/patches/{{ $src_version }}
   to: /patches
   stageDependencies:
     install:
     - '**/*'
-{{- end }}
+    {{- end }}
 secrets:
 - id: SOURCE_REPO
   value: {{ $.SOURCE_REPO }}
 shell:
   install:
   - cd /src
-  - git clone --depth 1 --branch {{ $src_version }} $(cat /run/secrets/SOURCE_REPO)/kubernetes-csi/external-snapshotter.git .
+  - git clone --depth 1 --branch {{ $src_version }} $(cat /run/secrets/SOURCE_REPO)/kubernetes-sigs/vsphere-csi-driver.git .
   {{- if $patch }}
   - git apply /patches/*.patch --verbose
   {{- end }}
@@ -64,19 +65,18 @@ secrets:
 shell:
   beforeInstall:
     {{- if eq .SVACE_ENABLED "false" }}
-    {{- include "alpine packages proxy" . | nindent 4 }}    
-    - apk add --no-cache make bash git
+    {{- include "alpine packages proxy" . | nindent 4 }}
+    - apk add --no-cache git
     {{- else }}
-    - apt-get update 
-    - apt-get install -y make bash git
+    - apt-get update
+    - apt-get install -y git
     {{- end }}
   install:
     - export GO_VERSION=${GOLANG_VERSION} CGO_ENABLED=0 GOOS=linux GOARCH=amd64
     - cd /src
     - GOPROXY=$(cat /run/secrets/GOPROXY) go mod download
-    - make build
-    - cp bin/snapshot-controller bin/csi-snapshotter /
-    - chown 64535:64535 /snapshot-controller /csi-snapshotter
-    - chmod 0755 /snapshot-controller /csi-snapshotter
+    - go build -a -ldflags="-w -s -extldflags=static -X sigs.k8s.io/vsphere-csi-driver/v3/pkg/syncer.Version={{ $src_version }}" -o /vsphere-syncer ./cmd/syncer
+    - chown 64535:64535 /vsphere-syncer
+    - chmod 0755 /vsphere-syncer
   {{- end }}
 {{- end }}

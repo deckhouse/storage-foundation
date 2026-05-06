@@ -17,12 +17,12 @@ limitations under the License.
 package internal
 
 const (
-	CreateReconcile                      = "Create"
+	CreateReconcile                  = "Create"
 	storageFoundationSecretName      = "storage-foundation-creds"
 	storageFoundationCertsSecretName = "storage-foundation-certs"
-	DeleteReconcile                      = "Delete"
-	UpdateReconcile                      = "Update"
-	StorageManagedLabelKey               = "storage.deckhouse.io/managed-by"
+	DeleteReconcile                  = "Delete"
+	UpdateReconcile                  = "Update"
+	StorageManagedLabelKey           = "storage.deckhouse.io/managed-by"
 
 	PhaseFailed  = "Failed"
 	PhaseCreated = "Created"

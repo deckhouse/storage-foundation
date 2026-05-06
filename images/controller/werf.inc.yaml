@@ -41,11 +41,8 @@ secrets:
 
 shell:
   setup:
-    - apk update
-    - apk add --no-cache git
     - cd /src/images/{{ $.ImageName }}
-    - git clone https://github.com/deckhouse/deckhouse.git deckhouse
-    - echo "replace github.com/deckhouse/deckhouse => ./deckhouse" >> go.mod
+    - GOPROXY=$(cat /run/secrets/GOPROXY) go mod download
     - export GOOS=linux GOARCH=amd64 CGO_ENABLED=0
     - |
       {{- include "image-build.build" (set $ "BuildCommand" (printf `go build -ldflags="-s -w" -o /%s ./cmd` $.ImageName)) | nindent 6 }}

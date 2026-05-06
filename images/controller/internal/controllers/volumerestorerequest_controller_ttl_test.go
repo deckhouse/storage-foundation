@@ -28,8 +28,8 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
-	storagev1alpha1 "fox.flant.com/deckhouse/storage/storage-foundation/api/v1alpha1"
-	"fox.flant.com/deckhouse/storage/storage-foundation/images/controller/pkg/config"
+	storagev1alpha1 "github.com/deckhouse/storage-foundation/api/v1alpha1"
+	"github.com/deckhouse/storage-foundation/images/controller/pkg/config"
 )
 
 // TestVolumeRestoreRequestTTL is part of TestVolumeRequestTTL suite
@@ -206,11 +206,10 @@ var _ = Describe("VolumeRestoreRequest TTL", func() {
 			shouldDelete, requeueAfter, err := ctrl.checkAndHandleTTL(ctx, vrr)
 
 			// Function should handle invalid TTL gracefully
-			// It may return error if Get fails in retry, but should not delete object
-			if err != nil {
-				// If error occurs (e.g., Get fails in retry), that's acceptable for this test
-				// The important part is that object is not deleted
-			} else {
+			// It may return error if Get fails in retry, but should not delete object.
+			// If err != nil (e.g., Get fails in retry), that's acceptable for this test.
+			// The important part is that object is not deleted (verified below).
+			if err == nil {
 				Expect(shouldDelete).To(BeFalse())
 				Expect(requeueAfter).To(Equal(time.Duration(0)))
 			}

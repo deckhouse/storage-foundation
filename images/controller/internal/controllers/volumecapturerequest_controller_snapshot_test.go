@@ -21,6 +21,7 @@ import (
 	"testing"
 	"time"
 
+	snapshotv1 "github.com/kubernetes-csi/external-snapshotter/client/v8/apis/volumesnapshot/v1"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	corev1 "k8s.io/api/core/v1"
@@ -29,16 +30,15 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
-	"k8s.io/utils/pointer"
+	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
-	storagev1alpha1 "fox.flant.com/deckhouse/storage/storage-foundation/api/v1alpha1"
-	"fox.flant.com/deckhouse/storage/storage-foundation/images/controller/pkg/config"
-	"fox.flant.com/deckhouse/storage/storage-foundation/images/controller/pkg/snapshotmeta"
 	deckhousev1alpha1 "github.com/deckhouse/deckhouse/deckhouse-controller/pkg/apis/deckhouse.io/v1alpha1"
-	snapshotv1 "github.com/kubernetes-csi/external-snapshotter/client/v8/apis/volumesnapshot/v1"
+	storagev1alpha1 "github.com/deckhouse/storage-foundation/api/v1alpha1"
+	"github.com/deckhouse/storage-foundation/images/controller/pkg/config"
+	"github.com/deckhouse/storage-foundation/images/controller/pkg/snapshotmeta"
 )
 
 func TestVolumeCaptureRequestSnapshotMode(t *testing.T) {
@@ -159,9 +159,8 @@ var _ = Describe("VolumeCaptureRequest Snapshot Mode", func() {
 
 		It("should create VSC directly without PVC annotations", func() {
 			// Execute
-			result, err := ctrl.processSnapshotMode(ctx, vcr)
+			_, err := ctrl.processSnapshotMode(ctx, vcr)
 			Expect(err).ToNot(HaveOccurred())
-			Expect(result.Requeue).To(BeFalse())
 
 			// Verify: PVC should NOT have annotations (ADR: VCR creates VSC directly, no PVC annotations)
 			updatedPVC := &corev1.PersistentVolumeClaim{}
@@ -191,9 +190,8 @@ var _ = Describe("VolumeCaptureRequest Snapshot Mode", func() {
 
 		It("should set correct ownerRefs on VSC", func() {
 			// Execute - ObjectKeeper will be created by processSnapshotMode
-			result, err := ctrl.processSnapshotMode(ctx, vcr)
+			_, err := ctrl.processSnapshotMode(ctx, vcr)
 			Expect(err).ToNot(HaveOccurred())
-			Expect(result.Requeue).To(BeFalse())
 
 			// Verify ownerRefs
 			vscName := "snapshot-vcr-uid-123"
@@ -273,15 +271,14 @@ var _ = Describe("VolumeCaptureRequest Snapshot Mode", func() {
 
 			// Set ReadyToUse=true (simulating external-snapshotter)
 			vsc.Status = &snapshotv1.VolumeSnapshotContentStatus{
-				ReadyToUse: pointer.Bool(true),
+				ReadyToUse: ptr.To(true),
 			}
 			Expect(client.Status().Update(ctx, vsc)).To(Succeed())
 
 			// Second reconcile: should complete
 			result, err = ctrl.processSnapshotMode(ctx, vcr)
 			Expect(err).ToNot(HaveOccurred())
-			Expect(result.Requeue).To(BeFalse())
-			Expect(result.RequeueAfter).To(Equal(time.Duration(0)))
+			Expect(result.RequeueAfter).To(BeZero())
 
 			// Verify VCR status
 			updatedVCR := &storagev1alpha1.VolumeCaptureRequest{}
@@ -293,7 +290,7 @@ var _ = Describe("VolumeCaptureRequest Snapshot Mode", func() {
 			Expect(updatedVCR.Status.DataRef.Kind).To(Equal("VolumeSnapshotContent"))
 
 			// Should have Ready condition
-			readyCondition := getCondition(updatedVCR.Status.Conditions, ConditionTypeReady)
+			readyCondition := getReadyCondition(updatedVCR.Status.Conditions)
 			Expect(readyCondition).ToNot(BeNil())
 			Expect(readyCondition.Status).To(Equal(metav1.ConditionTrue))
 			Expect(readyCondition.Reason).To(Equal(ConditionReasonCompleted))
@@ -355,23 +352,23 @@ var _ = Describe("VolumeCaptureRequest Snapshot Mode", func() {
 							Kind:       KindVolumeCaptureRequest,
 							Name:       "test-vcr",
 							UID:        "vcr-uid-123",
-							Controller: pointer.Bool(false),
+							Controller: ptr.To(false),
 						},
 						{
 							APIVersion: APIGroupDeckhouse,
 							Kind:       KindObjectKeeper,
 							Name:       retainerName,
 							UID:        "retainer-uid-123",
-							Controller: pointer.Bool(true),
+							Controller: ptr.To(true),
 						},
 					},
 				},
 				Spec: snapshotv1.VolumeSnapshotContentSpec{
 					Driver:                  "test-driver",
-					VolumeSnapshotClassName: pointer.String("test-vsc-class"),
+					VolumeSnapshotClassName: ptr.To("test-vsc-class"),
 					DeletionPolicy:          snapshotv1.VolumeSnapshotContentDelete,
 					Source: snapshotv1.VolumeSnapshotContentSource{
-						VolumeHandle: pointer.String("test-volume-handle-123"),
+						VolumeHandle: ptr.To("test-volume-handle-123"),
 					},
 				},
 			}
@@ -402,14 +399,14 @@ var _ = Describe("VolumeCaptureRequest Snapshot Mode", func() {
 			updatedVCR := &storagev1alpha1.VolumeCaptureRequest{}
 			Expect(client.Get(ctx, types.NamespacedName{Name: "test-vcr", Namespace: "default"}, updatedVCR)).To(Succeed())
 
-			readyCondition := getCondition(updatedVCR.Status.Conditions, ConditionTypeReady)
+			readyCondition := getReadyCondition(updatedVCR.Status.Conditions)
 			Expect(readyCondition).ToNot(BeNil())
 			Expect(readyCondition.Status).To(Equal(metav1.ConditionFalse))
 		})
 
 		It("should fail if PV does not have CSI volumeHandle", func() {
 			// Update PV to remove CSI
-			pv.Spec.PersistentVolumeSource.CSI = nil
+			pv.Spec.CSI = nil
 			Expect(client.Update(ctx, pv)).To(Succeed())
 
 			// Execute
@@ -420,7 +417,7 @@ var _ = Describe("VolumeCaptureRequest Snapshot Mode", func() {
 			updatedVCR := &storagev1alpha1.VolumeCaptureRequest{}
 			Expect(client.Get(ctx, types.NamespacedName{Name: "test-vcr", Namespace: "default"}, updatedVCR)).To(Succeed())
 
-			readyCondition := getCondition(updatedVCR.Status.Conditions, ConditionTypeReady)
+			readyCondition := getReadyCondition(updatedVCR.Status.Conditions)
 			Expect(readyCondition).ToNot(BeNil())
 			Expect(readyCondition.Status).To(Equal(metav1.ConditionFalse))
 		})
@@ -453,7 +450,7 @@ var _ = Describe("VolumeCaptureRequest Snapshot Mode", func() {
 				updatedVCR := &storagev1alpha1.VolumeCaptureRequest{}
 				Expect(client.Get(ctx, types.NamespacedName{Name: "test-vcr-not-found", Namespace: "default"}, updatedVCR)).To(Succeed())
 
-				readyCondition := getCondition(updatedVCR.Status.Conditions, ConditionTypeReady)
+				readyCondition := getReadyCondition(updatedVCR.Status.Conditions)
 				Expect(readyCondition).ToNot(BeNil())
 				Expect(readyCondition.Status).To(Equal(metav1.ConditionFalse))
 				Expect(readyCondition.Reason).To(Equal(ErrorReasonNotFound))
@@ -490,7 +487,7 @@ var _ = Describe("VolumeCaptureRequest Snapshot Mode", func() {
 				updatedVCR := &storagev1alpha1.VolumeCaptureRequest{}
 				Expect(client.Get(ctx, types.NamespacedName{Name: "test-vcr-no-class", Namespace: "default"}, updatedVCR)).To(Succeed())
 
-				readyCondition := getCondition(updatedVCR.Status.Conditions, ConditionTypeReady)
+				readyCondition := getReadyCondition(updatedVCR.Status.Conditions)
 				Expect(readyCondition).ToNot(BeNil())
 				Expect(readyCondition.Status).To(Equal(metav1.ConditionFalse))
 				Expect(readyCondition.Reason).To(Equal(ErrorReasonNotFound))
@@ -533,7 +530,7 @@ var _ = Describe("VolumeCaptureRequest Snapshot Mode", func() {
 				updatedVCR := &storagev1alpha1.VolumeCaptureRequest{}
 				Expect(client.Get(ctx, types.NamespacedName{Name: "test-vcr-mismatch", Namespace: "default"}, updatedVCR)).To(Succeed())
 
-				readyCondition := getCondition(updatedVCR.Status.Conditions, ConditionTypeReady)
+				readyCondition := getReadyCondition(updatedVCR.Status.Conditions)
 				Expect(readyCondition).ToNot(BeNil())
 				Expect(readyCondition.Status).To(Equal(metav1.ConditionFalse))
 				Expect(readyCondition.Reason).To(Equal(ErrorReasonInternalError))
@@ -634,7 +631,7 @@ var _ = Describe("VolumeCaptureRequest Snapshot Mode", func() {
 				vsc := &snapshotv1.VolumeSnapshotContent{}
 				Expect(client.Get(ctx, types.NamespacedName{Name: vscName}, vsc)).To(Succeed())
 				vsc.Status = &snapshotv1.VolumeSnapshotContentStatus{
-					ReadyToUse: pointer.Bool(true),
+					ReadyToUse: ptr.To(true),
 				}
 				Expect(client.Status().Update(ctx, vsc)).To(Succeed())
 
@@ -754,7 +751,7 @@ var _ = Describe("VolumeCaptureRequest Snapshot Mode", func() {
 				Expect(updatedVCR.Status.DataRef.Name).To(Equal("test-pv-detach"))
 				Expect(updatedVCR.Status.DataRef.Kind).To(Equal("PersistentVolume"))
 
-				readyCondition := getCondition(updatedVCR.Status.Conditions, ConditionTypeReady)
+				readyCondition := getReadyCondition(updatedVCR.Status.Conditions)
 				Expect(readyCondition).ToNot(BeNil())
 				Expect(readyCondition.Status).To(Equal(metav1.ConditionTrue))
 				Expect(updatedVCR.Annotations).To(HaveKey(AnnotationKeyTTL))
@@ -895,10 +892,10 @@ var _ = Describe("VolumeCaptureRequest Snapshot Mode", func() {
 	})
 })
 
-// Helper function to get condition by type
-func getCondition(conditions []metav1.Condition, conditionType string) *metav1.Condition {
+// getReadyCondition returns the Ready condition from a slice of conditions, or nil if absent.
+func getReadyCondition(conditions []metav1.Condition) *metav1.Condition {
 	for i := range conditions {
-		if conditions[i].Type == conditionType {
+		if conditions[i].Type == ConditionTypeReady {
 			return &conditions[i]
 		}
 	}

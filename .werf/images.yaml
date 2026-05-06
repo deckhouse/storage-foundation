@@ -1,3 +1,50 @@
+{{- /*
+  Build the per-k8s-version map of CSI sidecar versions from oss.yaml.
+
+  Resulting structure (matches the previous shape produced by .werf/consts.yaml,
+  so per-image werf.inc.yaml templates can keep iterating `.k8s`):
+
+    .k8s:
+      "1.20":
+        csi:
+          attacher:      "v4.10.0"
+          provisioner:   "v5.3.0"
+          resizer:       "v1.14.0"
+          snapshotter:   "dev"
+          livenessprobe: "v2.17.0"
+          registrar:     "v2.15.0"
+      "1.34":
+        csi:
+          provisioner: "v6.1.0"
+          resizer:     "v2.0.0"
+*/ -}}
+{{- $ossCtx := dict "Files" $.Files "OssYamlPath" $.OssYamlPath }}
+{{- $components := list
+  (list "csi-external-attacher"        "attacher")
+  (list "csi-external-provisioner"     "provisioner")
+  (list "csi-external-resizer"         "resizer")
+  (list "csi-external-snapshotter"     "snapshotter")
+  (list "csi-livenessprobe"            "livenessprobe")
+  (list "csi-node-driver-registrar"    "registrar")
+  (list "csi-vsphere-syncer"           "vsphere")
+}}
+{{- $k8s := dict }}
+{{- range $components }}
+  {{- $id := index . 0 }}
+  {{- $field := index . 1 }}
+  {{- $m := include "get_oss_version_map_by_id_and_condition_key" (list $id "k8s" $ossCtx) | fromYaml }}
+  {{- range $k8sVer, $compVer := $m }}
+    {{- $entry := index $k8s $k8sVer }}
+    {{- if not $entry }}
+      {{- $entry = dict "csi" (dict) }}
+      {{- $_ := set $k8s $k8sVer $entry }}
+    {{- end }}
+    {{- $_ := set $entry.csi $field $compVer }}
+  {{- end }}
+{{- end }}
+{{- $_ := set $ "k8s" $k8s }}
+{{- $_ := set $ "VERSIONS" (dict) }}
+
 {{- $ImagesBuildFiles := .Files.Glob "images/*/{Dockerfile,werf.inc.yaml}" }}
 # Context inside folder images
 {{- $Root := . }}
@@ -21,6 +68,7 @@
   {{- $_ := set $ctx "Commit" $Root.Commit }}
   {{- $_ := set $ctx "ProjectName" (printf "%s/%s" $ctx.SVACE_PROJECT_PREFIX $ctx.ImageName ) }}
   {{- $_ := set $ctx "Files" $.Files }}
+  {{- $_ := set $ctx "OssYamlPath" $.OssYamlPath }}
 
 ---
   {{- /* For Dockerfile just render it from the folder. */ -}}

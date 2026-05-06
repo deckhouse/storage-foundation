@@ -24,6 +24,7 @@ import (
 	"math/rand"
 	"time"
 
+	snapshotv1 "github.com/kubernetes-csi/external-snapshotter/client/v8/apis/volumesnapshot/v1"
 	corev1 "k8s.io/api/core/v1"
 	storagev1 "k8s.io/api/storage/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -35,11 +36,9 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
-	storagev1alpha1 "fox.flant.com/deckhouse/storage/storage-foundation/api/v1alpha1"
-	snapshotv1 "github.com/kubernetes-csi/external-snapshotter/client/v8/apis/volumesnapshot/v1"
-
-	"fox.flant.com/deckhouse/storage/storage-foundation/images/controller/pkg/config"
-	"fox.flant.com/deckhouse/storage/storage-foundation/images/controller/pkg/snapshotmeta"
+	storagev1alpha1 "github.com/deckhouse/storage-foundation/api/v1alpha1"
+	"github.com/deckhouse/storage-foundation/images/controller/pkg/config"
+	"github.com/deckhouse/storage-foundation/images/controller/pkg/snapshotmeta"
 )
 
 const (
@@ -233,7 +232,7 @@ func (r *VolumeRestoreRequestController) processVolumeSnapshotContentRestore(
 
 	// 5. Create or get temporary CSI VolumeSnapshot in service namespace
 	// Note: According to ADR, VolumeSnapshot is only a temporary compatibility object
-	csiVSName, err4 := r.ensureTemporaryVolumeSnapshot(ctx, serviceNS, csiVSC, vrr)
+	csiVSName, err4 := r.ensureTemporaryVolumeSnapshot(ctx, serviceNS, csiVSC)
 	if err4 != nil {
 		return ctrl.Result{}, fmt.Errorf("failed to ensure temporary VolumeSnapshot: %w", err4)
 	}
@@ -688,7 +687,6 @@ func (r *VolumeRestoreRequestController) ensureTemporaryVolumeSnapshot(
 	ctx context.Context,
 	serviceNS string,
 	csiVSC *snapshotv1.VolumeSnapshotContent,
-	vrr *storagev1alpha1.VolumeRestoreRequest,
 ) (string, error) {
 	l := log.FromContext(ctx).WithValues("serviceNS", serviceNS, "csiVSC", csiVSC.Name)
 	// Generate deterministic name
@@ -919,7 +917,7 @@ func (r *VolumeRestoreRequestController) checkAndHandleTTL(ctx context.Context, 
 	// This follows the pattern used by JobController, DeploymentController, etc.
 	jitterRange := requeueAfter / 10 // 10% jitter
 	jitter := time.Duration(rand.Int63n(int64(2*jitterRange))) - jitterRange
-	requeueAfter = requeueAfter + jitter
+	requeueAfter += jitter
 	if requeueAfter < 30*time.Second {
 		requeueAfter = 30 * time.Second // Ensure minimum after jitter
 	}
