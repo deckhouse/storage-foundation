@@ -22,7 +22,7 @@ import (
 	"os"
 	"time"
 
-	"fox.flant.com/deckhouse/storage/storage-foundation/images/controller/pkg/logger"
+	"github.com/deckhouse/storage-foundation/images/controller/pkg/logger"
 )
 
 const (

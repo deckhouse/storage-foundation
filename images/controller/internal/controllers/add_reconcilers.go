@@ -19,7 +19,7 @@ package controllers
 import (
 	ctrl "sigs.k8s.io/controller-runtime"
 
-	"fox.flant.com/deckhouse/storage/storage-foundation/images/controller/pkg/config"
+	"github.com/deckhouse/storage-foundation/images/controller/pkg/config"
 )
 
 // AddVolumeCaptureRequestControllerToManager adds VolumeCaptureRequestController to the manager
