@@ -1,6 +1,5 @@
 name: storage-foundation
 stage: "General Availability"
-weight: 920
 subsystems:
   - storage
   - infrastructure
@@ -8,7 +7,6 @@ namespace: d8-storage-foundation
 descriptions:
   en: "Storage foundation module"
 requirements:
-  bootstrapped: true
   deckhouse: ">= 1.74"
   modules:
     state-snapshotter: ">= 0.0.0"
