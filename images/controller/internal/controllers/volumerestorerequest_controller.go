@@ -232,7 +232,7 @@ func (r *VolumeRestoreRequestController) processVolumeSnapshotContentRestore(
 
 	// 5. Create or get temporary CSI VolumeSnapshot in service namespace
 	// Note: According to ADR, VolumeSnapshot is only a temporary compatibility object
-	csiVSName, err4 := r.ensureTemporaryVolumeSnapshot(ctx, serviceNS, csiVSC, vrr)
+	csiVSName, err4 := r.ensureTemporaryVolumeSnapshot(ctx, serviceNS, csiVSC)
 	if err4 != nil {
 		return ctrl.Result{}, fmt.Errorf("failed to ensure temporary VolumeSnapshot: %w", err4)
 	}
@@ -687,7 +687,6 @@ func (r *VolumeRestoreRequestController) ensureTemporaryVolumeSnapshot(
 	ctx context.Context,
 	serviceNS string,
 	csiVSC *snapshotv1.VolumeSnapshotContent,
-	vrr *storagev1alpha1.VolumeRestoreRequest,
 ) (string, error) {
 	l := log.FromContext(ctx).WithValues("serviceNS", serviceNS, "csiVSC", csiVSC.Name)
 	// Generate deterministic name
@@ -918,7 +917,7 @@ func (r *VolumeRestoreRequestController) checkAndHandleTTL(ctx context.Context, 
 	// This follows the pattern used by JobController, DeploymentController, etc.
 	jitterRange := requeueAfter / 10 // 10% jitter
 	jitter := time.Duration(rand.Int63n(int64(2*jitterRange))) - jitterRange
-	requeueAfter = requeueAfter + jitter
+	requeueAfter += jitter
 	if requeueAfter < 30*time.Second {
 		requeueAfter = 30 * time.Second // Ensure minimum after jitter
 	}

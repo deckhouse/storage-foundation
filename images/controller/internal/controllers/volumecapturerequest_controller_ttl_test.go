@@ -223,11 +223,10 @@ var _ = Describe("VolumeCaptureRequest TTL", func() {
 			shouldDelete, requeueAfter, err := ctrl.checkAndHandleTTL(ctx, vcr)
 
 			// Function should handle invalid TTL gracefully
-			// It may return error if Get fails in retry, but should not delete object
-			if err != nil {
-				// If error occurs (e.g., Get fails in retry), that's acceptable for this test
-				// The important part is that object is not deleted
-			} else {
+			// It may return error if Get fails in retry, but should not delete object.
+			// If err != nil (e.g., Get fails in retry), that's acceptable for this test.
+			// The important part is that object is not deleted (verified below).
+			if err == nil {
 				Expect(shouldDelete).To(BeFalse())
 				Expect(requeueAfter).To(Equal(time.Duration(0)))
 			}

@@ -256,7 +256,8 @@ func (r *VolumeCaptureRequestController) processSnapshotMode(ctx context.Context
 	retainerName := NamePrefixRetainer + csiVSCName
 	objectKeeper := &deckhousev1alpha1.ObjectKeeper{}
 	err := r.Get(ctx, client.ObjectKey{Name: retainerName}, objectKeeper)
-	if apierrors.IsNotFound(err) {
+	switch {
+	case apierrors.IsNotFound(err):
 		objectKeeper = &deckhousev1alpha1.ObjectKeeper{
 			TypeMeta: metav1.TypeMeta{
 				APIVersion: APIGroupDeckhouse,
@@ -284,9 +285,9 @@ func (r *VolumeCaptureRequestController) processSnapshotMode(ctx context.Context
 		if err := r.Get(ctx, client.ObjectKey{Name: retainerName}, objectKeeper); err != nil {
 			return ctrl.Result{}, fmt.Errorf("failed to get created ObjectKeeper: %w", err)
 		}
-	} else if err != nil {
+	case err != nil:
 		return ctrl.Result{}, fmt.Errorf("failed to get ObjectKeeper: %w", err)
-	} else {
+	default:
 		// ObjectKeeper exists - validate it belongs to this VCR
 		// This protects against race conditions where VCR was deleted and recreated with same name
 		if objectKeeper.Spec.FollowObjectRef == nil {
@@ -428,27 +429,28 @@ func (r *VolumeCaptureRequestController) processDetachMode(ctx context.Context, 
 		Namespace: vcr.Spec.PersistentVolumeClaimRef.Namespace,
 		Name:      vcr.Spec.PersistentVolumeClaimRef.Name,
 	}, pvc); err != nil {
-		if apierrors.IsNotFound(err) {
+		switch {
+		case apierrors.IsNotFound(err):
 			// PVC already deleted - this is expected after first reconcile
 			pvcNotFound = true
 			l.Info("PVC already deleted, proceeding to detach PV", "pvc", fmt.Sprintf("%s/%s", vcr.Spec.PersistentVolumeClaimRef.Namespace, vcr.Spec.PersistentVolumeClaimRef.Name))
 			// Try to get PV from annotation or VCR status
 			var pvName string
-			if pvNameFromAnnotation != "" {
+			switch {
+			case pvNameFromAnnotation != "":
 				pvName = pvNameFromAnnotation
-			} else if vcr.Status.DataRef != nil && vcr.Status.DataRef.Kind == "PersistentVolume" {
+			case vcr.Status.DataRef != nil && vcr.Status.DataRef.Kind == "PersistentVolume":
 				pvName = vcr.Status.DataRef.Name
-			} else {
-				// Cannot proceed without PV name
+			default:
 				return ctrl.Result{}, fmt.Errorf("PVC deleted but cannot determine PV name (no annotation or status)")
 			}
 			pv = &corev1.PersistentVolume{}
 			if err := r.Get(ctx, client.ObjectKey{Name: pvName}, pv); err != nil {
 				return ctrl.Result{}, fmt.Errorf("failed to get PV %s: %w", pvName, err)
 			}
-		} else if apierrors.IsForbidden(err) {
+		case apierrors.IsForbidden(err):
 			return r.markFailed(ctx, vcr, ErrorReasonRBACDenied, fmt.Sprintf("Access denied to PVC %s/%s", vcr.Spec.PersistentVolumeClaimRef.Namespace, vcr.Spec.PersistentVolumeClaimRef.Name))
-		} else {
+		default:
 			return ctrl.Result{}, fmt.Errorf("failed to get PVC: %w", err)
 		}
 	}
@@ -591,7 +593,8 @@ func (r *VolumeCaptureRequestController) processDetachMode(ctx context.Context, 
 	retainerName := NamePrefixRetainerPV + string(vcr.UID)
 	objectKeeper := &deckhousev1alpha1.ObjectKeeper{}
 	err := r.Get(ctx, client.ObjectKey{Name: retainerName}, objectKeeper)
-	if apierrors.IsNotFound(err) {
+	switch {
+	case apierrors.IsNotFound(err):
 		objectKeeper = &deckhousev1alpha1.ObjectKeeper{
 			TypeMeta: metav1.TypeMeta{
 				APIVersion: APIGroupDeckhouse,
@@ -615,9 +618,9 @@ func (r *VolumeCaptureRequestController) processDetachMode(ctx context.Context, 
 			return ctrl.Result{}, fmt.Errorf("failed to create ObjectKeeper: %w", err)
 		}
 		l.Info("Created ObjectKeeper", "name", retainerName)
-	} else if err != nil {
+	case err != nil:
 		return ctrl.Result{}, fmt.Errorf("failed to get ObjectKeeper: %w", err)
-	} else {
+	default:
 		// ObjectKeeper exists - validate it belongs to this VCR
 		// This protects against race conditions where VCR was deleted and recreated with same name
 		if objectKeeper.Spec.FollowObjectRef == nil {
@@ -808,7 +811,7 @@ func (r *VolumeCaptureRequestController) checkAndHandleTTL(ctx context.Context, 
 	// This follows the pattern used by JobController, DeploymentController, etc.
 	jitterRange := requeueAfter / 10 // 10% jitter
 	jitter := time.Duration(rand.Int63n(int64(2*jitterRange))) - jitterRange
-	requeueAfter = requeueAfter + jitter
+	requeueAfter += jitter
 	if requeueAfter < 30*time.Second {
 		requeueAfter = 30 * time.Second // Ensure minimum after jitter
 	}
