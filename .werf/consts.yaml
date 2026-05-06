@@ -1,6 +1,12 @@
 # Edition module settings, default ce
 {{- $_ := set . "MODULE_EDITION" (env "MODULE_EDITION" "ce") }}
 
-# Component versions are in oss.yaml; images use helpers from .werf/defines/oss-yaml.tmpl
-# (e.g. get_oss_version_map_by_id_and_condition_key). The .k8s map is built from oss.yaml in .werf/images.yaml.
-{{- $_ := set . "OssYamlPath" "/oss.yaml" }}
+# Component versions are in .werf/csi-versions.yaml; images use helpers from
+# .werf/defines/oss-yaml.tmpl (e.g. get_oss_version_map_by_id_and_condition_key).
+# The .k8s map is built from this file in .werf/images.yaml.
+#
+# We deliberately do NOT use the top-level oss.yaml here: dmt lint enforces
+# a strict schema on oss.yaml (no `versions` / `condition` keys). The
+# documentation oss.yaml mirrors this file but with a single canonical
+# `version` per component.
+{{- $_ := set . "OssYamlPath" "/.werf/csi-versions.yaml" }}
