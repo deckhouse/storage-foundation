@@ -76,14 +76,26 @@ rules:
 - apiGroups: [""]
   resources: ["configmaps"]
   verbs: ["get", "list", "watch"]
-# Core Kubernetes resources (temporary wide permissions)
-- apiGroups: ["*"]
-  resources: ["*"]
-  verbs: ["get", "list"]
-# Core Kubernetes resources (temporary wide permissions)
-- apiGroups: ["*"]
-  resources: ["*"]
-  verbs: ["get", "list"]
+
+# StorageClass (cluster-scoped, read-only) - resolved during VolumeRestoreRequest processing
+- apiGroups: ["storage.k8s.io"]
+  resources: ["storageclasses"]
+  verbs: ["get", "list", "watch"]
+
+# VolumeSnapshot (namespaced) - temporary objects created during VolumeRestoreRequest flow
+- apiGroups: ["snapshot.storage.k8s.io"]
+  resources: ["volumesnapshots"]
+  verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+
+# VolumeSnapshot status
+- apiGroups: ["snapshot.storage.k8s.io"]
+  resources: ["volumesnapshots/status"]
+  verbs: ["get", "update", "patch"]
+
+# Events - emitted by controller-runtime EventRecorder
+- apiGroups: [""]
+  resources: ["events"]
+  verbs: ["create", "patch"]
 
 ---
 apiVersion: rbac.authorization.k8s.io/v1
