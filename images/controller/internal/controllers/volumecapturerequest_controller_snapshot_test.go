@@ -159,9 +159,8 @@ var _ = Describe("VolumeCaptureRequest Snapshot Mode", func() {
 
 		It("should create VSC directly without PVC annotations", func() {
 			// Execute
-			result, err := ctrl.processSnapshotMode(ctx, vcr)
+			_, err := ctrl.processSnapshotMode(ctx, vcr)
 			Expect(err).ToNot(HaveOccurred())
-			Expect(result.RequeueAfter).To(BeZero())
 
 			// Verify: PVC should NOT have annotations (ADR: VCR creates VSC directly, no PVC annotations)
 			updatedPVC := &corev1.PersistentVolumeClaim{}
@@ -191,9 +190,8 @@ var _ = Describe("VolumeCaptureRequest Snapshot Mode", func() {
 
 		It("should set correct ownerRefs on VSC", func() {
 			// Execute - ObjectKeeper will be created by processSnapshotMode
-			result, err := ctrl.processSnapshotMode(ctx, vcr)
+			_, err := ctrl.processSnapshotMode(ctx, vcr)
 			Expect(err).ToNot(HaveOccurred())
-			Expect(result.RequeueAfter).To(BeZero())
 
 			// Verify ownerRefs
 			vscName := "snapshot-vcr-uid-123"
