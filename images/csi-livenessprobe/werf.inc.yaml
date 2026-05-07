@@ -73,6 +73,7 @@ shell:
     - export GO_VERSION=${GOLANG_VERSION} CGO_ENABLED=0 GOOS=linux GOARCH=amd64
     - cd /src
     - GOPROXY=$(cat /run/secrets/GOPROXY) go mod download
+    - go mod vendor
     - make build
     - cp bin/livenessprobe /livenessprobe
     - chown 64535:64535 /livenessprobe
