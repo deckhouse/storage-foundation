@@ -1,51 +1,37 @@
 {{- /*
-  Build the per-k8s-version map of CSI sidecar versions from oss.yaml.
+  Per-image build descriptors.
 
-  Resulting structure (matches the previous shape produced by .werf/consts.yaml,
-  so per-image werf.inc.yaml templates can keep iterating `.k8s`):
+  Components are discovered from oss.yaml dynamically: for every entry that
+  declares versions[].condition.k8s we resolve a {<k8s> -> <component_version>}
+  map and expose all of them as $.k8sVersions["<id>"]. Per-image werf.inc.yaml
+  templates then iterate (index $.k8sVersions $.ImageName) without any need
+  for a registry of components in this file.
 
-    .k8s:
-      "1.20":
-        csi:
-          attacher:      "v4.11.0"
-          provisioner:   "v5.3.0"
-          resizer:       "v1.14.0"
-          snapshotter:   "v8.5.0"
-          livenessprobe: "v2.18.0"
-          registrar:     "v2.16.0"
-      "1.34":
-        csi:
-          provisioner: "v6.2.0"
-          resizer:     "v2.1.0"
+  Adding a new sidecar requires only:
+    - a new images/<id>/ folder with werf.inc.yaml,
+    - a matching entry in oss.yaml (with versions[].condition.k8s).
+  No changes here are needed.
 */ -}}
 {{- $ossCtx := dict "Files" $.Files "OssYamlPath" $.OssYamlPath }}
-{{- $components := list
-  (list "csi-external-attacher"        "attacher")
-  (list "csi-external-provisioner"     "provisioner")
-  (list "csi-external-resizer"         "resizer")
-  (list "csi-external-snapshotter"     "snapshotter")
-  (list "csi-livenessprobe"            "livenessprobe")
-  (list "csi-node-driver-registrar"    "registrar")
-}}
-{{- $k8s := dict }}
-{{- range $components }}
-  {{- $id := index . 0 }}
-  {{- $field := index . 1 }}
-  {{- $m := include "get_oss_version_map_by_id_and_condition_key" (list $id "k8s" $ossCtx) | fromYaml }}
-  {{- range $k8sVer, $compVer := $m }}
-    {{- $entry := index $k8s $k8sVer }}
-    {{- if not $entry }}
-      {{- $entry = dict "csi" (dict) }}
-      {{- $_ := set $k8s $k8sVer $entry }}
+{{- $raw := printf "data:\n%s" ($.Files.Get $.OssYamlPath) | fromYaml }}
+{{- $k8sVersions := dict }}
+{{- range $raw.data }}
+  {{- $hasK8s := false }}
+  {{- if .versions }}
+    {{- range .versions }}
+      {{- if and .condition (index .condition "k8s") }}
+        {{- $hasK8s = true }}
+      {{- end }}
     {{- end }}
-    {{- $_ := set $entry.csi $field $compVer }}
+  {{- end }}
+  {{- if $hasK8s }}
+    {{- $m := include "get_oss_version_map_by_id_and_condition_key" (list .id "k8s" $ossCtx) | fromYaml }}
+    {{- $_ := set $k8sVersions .id $m }}
   {{- end }}
 {{- end }}
-{{- $_ := set $ "k8s" $k8s }}
-{{- $_ := set $ "VERSIONS" (dict) }}
+{{- $_ := set $ "k8sVersions" $k8sVersions }}
 
 {{- $ImagesBuildFiles := .Files.Glob "images/*/{Dockerfile,werf.inc.yaml}" }}
-# Context inside folder images
 {{- $Root := . }}
 
 {{- range $path, $content := $ImagesBuildFiles  }}
@@ -58,8 +44,7 @@
   {{- if ne $ctx.SVACE_ENABLED "false" }}{{ $_ := set $ctx "SVACE_IMAGE_SUFFIX" "/svace" }}{{ end }}
   {{- $_ := set $ctx "SVACE_ANALYZE_HOST" (env "SVACE_ANALYZE_HOST" "example.host") }}
   {{- $_ := set $ctx "SVACE_ANALYZE_SSH_USER" (env "SVACE_ANALYZE_SSH_USER" "user") }}
-  {{- $_ := set $ctx "Versions" $.VERSIONS }}
-  {{- $_ := set $ctx "k8s" $.k8s }}
+  {{- $_ := set $ctx "k8sVersions" $.k8sVersions }}
   {{- $_ := set $ctx "ImagePath" (printf "/images/%s" $ctx.ImageName) }}
   {{- $_ := set $ctx "ModuleNamePrefix" "" }}
   {{- $_ := set $ctx "ModuleDir" "/" }}
