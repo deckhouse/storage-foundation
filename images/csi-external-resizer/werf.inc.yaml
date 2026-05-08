@@ -1,15 +1,14 @@
 # Based on https://github.com/kubernetes-csi/external-resizer/blob/master/Dockerfile
-{{- range $key, $value := .k8s }}
+{{- range $key, $rawVer := index $.k8sVersions $.ImageName }}
   {{- $version := toString $key }}
-  {{- if $value.csi.resizer }}
-    {{- $src_version := toString $value.csi.resizer }}
-    {{- $patches := (printf "/images/%s" $.ImageName) }}
-    {{- $patch := false }}
-    {{- range $path, $_ := $.Files.Glob (printf "%s/*" $patches) }}
-      {{- if contains $src_version $path }}
-        {{- $patch = true }}
-      {{- end }}
+  {{- $src_version := toString $rawVer }}
+  {{- $patches := (printf "/images/%s" $.ImageName) }}
+  {{- $patch := false }}
+  {{- range $path, $_ := $.Files.Glob (printf "%s/*" $patches) }}
+    {{- if contains $src_version $path }}
+      {{- $patch = true }}
     {{- end }}
+  {{- end }}
 ---
 image: {{ $.ModuleNamePrefix }}{{ $.ImageName }}-ForK8SGE-{{ $version | replace "." "-" }}
 fromImage: base/distroless
@@ -49,9 +48,9 @@ shell:
   - rm -rf .git
 ---
 image: {{ $.ModuleNamePrefix }}{{ $.ImageName }}-artifact-{{ $version | replace "." "-" }}
-fromImage: {{ eq .SVACE_ENABLED "false" | ternary "builder/golang-alpine" "builder/golang-alt-svace" }}
+fromImage: {{ eq $.SVACE_ENABLED "false" | ternary "builder/golang-alpine" "builder/golang-alt-svace" }}
 mount:
-{{ include "mount points for golang builds" . }}
+{{ include "mount points for golang builds" $ }}
 final: false
 import:
 - image: {{ $.ModuleNamePrefix }}{{ $.ImageName }}-src-artifact-{{ $version | replace "." "-" }}
@@ -63,8 +62,8 @@ secrets:
   value: {{ $.GOPROXY }}
 shell:
   beforeInstall:
-    {{- if eq .SVACE_ENABLED "false" }}
-    {{- include "alpine packages proxy" . | nindent 4 }}    
+    {{- if eq $.SVACE_ENABLED "false" }}
+    {{- include "alpine packages proxy" $ | nindent 4 }}    
     - apk add --no-cache make bash
     {{- else }}
     - apt-get update 
@@ -79,5 +78,4 @@ shell:
     - cp bin/csi-resizer /csi-resizer
     - chown 64535:64535 /csi-resizer
     - chmod 0755 /csi-resizer
-  {{- end }}
 {{- end }}
