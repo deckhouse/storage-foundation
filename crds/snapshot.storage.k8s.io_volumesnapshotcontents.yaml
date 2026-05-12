@@ -158,7 +158,8 @@ spec:
                   this VolumeSnapshotContent name for the bidirectional binding to be valid.
                   For a pre-existing VolumeSnapshotContent object, name and namespace of the
                   VolumeSnapshot object **must be provided** for binding.
-                  Immutable after creation.                  
+                  Immutable after creation.
+                  Optional - can be empty for VSC-only model (VSC created without VolumeSnapshot, e.g., by VCR controller).
                 properties:
                   apiVersion:
                     description: |-
@@ -202,14 +203,15 @@ spec:
                 type: object
                 x-kubernetes-map-type: atomic
                 x-kubernetes-validations:
-                - message: both spec.volumeSnapshotRef.name and spec.volumeSnapshotRef.namespace
-                    must be set
-                  rule: has(self.name) && has(self.__namespace__)
+                - message: if spec.volumeSnapshotRef is set, both name and namespace
+                    must be specified together, or volumeSnapshotRef must be completely
+                    empty (VSC-only model)
+                  rule: '(has(self.name) && has(self.__namespace__) && self.name != "" && self.__namespace__ != "") || (!has(self.name) && !has(self.__namespace__) && (!has(self.uid) || self.uid == ""))'
             required:
             - deletionPolicy
             - driver
             - source
-            - volumeSnapshotRef
+            # volumeSnapshotRef is optional to support VSC-only model (VSC without VolumeSnapshot)
             type: object
             x-kubernetes-validations:
             - message: sourceVolumeMode is required once set
@@ -404,7 +406,8 @@ spec:
                   this VolumeSnapshotContent name for the bidirectional binding to be valid.
                   For a pre-existing VolumeSnapshotContent object, name and namespace of the
                   VolumeSnapshot object **must be provided** for binding.
-                  Immutable after creation.                  
+                  Immutable after creation.
+                  Optional - can be empty for VSC-only model (VSC created without VolumeSnapshot, e.g., by VCR controller).
                 properties:
                   apiVersion:
                     description: |-
@@ -450,7 +453,7 @@ spec:
             - deletionPolicy
             - driver
             - source
-            - volumeSnapshotRef
+            # volumeSnapshotRef is optional to support VSC-only model (VSC without VolumeSnapshot)
             type: object
           status:
             description: |-

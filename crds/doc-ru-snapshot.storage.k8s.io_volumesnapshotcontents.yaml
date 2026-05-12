@@ -73,6 +73,8 @@ spec:
                   Для существующего объекта VolumeSnapshotContent **необходимо указать** имя и неймспейс объекта
                   VolumeSnapshot для привязки.
                   Неизменяемо после создания.
+                  Необязательное поле — может быть пустым в VSC-only модели (VolumeSnapshotContent создаётся
+                  без VolumeSnapshot, например, через VCR-контроллер).
                 properties:
                   apiVersion:
                     description: |-
@@ -231,6 +233,8 @@ spec:
                   Для существующего объекта VolumeSnapshotContent **необходимо указать** имя и неймспейс объекта
                   VolumeSnapshot для привязки.
                   Неизменяемо после создания.
+                  Необязательное поле — может быть пустым в VSC-only модели (VolumeSnapshotContent создаётся
+                  без VolumeSnapshot, например, через VCR-контроллер).
                 properties:
                   apiVersion:
                     description: |-
