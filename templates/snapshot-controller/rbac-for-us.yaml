@@ -40,16 +40,8 @@ rules:
   - apiGroups: ["snapshot.storage.k8s.io"]
     resources: ["volumesnapshots/status"]
     verbs: ["update", "patch"]
-  # Secrets access for CSI snapshot operations
-  # Required when VolumeSnapshotClass specifies secret references via annotations:
-  #   csi.storage.k8s.io/snapshotter-secret-name
-  #   csi.storage.k8s.io/snapshotter-secret-namespace
-  # Architecture note:
-  # - snapshot-controller reads secrets via Kubernetes API
-  # - CSI driver receives secrets as map<string,string> in CreateSnapshot RPC
-  # - Cluster-wide access is necessary for working with any CSI driver
-  # - Secrets are infrastructure-level (CSI driver credentials), not user data
-  # - Access is limited to read-only (get verb only)
+  # Secrets access for CSI snapshot operations when VolumeSnapshotClass uses
+  # csi.storage.k8s.io/snapshotter-secret-* annotations.
   - apiGroups: [""]
     resources: ["secrets"]
     verbs: ["get"]
@@ -57,7 +49,7 @@ rules:
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:
-  name: storage-foundation:snapshot-controller:leader-election
+  name: snapshot-controller:leader-election
   namespace: d8-{{ .Chart.Name }}
   {{- include "helm_lib_module_labels" (list . (dict "app" "snapshot-controller")) | nindent 2 }}
 rules:
@@ -68,13 +60,13 @@ rules:
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
 metadata:
-  name: storage-foundation:snapshot-controller:leader-election
+  name: snapshot-controller:leader-election
   namespace: d8-{{ .Chart.Name }}
   {{- include "helm_lib_module_labels" (list . (dict "app" "snapshot-controller")) | nindent 2 }}
 roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: Role
-  name: storage-foundation:snapshot-controller:leader-election
+  name: snapshot-controller:leader-election
 subjects:
 - kind: ServiceAccount
   name: snapshot-controller

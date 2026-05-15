@@ -14,7 +14,7 @@ linters-settings:
     sections:
       - standard
       - default
-      - prefix(fox.flant.com/deckhouse/storage)
+      - prefix(github.com/deckhouse)
 
   errcheck:
     ignore: fmt:.*,[rR]ead|[wW]rite|[cC]lose,io:Copy

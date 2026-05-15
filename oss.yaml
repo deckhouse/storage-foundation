@@ -1,5 +1,89 @@
-- name: CSI Snapshotter
-  link: https://github.com/kubernetes-csi/external-snapshotter
-  description: The controller is required for CSI snapshotting to work and is not specific to any CSI driver.
+- name: external-attacher
+  link: https://github.com/kubernetes-csi/external-attacher
+  description: CSI external-attacher sidecar that calls ControllerPublish/Unpublish for CSI drivers.
   logo: https://avatars.githubusercontent.com/u/52698954?s=200&v=4
   license: Apache License 2.0
+  id: csi-external-attacher
+  versions:
+    - condition:
+        k8s: ["1.20"]
+      version: v4.11.0
+
+- name: external-provisioner
+  link: https://github.com/kubernetes-csi/external-provisioner
+  description: CSI external-provisioner sidecar that creates and deletes CSI volumes.
+  logo: https://avatars.githubusercontent.com/u/52698954?s=200&v=4
+  license: Apache License 2.0
+  id: csi-external-provisioner
+  versions:
+    # TODO(63742164): if VolumeRestoreRequest remains implemented in
+    # external-provisioner, replace the upstream tag with the manually created
+    # downstream 3p mirror ref for this Kubernetes line, for example
+    # d8-63742164-vrr-v5.3.0.
+    - condition:
+        k8s: ["1.20"]
+      version: v5.3.0
+    # TODO(63742164): confirm whether the k8s 1.34 line is used for this module.
+    # If it is, prepare a separate downstream ref, for example
+    # d8-63742164-vrr-v6.2.0, instead of carrying a large local patch.
+    - condition:
+        k8s: ["1.34"]
+      version: v6.2.0
+
+- name: external-resizer
+  link: https://github.com/kubernetes-csi/external-resizer
+  description: CSI external-resizer sidecar that handles online and offline volume expansion.
+  logo: https://avatars.githubusercontent.com/u/52698954?s=200&v=4
+  license: Apache License 2.0
+  id: csi-external-resizer
+  versions:
+    - condition:
+        k8s: ["1.20"]
+      version: v1.14.0
+    - condition:
+        k8s: ["1.34"]
+      version: v2.1.0
+
+- name: external-snapshotter (csi-snapshotter sidecar)
+  link: https://github.com/kubernetes-csi/external-snapshotter
+  description: CSI external-snapshotter sidecar (csi-snapshotter binary). Built by cloning the upstream tag and applying CVE patches under images/csi-external-snapshotter/patches/<version>/.
+  logo: https://avatars.githubusercontent.com/u/52698954?s=200&v=4
+  license: Apache License 2.0
+  id: csi-external-snapshotter
+  versions:
+    - condition:
+        k8s: ["1.20"]
+      version: v8.5.0
+
+- name: livenessprobe
+  link: https://github.com/kubernetes-csi/livenessprobe
+  description: CSI liveness-probe sidecar.
+  logo: https://avatars.githubusercontent.com/u/52698954?s=200&v=4
+  license: Apache License 2.0
+  id: csi-livenessprobe
+  versions:
+    - condition:
+        k8s: ["1.20"]
+      version: v2.18.0
+
+- name: node-driver-registrar
+  link: https://github.com/kubernetes-csi/node-driver-registrar
+  description: CSI node-driver-registrar sidecar that registers the CSI driver with kubelet.
+  logo: https://avatars.githubusercontent.com/u/52698954?s=200&v=4
+  license: Apache License 2.0
+  id: csi-node-driver-registrar
+  versions:
+    - condition:
+        k8s: ["1.20"]
+      version: v2.16.0
+
+- name: snapshot-controller
+  link: https://github.com/kubernetes-csi/external-snapshotter
+  description: The controller is required for CSI snapshotting to work and is not specific to any CSI driver. Built by cloning the upstream tag and applying CVE patches under images/snapshot-controller/patches/.
+  logo: https://avatars.githubusercontent.com/u/52698954?s=200&v=4
+  license: Apache License 2.0
+  id: snapshot-controller
+  # TODO(63742164): after manually creating the downstream branch in
+  # fox.flant.com/deckhouse/3p/kubernetes-csi/external-snapshotter, replace
+  # v8.5.0 with that branch ref, for example d8-63742164-vsc-only.
+  version: v8.5.0

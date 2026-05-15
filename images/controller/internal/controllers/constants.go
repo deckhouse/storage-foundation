@@ -55,12 +55,12 @@ const (
 
 // Name prefix constants
 const (
-	NamePrefixVCRCSIVS   = "vcr-csi-vs-"
-	NamePrefixRetainer     = "ret-"
-	NamePrefixRetainerPV   = "ret-pv-"
-	NamePrefixRetainerPVC  = "ret-pvc-"
-	NamePrefixVRRTempVS  = "vrr-temp-vs-"
-	NamePrefixTempVRR    = "temp-vrr-"
+	NamePrefixVCRCSIVS    = "vcr-csi-vs-"
+	NamePrefixRetainer    = "ret-"
+	NamePrefixRetainerPV  = "ret-pv-"
+	NamePrefixRetainerPVC = "ret-pvc-"
+	NamePrefixVRRTempVS   = "vrr-temp-vs-"
+	NamePrefixTempVRR     = "temp-vrr-"
 )
 
 // API constants

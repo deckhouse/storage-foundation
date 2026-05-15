@@ -1,1 +1,0 @@
-spec.volumeGroupSnapshotRef: Invalid value: "object": volumeGroupSnapshotRef.name and volumeGroupSnapshotRef.namespace are immutable

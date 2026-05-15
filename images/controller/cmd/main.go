@@ -22,6 +22,7 @@ import (
 	"os"
 	goruntime "runtime"
 
+	snapshotv1 "github.com/kubernetes-csi/external-snapshotter/client/v8/apis/volumesnapshot/v1"
 	v1 "k8s.io/api/core/v1"
 	sv1 "k8s.io/api/storage/v1"
 	extv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
@@ -31,13 +32,12 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
 	"sigs.k8s.io/controller-runtime/pkg/manager"
 
+	deckhousev1alpha1 "github.com/deckhouse/deckhouse/deckhouse-controller/pkg/apis/deckhouse.io/v1alpha1"
 	v1alpha1 "github.com/deckhouse/storage-foundation/api/v1alpha1"
 	"github.com/deckhouse/storage-foundation/images/controller/internal/controllers"
 	"github.com/deckhouse/storage-foundation/images/controller/pkg/config"
 	"github.com/deckhouse/storage-foundation/images/controller/pkg/kubutils"
 	"github.com/deckhouse/storage-foundation/images/controller/pkg/logger"
-	deckhousev1alpha1 "github.com/deckhouse/deckhouse/deckhouse-controller/pkg/apis/deckhouse.io/v1alpha1"
-	snapshotv1 "github.com/kubernetes-csi/external-snapshotter/client/v8/apis/volumesnapshot/v1"
 )
 
 var (
@@ -62,7 +62,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	log.Info(fmt.Sprintf("[main] Go DEV XXX Version:%s ", goruntime.Version()))
+	log.Info(fmt.Sprintf("[main] Go Version:%s ", goruntime.Version()))
 	log.Info(fmt.Sprintf("[main] OS/Arch:Go OS/Arch:%s/%s ", goruntime.GOOS, goruntime.GOARCH))
 
 	log.Info("[main] CfgParams has been successfully created")
