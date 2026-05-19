@@ -4,9 +4,6 @@ kind: CustomResourceDefinition
 metadata:
   annotations:
     controller-gen.kubebuilder.io/version: (devel)
-  labels:
-    heritage: deckhouse
-    module: storage-foundation
   name: volumecapturerequests.storage.deckhouse.io
 spec:
   group: storage.deckhouse.io
@@ -165,11 +162,6 @@ spec:
                 required:
                 - name
                 type: object
-              observedGeneration:
-                description: ObservedGeneration is the generation of the resource
-                  that was last processed
-                format: int64
-                type: integer
             type: object
         type: object
     served: true

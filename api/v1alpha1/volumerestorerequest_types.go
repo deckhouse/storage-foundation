@@ -38,8 +38,6 @@ type VolumeRestoreRequestSpec struct {
 // +k8s:deepcopy-gen=true
 // VolumeRestoreRequestStatus defines the observed state of VolumeRestoreRequest
 type VolumeRestoreRequestStatus struct {
-	// ObservedGeneration is the generation of the resource that was last processed
-	ObservedGeneration int64 `json:"observedGeneration,omitempty"`
 	// CompletionTimestamp is the time when the restore request completed
 	CompletionTimestamp *metav1.Time `json:"completionTimestamp,omitempty"`
 	// Conditions represent the latest available observations of the resource's state

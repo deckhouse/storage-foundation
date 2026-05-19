@@ -42,7 +42,7 @@ shell:
   - cd /src
   - git clone --depth 1 --branch {{ $src_version }} $(cat /run/secrets/SOURCE_REPO)/kubernetes-csi/external-snapshotter.git .
   {{- if $patch }}
-  - git apply /patches/*.patch --verbose
+  - for patchfile in /patches/*.patch; do echo "Apply ${patchfile} ... "; git apply "${patchfile}" --verbose; done
   {{- end }}
   - rm -rf vendor
   - rm -rf .git

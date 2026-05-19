@@ -30,16 +30,11 @@ type VolumeCaptureRequestSpec struct {
 	// PersistentVolumeClaimRef references the PVC to capture
 	// Required for both Snapshot and Detach modes
 	PersistentVolumeClaimRef *ObjectReference `json:"persistentVolumeClaimRef,omitempty"`
-	// VolumeSnapshotClassName is the name of the VolumeSnapshotClass to use
-	// Required for Snapshot mode, ignored for Detach mode
-	VolumeSnapshotClassName string `json:"volumeSnapshotClassName,omitempty"`
 }
 
 // +k8s:deepcopy-gen=true
 // VolumeCaptureRequestStatus defines the observed state of VolumeCaptureRequest
 type VolumeCaptureRequestStatus struct {
-	// ObservedGeneration is the generation of the resource that was last processed
-	ObservedGeneration int64 `json:"observedGeneration,omitempty"`
 	// CompletionTimestamp is the time when the capture request completed
 	CompletionTimestamp *metav1.Time `json:"completionTimestamp,omitempty"`
 	// Conditions represent the latest available observations of the resource's state

@@ -4,9 +4,6 @@ kind: CustomResourceDefinition
 metadata:
   annotations:
     controller-gen.kubebuilder.io/version: (devel)
-  labels:
-    heritage: deckhouse
-    module: storage-foundation
   name: volumerestorerequests.storage.deckhouse.io
 spec:
   group: storage.deckhouse.io
@@ -152,11 +149,6 @@ spec:
                   - type
                   type: object
                 type: array
-              observedGeneration:
-                description: ObservedGeneration is the generation of the resource
-                  that was last processed
-                format: int64
-                type: integer
               targetPVCRef:
                 description: TargetPVCRef references the created target PVC
                 properties:

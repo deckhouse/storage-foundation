@@ -38,3 +38,10 @@ func isConditionFalse(conditions []metav1.Condition, conditionType string) bool 
 	cond := meta.FindStatusCondition(conditions, conditionType)
 	return cond != nil && cond.Status == metav1.ConditionFalse
 }
+
+// isTerminal checks if a resource is in terminal state (Ready=True or Ready=False).
+// Terminal resources are immutable and should not be processed further.
+func isTerminal(conditions []metav1.Condition, conditionType string) bool {
+	cond := meta.FindStatusCondition(conditions, conditionType)
+	return cond != nil && (cond.Status == metav1.ConditionTrue || cond.Status == metav1.ConditionFalse)
+}
