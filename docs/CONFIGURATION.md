@@ -2,7 +2,9 @@
 title: "The storage-foundation module: configuration"
 ---
 
-> The module works only in Kubernetes clusters from version 1.20 onward.
+{{< alert level="info" >}}
+The module works only in Kubernetes clusters from version 1.20 onward.
+{{< /alert >}}
 
 The module generally requires no configuration.
 

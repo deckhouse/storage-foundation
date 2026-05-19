@@ -1,14 +1,15 @@
 ---
 title: "The storage-foundation module: configuration examples"
+description: "Examples for creating volume snapshots, restoring from snapshots, and cloning PVCs using the storage-foundation module."
 ---
 
-### Using snapshots
+## Using snapshots
 
 To use snapshots, specify a `VolumeSnapshotClass`.
 To get a list of available VolumeSnapshotClasses in your cluster, run:
 
 ```shell
-kubectl get volumesnapshotclasses.snapshot.storage.k8s.io
+d8 k get volumesnapshotclasses.snapshot.storage.k8s.io
 ```
 
 You can then use VolumeSnapshotClass to create a snapshot from an existing PVC:
@@ -26,8 +27,8 @@ spec:
 
 After a short wait, the snapshot will be ready:
 
-```yaml
-$ kubectl describe volumesnapshots.snapshot.storage.k8s.io my-first-snapshot
+```console
+$ d8 k describe volumesnapshots.snapshot.storage.k8s.io my-first-snapshot
 ...
 Spec:
   Source:
@@ -40,7 +41,7 @@ Status:
   Restore Size:                        500Mi
 ```
 
-You can restore the content of this snaphost by creating a new PVC with the snapshot as source:
+You can restore the content of this snapshot by creating a new PVC with the snapshot as source:
 
 ```yaml
 apiVersion: v1
@@ -60,11 +61,11 @@ spec:
       storage: 500Mi
 ```
 
-### CSI Volume Cloning
+## CSI Volume Cloning
 
-Based on the concept of snapshots, you can also perform cloning of persistent volumes - or, more precisely, existing persistent volume claims (PVC).
-However, the CSI specification mentions some restrictions regarding cloning PVCs in different namespace and storage classes than the original PVC.
-(see [Kubernetes documentation](https://kubernetes.io/docs/concepts/storage/volume-pvc-datasource/) for details).
+Based on the concept of snapshots, you can also perform cloning of persistent volumes — or, more precisely, existing persistent volume claims (PVC).
+However, the CSI specification mentions some restrictions regarding cloning PVCs in different namespaces or storage classes than the original PVC.
+For details, see [Kubernetes documentation](https://kubernetes.io/docs/concepts/storage/volume-pvc-datasource/).
 
 To clone a volume create a new PVC and define the origin PVC in the dataSource:
 
