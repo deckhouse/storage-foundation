@@ -110,7 +110,7 @@ type VolumeCaptureRequestStatus struct {
 
 // +kubebuilder:object:root=true
 // +kubebuilder:subresource:status
-// +kubebuilder:validation:XValidation:rule="self.spec.mode != 'Snapshot' || size(self.spec.targets) > 0",message="spec.targets must not be empty when mode is Snapshot"
+// +kubebuilder:validation:XValidation:rule="self.spec.mode != 'Snapshot' || (has(self.spec.targets) && size(self.spec.targets) > 0)",message="spec.targets must not be empty when mode is Snapshot"
 // +kubebuilder:printcolumn:name="Age",type="date",JSONPath=".metadata.creationTimestamp"
 // VolumeCaptureRequest is the Schema for the volumecapturerequests API
 type VolumeCaptureRequest struct {

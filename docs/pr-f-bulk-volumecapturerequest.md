@@ -11,7 +11,7 @@
 | `VolumeCaptureTarget`, `VolumeDataArtifactRef`, `VolumeDataBinding` | ✅ `api/v1alpha1/volumecapturerequest_types.go` |
 | `spec.targets[]` (`listMapKey=uid`), `status.dataRefs[]` (`listMapKey=targetUID`) | ✅ |
 | Removed `spec.persistentVolumeClaimRef`, `status.dataRef` | ✅ Go types + CRD |
-| CEL: Snapshot mode requires `size(spec.targets) > 0` | ✅ `+kubebuilder:validation:XValidation` → CRD `x-kubernetes-validations` |
+| CEL: Snapshot mode requires `has(spec.targets) && size(spec.targets) > 0` | ✅ `+kubebuilder:validation:XValidation` → CRD `x-kubernetes-validations` |
 | CRD drift: `spec.volumeSnapshotClassName` | ✅ removed from generated CRD (not in Go types; controller uses SC annotation) |
 | Codegen | ✅ `zz_generated.deepcopy.go`, `crds/storage.deckhouse.io_volumecapturerequests.yaml` |
 | API tests | ✅ `volumecapturerequest_prf1_test.go` (JSON round-trip, map-list CRD schema, no singular fields) |
@@ -35,7 +35,7 @@ Extend **VolumeCaptureRequest (VCR)** so one request captures **0..N PVC targets
 | **Conditions** | Single type `Ready` (`api/v1alpha1/conditions.go`); reasons include `Completed`, `NotFound`, `SnapshotCreationFailed`, … — **no** aggregate-pending reason yet |
 | **Snapshot flow** | `processSnapshotMode`: **single-target shim** — validate one PVC from `spec.targets[0]` → … → set `dataRefs[]` + `Ready=True` (bulk loop: PR-F-2) |
 | **ObjectKeeper** | Name `retainer-{vscName}` (derived from VSC, not VCR); `FollowObject` → this VCR; **controller owner** of VSC |
-| **Detach flow** | Same single `persistentVolumeClaimRef`; `dataRef` → `PersistentVolume` |
+| **Detach flow** | Detach flow still uses the single-target shim over `spec.targets[0]`; status is written to `dataRefs[]` with PersistentVolume artifact. Bulk Detach is out of PR-F-1/PR-F-2 unless explicitly scoped. |
 | **TTL / cleanup** | `cleanupArtifactsForVCR` iterates `status.dataRefs[].artifact` |
 | **Tests** | Ginkgo + cleanup unit tests assert `status.dataRefs[]` |
 | **CRD drift** | ✅ resolved in PR-F-1 — no `volumeSnapshotClassName` / singular refs in CRD |

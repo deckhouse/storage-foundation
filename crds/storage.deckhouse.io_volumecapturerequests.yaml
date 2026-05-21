@@ -226,7 +226,8 @@ spec:
         type: object
         x-kubernetes-validations:
         - message: spec.targets must not be empty when mode is Snapshot
-          rule: self.spec.mode != 'Snapshot' || size(self.spec.targets) > 0
+          rule: self.spec.mode != 'Snapshot' || (has(self.spec.targets) && size(self.spec.targets)
+            > 0)
     served: true
     storage: true
     subresources:
