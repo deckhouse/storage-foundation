@@ -1,7 +1,11 @@
 module github.com/deckhouse/storage-foundation/api
 
 go 1.25.10
-require k8s.io/apimachinery v0.34.1
+
+require (
+	gopkg.in/yaml.v3 v3.0.1
+	k8s.io/apimachinery v0.34.1
+)
 
 require (
 	github.com/fxamacker/cbor/v2 v2.9.0 // indirect

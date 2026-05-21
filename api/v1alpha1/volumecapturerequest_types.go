@@ -20,6 +20,64 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
+const (
+	VolumeCaptureModeSnapshot = "Snapshot"
+	VolumeCaptureModeDetach   = "Detach"
+)
+
+// +k8s:deepcopy-gen=true
+// VolumeCaptureTarget identifies a PVC (or future volume target) to capture.
+type VolumeCaptureTarget struct {
+	// UID is the map key for spec.targets (PersistentVolumeClaim UID).
+	// +kubebuilder:validation:Required
+	// +kubebuilder:validation:MinLength=1
+	UID string `json:"uid"`
+
+	// +kubebuilder:validation:Required
+	// +kubebuilder:validation:MinLength=1
+	APIVersion string `json:"apiVersion"`
+	// +kubebuilder:validation:Required
+	// +kubebuilder:validation:MinLength=1
+	Kind string `json:"kind"`
+	// +kubebuilder:validation:Required
+	// +kubebuilder:validation:MinLength=1
+	Name string `json:"name"`
+	// +kubebuilder:validation:Required
+	// +kubebuilder:validation:MinLength=1
+	Namespace string `json:"namespace"`
+}
+
+// +k8s:deepcopy-gen=true
+// VolumeDataArtifactRef points to a durable data artifact produced by the data path.
+// It MUST reference a final artifact such as VolumeSnapshotContent or PersistentVolume.
+// It MUST NOT reference execution requests such as VolumeCaptureRequest.
+type VolumeDataArtifactRef struct {
+	// +kubebuilder:validation:Required
+	// +kubebuilder:validation:MinLength=1
+	APIVersion string `json:"apiVersion"`
+	// +kubebuilder:validation:Required
+	// +kubebuilder:validation:MinLength=1
+	Kind string `json:"kind"`
+	// +kubebuilder:validation:Required
+	// +kubebuilder:validation:MinLength=1
+	Name string `json:"name"`
+}
+
+// +k8s:deepcopy-gen=true
+// VolumeDataBinding associates a capture target with its durable data artifact on one VCR.
+type VolumeDataBinding struct {
+	// TargetUID is the map key for status.dataRefs (matches spec.targets[].uid).
+	// +kubebuilder:validation:Required
+	// +kubebuilder:validation:MinLength=1
+	TargetUID string `json:"targetUID"`
+
+	// Target identifies the PVC target captured in this binding.
+	Target VolumeCaptureTarget `json:"target"`
+
+	// Artifact references the cluster-scoped durable data artifact.
+	Artifact VolumeDataArtifactRef `json:"artifact"`
+}
+
 // +k8s:deepcopy-gen=true
 // VolumeCaptureRequestSpec defines the desired state of VolumeCaptureRequest
 type VolumeCaptureRequestSpec struct {
@@ -27,9 +85,12 @@ type VolumeCaptureRequestSpec struct {
 	// +kubebuilder:validation:Enum=Snapshot;Detach
 	// +kubebuilder:validation:Required
 	Mode string `json:"mode"`
-	// PersistentVolumeClaimRef references the PVC to capture
-	// Required for both Snapshot and Detach modes
-	PersistentVolumeClaimRef *ObjectReference `json:"persistentVolumeClaimRef,omitempty"`
+
+	// Targets lists PVC/volume targets to capture in this request (bulk, one VCR per logical snapshot node).
+	// +listType=map
+	// +listMapKey=uid
+	// +optional
+	Targets []VolumeCaptureTarget `json:"targets,omitempty"`
 }
 
 // +k8s:deepcopy-gen=true
@@ -39,25 +100,28 @@ type VolumeCaptureRequestStatus struct {
 	CompletionTimestamp *metav1.Time `json:"completionTimestamp,omitempty"`
 	// Conditions represent the latest available observations of the resource's state
 	Conditions []metav1.Condition `json:"conditions,omitempty"`
-	// DataRef references the captured data (e.g., VolumeSnapshotContent name)
-	DataRef *ObjectReference `json:"dataRef,omitempty"`
+
+	// DataRefs lists per-target durable data artifacts (for example VolumeSnapshotContent).
+	// +listType=map
+	// +listMapKey=targetUID
+	// +optional
+	DataRefs []VolumeDataBinding `json:"dataRefs,omitempty"`
 }
 
 // +kubebuilder:object:root=true
 // +kubebuilder:subresource:status
+// +kubebuilder:validation:XValidation:rule="self.spec.mode != 'Snapshot' || size(self.spec.targets) > 0",message="spec.targets must not be empty when mode is Snapshot"
 // +kubebuilder:printcolumn:name="Age",type="date",JSONPath=".metadata.creationTimestamp"
-
 // VolumeCaptureRequest is the Schema for the volumecapturerequests API
 type VolumeCaptureRequest struct {
 	metav1.TypeMeta   `json:",inline"`
 	metav1.ObjectMeta `json:"metadata,omitempty"`
-	Spec              VolumeCaptureRequestSpec   `json:"spec,omitempty"`
-	Status            VolumeCaptureRequestStatus `json:"status,omitempty"`
+
+	Spec   VolumeCaptureRequestSpec   `json:"spec,omitempty"`
+	Status VolumeCaptureRequestStatus `json:"status,omitempty"`
 }
 
 // +kubebuilder:object:root=true
-
-// VolumeCaptureRequestList contains a list of VolumeCaptureRequest
 type VolumeCaptureRequestList struct {
 	metav1.TypeMeta `json:",inline"`
 	metav1.ListMeta `json:"metadata,omitempty"`

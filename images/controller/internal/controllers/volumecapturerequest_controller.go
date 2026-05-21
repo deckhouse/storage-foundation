@@ -170,27 +170,28 @@ func (r *VolumeCaptureRequestController) processSnapshotMode(ctx context.Context
 	// Stage 1: Validate inputs
 	// ============================================================================
 
-	// 1. Validate spec
-	if vcr.Spec.PersistentVolumeClaimRef == nil {
-		l.Error(nil, "PersistentVolumeClaimRef is required")
-		return r.markFailed(ctx, vcr, storagev1alpha1.ConditionReasonInternalError, "PersistentVolumeClaimRef is required")
+	// 1. Validate spec (PR-F-2: bulk targets loop; PR-F-1: exactly one target)
+	target, err := singleVolumeCaptureTarget(vcr.Spec)
+	if err != nil {
+		l.Error(err, "Invalid spec.targets")
+		return r.markFailed(ctx, vcr, storagev1alpha1.ConditionReasonInternalError, err.Error())
 	}
-	l = l.WithValues("pvc", fmt.Sprintf("%s/%s", vcr.Spec.PersistentVolumeClaimRef.Namespace, vcr.Spec.PersistentVolumeClaimRef.Name))
+	l = l.WithValues("pvc", fmt.Sprintf("%s/%s", target.Namespace, target.Name))
 
 	// 2. Check RBAC: try to get PVC (similar to MCR)
-	l.Info("Getting PVC", "pvc", fmt.Sprintf("%s/%s", vcr.Spec.PersistentVolumeClaimRef.Namespace, vcr.Spec.PersistentVolumeClaimRef.Name))
+	l.Info("Getting PVC", "pvc", fmt.Sprintf("%s/%s", target.Namespace, target.Name))
 	pvc := &corev1.PersistentVolumeClaim{}
 	if err = r.Get(ctx, client.ObjectKey{
-		Namespace: vcr.Spec.PersistentVolumeClaimRef.Namespace,
-		Name:      vcr.Spec.PersistentVolumeClaimRef.Name,
+		Namespace: target.Namespace,
+		Name:      target.Name,
 	}, pvc); err != nil {
 		if apierrors.IsNotFound(err) {
 			l.Error(err, "PVC not found")
-			return r.markFailed(ctx, vcr, storagev1alpha1.ConditionReasonNotFound, fmt.Sprintf("PVC %s/%s not found", vcr.Spec.PersistentVolumeClaimRef.Namespace, vcr.Spec.PersistentVolumeClaimRef.Name))
+			return r.markFailed(ctx, vcr, storagev1alpha1.ConditionReasonNotFound, fmt.Sprintf("PVC %s/%s not found", target.Namespace, target.Name))
 		}
 		if apierrors.IsForbidden(err) {
 			l.Error(err, "Access denied to PVC")
-			return r.markFailed(ctx, vcr, storagev1alpha1.ConditionReasonRBACDenied, fmt.Sprintf("Access denied to PVC %s/%s", vcr.Spec.PersistentVolumeClaimRef.Namespace, vcr.Spec.PersistentVolumeClaimRef.Name))
+			return r.markFailed(ctx, vcr, storagev1alpha1.ConditionReasonRBACDenied, fmt.Sprintf("Access denied to PVC %s/%s", target.Namespace, target.Name))
 		}
 		l.Error(err, "Failed to get PVC")
 		return ctrl.Result{}, fmt.Errorf("failed to get PVC: %w", err)
@@ -419,11 +420,7 @@ func (r *VolumeCaptureRequestController) processSnapshotMode(ctx context.Context
 
 	// 9. Update VCR status (VSC is ready)
 	// VSC.status.readyToUse == true → mark VCR as Ready (terminal success state)
-	// Set DataRef before finalization
-	vcr.Status.DataRef = &storagev1alpha1.ObjectReference{
-		Name: csiVSCName,
-		Kind: "VolumeSnapshotContent", // Explicitly set Kind according to ADR
-	}
+	setVolumeSnapshotDataRef(vcr, target, csiVSCName)
 	if err := r.finalizeVCR(ctx, vcr, metav1.ConditionTrue, storagev1alpha1.ConditionReasonCompleted, fmt.Sprintf("CSI VolumeSnapshotContent %s ready", csiVSCName)); err != nil {
 		return ctrl.Result{}, err
 	}
@@ -438,9 +435,10 @@ func (r *VolumeCaptureRequestController) processSnapshotMode(ctx context.Context
 func (r *VolumeCaptureRequestController) processDetachMode(ctx context.Context, vcr *storagev1alpha1.VolumeCaptureRequest) (ctrl.Result, error) {
 	l := log.FromContext(ctx).WithValues("vcr", fmt.Sprintf("%s/%s", vcr.Namespace, vcr.Name), "mode", "Detach")
 
-	// 1. Validate spec
-	if vcr.Spec.PersistentVolumeClaimRef == nil {
-		return r.markFailed(ctx, vcr, storagev1alpha1.ConditionReasonInternalError, "PersistentVolumeClaimRef is required")
+	// 1. Validate spec (PR-F-2: bulk targets loop; PR-F-1: exactly one target)
+	target, err := singleVolumeCaptureTarget(vcr.Spec)
+	if err != nil {
+		return r.markFailed(ctx, vcr, storagev1alpha1.ConditionReasonInternalError, err.Error())
 	}
 
 	// 2. Check RBAC: try to get PVC
@@ -456,19 +454,19 @@ func (r *VolumeCaptureRequestController) processDetachMode(ctx context.Context, 
 	}
 
 	if err := r.Get(ctx, client.ObjectKey{
-		Namespace: vcr.Spec.PersistentVolumeClaimRef.Namespace,
-		Name:      vcr.Spec.PersistentVolumeClaimRef.Name,
+		Namespace: target.Namespace,
+		Name:      target.Name,
 	}, pvc); err != nil {
 		if apierrors.IsNotFound(err) {
 			// PVC already deleted - this is expected after first reconcile
 			pvcNotFound = true
-			l.Info("PVC already deleted, proceeding to detach PV", "pvc", fmt.Sprintf("%s/%s", vcr.Spec.PersistentVolumeClaimRef.Namespace, vcr.Spec.PersistentVolumeClaimRef.Name))
+			l.Info("PVC already deleted, proceeding to detach PV", "pvc", fmt.Sprintf("%s/%s", target.Namespace, target.Name))
 			// Try to get PV from annotation or VCR status
 			var pvName string
 			if pvNameFromAnnotation != "" {
 				pvName = pvNameFromAnnotation
-			} else if vcr.Status.DataRef != nil && vcr.Status.DataRef.Kind == "PersistentVolume" {
-				pvName = vcr.Status.DataRef.Name
+			} else if artifact, ok := firstDataArtifactRef(vcr.Status); ok && artifact.Kind == "PersistentVolume" {
+				pvName = artifact.Name
 			} else {
 				// Cannot proceed without PV name
 				return ctrl.Result{}, fmt.Errorf("PVC deleted but cannot determine PV name (no annotation or status)")
@@ -478,7 +476,7 @@ func (r *VolumeCaptureRequestController) processDetachMode(ctx context.Context, 
 				return ctrl.Result{}, fmt.Errorf("failed to get PV %s: %w", pvName, err)
 			}
 		} else if apierrors.IsForbidden(err) {
-			return r.markFailed(ctx, vcr, storagev1alpha1.ConditionReasonRBACDenied, fmt.Sprintf("Access denied to PVC %s/%s", vcr.Spec.PersistentVolumeClaimRef.Namespace, vcr.Spec.PersistentVolumeClaimRef.Name))
+			return r.markFailed(ctx, vcr, storagev1alpha1.ConditionReasonRBACDenied, fmt.Sprintf("Access denied to PVC %s/%s", target.Namespace, target.Name))
 		} else {
 			return ctrl.Result{}, fmt.Errorf("failed to get PVC: %w", err)
 		}
@@ -540,11 +538,7 @@ func (r *VolumeCaptureRequestController) processDetachMode(ctx context.Context, 
 			l.Info("PV already detached but not by VCR", "pv", pv.Name)
 		}
 		// Already detached, update status
-		// Set DataRef before finalization
-		vcr.Status.DataRef = &storagev1alpha1.ObjectReference{
-			Name: pv.Name,
-			Kind: "PersistentVolume",
-		}
+		setPersistentVolumeDataRef(vcr, target, pv.Name)
 		if err := r.finalizeVCR(ctx, vcr, metav1.ConditionTrue, storagev1alpha1.ConditionReasonCompleted, fmt.Sprintf("PV %s already detached", pv.Name)); err != nil {
 			return ctrl.Result{}, err
 		}
@@ -642,11 +636,7 @@ func (r *VolumeCaptureRequestController) processDetachMode(ctx context.Context, 
 	l.Info("Detached PV from PVC and set ownerRef", "pv", updatedPV.Name)
 
 	// 10. Update VCR status
-	// Set DataRef before finalization
-	vcr.Status.DataRef = &storagev1alpha1.ObjectReference{
-		Name: updatedPV.Name,
-		Kind: "PersistentVolume", // Explicitly set Kind according to ADR
-	}
+	setPersistentVolumeDataRef(vcr, target, updatedPV.Name)
 	if err := r.finalizeVCR(ctx, vcr, metav1.ConditionTrue, storagev1alpha1.ConditionReasonCompleted, fmt.Sprintf("PV %s detached", updatedPV.Name)); err != nil {
 		return ctrl.Result{}, err
 	}
@@ -808,11 +798,9 @@ func (r *VolumeCaptureRequestController) markFailed(ctx context.Context, vcr *st
 //   - VCR does NOT try to "heal" VSC or recreate it
 //   - VSC.status.error is the single source of truth for snapshot errors
 func (r *VolumeCaptureRequestController) markFailedSnapshot(ctx context.Context, vcr *storagev1alpha1.VolumeCaptureRequest, vscName, reason, message string) (ctrl.Result, error) {
-	// Set DataRef to VSC if provided (for snapshot failures)
 	if vscName != "" {
-		vcr.Status.DataRef = &storagev1alpha1.ObjectReference{
-			Name: vscName,
-			Kind: "VolumeSnapshotContent",
+		if target, err := singleVolumeCaptureTarget(vcr.Spec); err == nil {
+			setVolumeSnapshotDataRef(vcr, target, vscName)
 		}
 	}
 
@@ -1039,38 +1027,40 @@ func (r *VolumeCaptureRequestController) scanAndDeleteExpiredVCRs(ctx context.Co
 // cleanupArtifactsForVCR deletes VCR-created artifacts if they have no ownerRef.
 // This is a best-effort cleanup used by the TTL scanner to avoid orphaned artifacts.
 func (r *VolumeCaptureRequestController) cleanupArtifactsForVCR(ctx context.Context, vcr *storagev1alpha1.VolumeCaptureRequest) error {
-	if vcr.Status.DataRef == nil || vcr.Status.DataRef.Name == "" {
-		return nil
-	}
-
-	switch vcr.Status.DataRef.Kind {
-	case "VolumeSnapshotContent":
-		content := &snapshotv1.VolumeSnapshotContent{}
-		if err := r.Client.Get(ctx, client.ObjectKey{Name: vcr.Status.DataRef.Name}, content); err != nil {
-			if apierrors.IsNotFound(err) {
-				return nil
+	for _, binding := range vcr.Status.DataRefs {
+		artifact := binding.Artifact
+		if artifact.Name == "" {
+			continue
+		}
+		switch artifact.Kind {
+		case "VolumeSnapshotContent":
+			content := &snapshotv1.VolumeSnapshotContent{}
+			if err := r.Client.Get(ctx, client.ObjectKey{Name: artifact.Name}, content); err != nil {
+				if apierrors.IsNotFound(err) {
+					continue
+				}
+				return err
 			}
-			return err
-		}
-		if hasSnapshotContentOwnerRef(content.OwnerReferences) {
-			return nil
-		}
-		if err := r.Client.Delete(ctx, content); err != nil && !apierrors.IsNotFound(err) {
-			return err
-		}
-	case "PersistentVolume":
-		pv := &corev1.PersistentVolume{}
-		if err := r.Client.Get(ctx, client.ObjectKey{Name: vcr.Status.DataRef.Name}, pv); err != nil {
-			if apierrors.IsNotFound(err) {
-				return nil
+			if hasSnapshotContentOwnerRef(content.OwnerReferences) {
+				continue
 			}
-			return err
-		}
-		if hasSnapshotContentOwnerRef(pv.OwnerReferences) {
-			return nil
-		}
-		if err := r.Client.Delete(ctx, pv); err != nil && !apierrors.IsNotFound(err) {
-			return err
+			if err := r.Client.Delete(ctx, content); err != nil && !apierrors.IsNotFound(err) {
+				return err
+			}
+		case "PersistentVolume":
+			pv := &corev1.PersistentVolume{}
+			if err := r.Client.Get(ctx, client.ObjectKey{Name: artifact.Name}, pv); err != nil {
+				if apierrors.IsNotFound(err) {
+					continue
+				}
+				return err
+			}
+			if hasSnapshotContentOwnerRef(pv.OwnerReferences) {
+				continue
+			}
+			if err := r.Client.Delete(ctx, pv); err != nil && !apierrors.IsNotFound(err) {
+				return err
+			}
 		}
 	}
 

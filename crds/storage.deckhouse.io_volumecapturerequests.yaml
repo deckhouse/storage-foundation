@@ -3,7 +3,7 @@ apiVersion: apiextensions.k8s.io/v1
 kind: CustomResourceDefinition
 metadata:
   annotations:
-    controller-gen.kubebuilder.io/version: (devel)
+    controller-gen.kubebuilder.io/version: v0.18.0
   name: volumecapturerequests.storage.deckhouse.io
 spec:
   group: storage.deckhouse.io
@@ -50,30 +50,41 @@ spec:
                 - Snapshot
                 - Detach
                 type: string
-              persistentVolumeClaimRef:
-                description: |-
-                  PersistentVolumeClaimRef references the PVC to capture
-                  Required for both Snapshot and Detach modes
-                properties:
-                  kind:
-                    description: Kind is the kind of the referenced object (e.g.,
-                      "VolumeSnapshotContent", "PersistentVolume")
-                    type: string
-                  name:
-                    description: Name is the name of the referenced object
-                    type: string
-                  namespace:
-                    description: Namespace is the namespace of the referenced object
-                      (optional)
-                    type: string
-                required:
-                - name
-                type: object
-              volumeSnapshotClassName:
-                description: |-
-                  VolumeSnapshotClassName is the name of the VolumeSnapshotClass to use
-                  Required for Snapshot mode, ignored for Detach mode
-                type: string
+              targets:
+                description: Targets lists PVC/volume targets to capture in this request
+                  (bulk, one VCR per logical snapshot node).
+                items:
+                  description: VolumeCaptureTarget identifies a PVC (or future volume
+                    target) to capture.
+                  properties:
+                    apiVersion:
+                      minLength: 1
+                      type: string
+                    kind:
+                      minLength: 1
+                      type: string
+                    name:
+                      minLength: 1
+                      type: string
+                    namespace:
+                      minLength: 1
+                      type: string
+                    uid:
+                      description: UID is the map key for spec.targets (PersistentVolumeClaim
+                        UID).
+                      minLength: 1
+                      type: string
+                  required:
+                  - apiVersion
+                  - kind
+                  - name
+                  - namespace
+                  - uid
+                  type: object
+                type: array
+                x-kubernetes-list-map-keys:
+                - uid
+                x-kubernetes-list-type: map
             required:
             - mode
             type: object
@@ -144,26 +155,78 @@ spec:
                   - type
                   type: object
                 type: array
-              dataRef:
-                description: DataRef references the captured data (e.g., VolumeSnapshotContent
-                  name)
-                properties:
-                  kind:
-                    description: Kind is the kind of the referenced object (e.g.,
-                      "VolumeSnapshotContent", "PersistentVolume")
-                    type: string
-                  name:
-                    description: Name is the name of the referenced object
-                    type: string
-                  namespace:
-                    description: Namespace is the namespace of the referenced object
-                      (optional)
-                    type: string
-                required:
-                - name
-                type: object
+              dataRefs:
+                description: DataRefs lists per-target durable data artifacts (for
+                  example VolumeSnapshotContent).
+                items:
+                  description: VolumeDataBinding associates a capture target with
+                    its durable data artifact on one VCR.
+                  properties:
+                    artifact:
+                      description: Artifact references the cluster-scoped durable
+                        data artifact.
+                      properties:
+                        apiVersion:
+                          minLength: 1
+                          type: string
+                        kind:
+                          minLength: 1
+                          type: string
+                        name:
+                          minLength: 1
+                          type: string
+                      required:
+                      - apiVersion
+                      - kind
+                      - name
+                      type: object
+                    target:
+                      description: Target identifies the PVC target captured in this
+                        binding.
+                      properties:
+                        apiVersion:
+                          minLength: 1
+                          type: string
+                        kind:
+                          minLength: 1
+                          type: string
+                        name:
+                          minLength: 1
+                          type: string
+                        namespace:
+                          minLength: 1
+                          type: string
+                        uid:
+                          description: UID is the map key for spec.targets (PersistentVolumeClaim
+                            UID).
+                          minLength: 1
+                          type: string
+                      required:
+                      - apiVersion
+                      - kind
+                      - name
+                      - namespace
+                      - uid
+                      type: object
+                    targetUID:
+                      description: TargetUID is the map key for status.dataRefs (matches
+                        spec.targets[].uid).
+                      minLength: 1
+                      type: string
+                  required:
+                  - artifact
+                  - target
+                  - targetUID
+                  type: object
+                type: array
+                x-kubernetes-list-map-keys:
+                - targetUID
+                x-kubernetes-list-type: map
             type: object
         type: object
+        x-kubernetes-validations:
+        - message: spec.targets must not be empty when mode is Snapshot
+          rule: self.spec.mode != 'Snapshot' || size(self.spec.targets) > 0
     served: true
     storage: true
     subresources:
