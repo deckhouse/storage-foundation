@@ -44,6 +44,8 @@ const (
 	ConditionReasonPVBound = "PVBound"
 	// ConditionReasonSnapshotCreationFailed indicates CSI snapshot creation failed
 	ConditionReasonSnapshotCreationFailed = "SnapshotCreationFailed"
+	// ConditionReasonTargetsPending indicates one or more capture targets are not ready yet
+	ConditionReasonTargetsPending = "TargetsPending"
 	// ConditionReasonRestoreFailed indicates restore operation failed
 	ConditionReasonRestoreFailed = "RestoreFailed"
 )

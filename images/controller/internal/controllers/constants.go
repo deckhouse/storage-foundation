@@ -57,6 +57,7 @@ const (
 const (
 	NamePrefixVCRCSIVS    = "vcr-csi-vs-"
 	NamePrefixRetainer    = "ret-"
+	NamePrefixRetainerVCR = "retainer-vcr-"
 	NamePrefixRetainerPV  = "ret-pv-"
 	NamePrefixRetainerPVC = "ret-pvc-"
 	NamePrefixVRRTempVS   = "vrr-temp-vs-"

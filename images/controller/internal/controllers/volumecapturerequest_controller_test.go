@@ -176,6 +176,46 @@ var _ = Describe("VolumeCaptureRequest Controller", func() {
 		}
 	}
 
+	ensureSnapshotObjectKeeperUID := func(vcrUID types.UID) {
+		retainerName := objectKeeperNameForVCR(vcrUID)
+		ok := &deckhousev1alpha1.ObjectKeeper{}
+		if err := client.Get(ctx, types.NamespacedName{Name: retainerName}, ok); err == nil && ok.UID == "" {
+			ok.UID = types.UID("ok-uid-" + string(vcrUID))
+			_ = client.Update(ctx, ok)
+		}
+	}
+
+	fixSnapshotVSCOwnerRefs := func(vcr *storagev1alpha1.VolumeCaptureRequest) {
+		retainerName := objectKeeperNameForVCR(vcr.UID)
+		ok := &deckhousev1alpha1.ObjectKeeper{}
+		if err := client.Get(ctx, types.NamespacedName{Name: retainerName}, ok); err != nil {
+			return
+		}
+		if ok.UID == "" {
+			ok.UID = types.UID("ok-uid-" + string(vcr.UID))
+			_ = client.Update(ctx, ok)
+		}
+		for _, target := range vcr.Spec.Targets {
+			vscName := snapshotVSCName(vcr.UID, target.UID)
+			vsc := &snapshotv1.VolumeSnapshotContent{}
+			if err := client.Get(ctx, types.NamespacedName{Name: vscName}, vsc); err != nil {
+				continue
+			}
+			needsUpdate := false
+			for i := range vsc.OwnerReferences {
+				if vsc.OwnerReferences[i].Kind == KindObjectKeeper && vsc.OwnerReferences[i].Name == retainerName {
+					if vsc.OwnerReferences[i].UID == "" {
+						vsc.OwnerReferences[i].UID = ok.UID
+						needsUpdate = true
+					}
+				}
+			}
+			if needsUpdate {
+				_ = client.Update(ctx, vsc)
+			}
+		}
+	}
+
 	newReadyVSC := func(name string, readyToUse bool, errorMsg *string) *snapshotv1.VolumeSnapshotContent {
 		vsc := &snapshotv1.VolumeSnapshotContent{
 			ObjectMeta: metav1.ObjectMeta{
@@ -218,22 +258,12 @@ var _ = Describe("VolumeCaptureRequest Controller", func() {
 			}
 
 			// Check if terminal
-			readyCondition := getCondition(currentVCR.Status.Conditions, storagev1alpha1.ConditionTypeReady)
-			if readyCondition != nil && (readyCondition.Status == metav1.ConditionTrue || readyCondition.Status == metav1.ConditionFalse) {
+			if isVolumeCaptureTerminal(currentVCR.Status.Conditions) {
 				return nil // Terminal state reached
 			}
 
-			// Workaround for fake client: ensure ObjectKeeper has UID BEFORE reconcile
-			// This is needed because fake client doesn't populate UID immediately after Create
-			// In real API, UID is always present after Create, but fake client needs manual setup
 			if currentVCR.Spec.Mode == ModeSnapshot {
-				csiVSCName := fmt.Sprintf("snapshot-%s", string(currentVCR.UID))
-				retainerName := NamePrefixRetainer + csiVSCName
-				ok := &deckhousev1alpha1.ObjectKeeper{}
-				if err := client.Get(ctx, types.NamespacedName{Name: retainerName}, ok); err == nil && ok.UID == "" {
-					ok.UID = types.UID("ok-uid-" + string(currentVCR.UID))
-					_ = client.Update(ctx, ok) // Ignore errors
-				}
+				ensureSnapshotObjectKeeperUID(currentVCR.UID)
 			} else if currentVCR.Spec.Mode == ModeDetach {
 				retainerName := NamePrefixRetainerPV + string(currentVCR.UID)
 				ok := &deckhousev1alpha1.ObjectKeeper{}
@@ -252,15 +282,8 @@ var _ = Describe("VolumeCaptureRequest Controller", func() {
 			// Workaround for fake client: if RequeueAfter is set due to empty UID, set UID and continue
 			if result.RequeueAfter > 0 && result.RequeueAfter == time.Second {
 				if currentVCR.Spec.Mode == ModeSnapshot {
-					csiVSCName := fmt.Sprintf("snapshot-%s", string(currentVCR.UID))
-					retainerName := NamePrefixRetainer + csiVSCName
-					ok := &deckhousev1alpha1.ObjectKeeper{}
-					if err := client.Get(ctx, types.NamespacedName{Name: retainerName}, ok); err == nil && ok.UID == "" {
-						ok.UID = types.UID("ok-uid-" + string(currentVCR.UID))
-						_ = client.Update(ctx, ok) // Ignore errors
-						// Continue loop to reconcile again with UID set
-						continue
-					}
+					ensureSnapshotObjectKeeperUID(currentVCR.UID)
+					continue
 				} else if currentVCR.Spec.Mode == ModeDetach {
 					retainerName := NamePrefixRetainerPV + string(currentVCR.UID)
 					ok := &deckhousev1alpha1.ObjectKeeper{}
@@ -277,31 +300,7 @@ var _ = Describe("VolumeCaptureRequest Controller", func() {
 			// ObjectKeeper might have been created during reconcile, so set UID if needed
 			// If UID was set, update VSC/PV ownerRef to use correct UID
 			if currentVCR.Spec.Mode == ModeSnapshot {
-				csiVSCName := fmt.Sprintf("snapshot-%s", string(currentVCR.UID))
-				retainerName := NamePrefixRetainer + csiVSCName
-				ok := &deckhousev1alpha1.ObjectKeeper{}
-				if err := client.Get(ctx, types.NamespacedName{Name: retainerName}, ok); err == nil {
-					if ok.UID == "" {
-						ok.UID = types.UID("ok-uid-" + string(currentVCR.UID))
-						_ = client.Update(ctx, ok) // Ignore errors
-					}
-					// Update VSC ownerRef if it has empty UID
-					vsc := &snapshotv1.VolumeSnapshotContent{}
-					if err := client.Get(ctx, types.NamespacedName{Name: csiVSCName}, vsc); err == nil {
-						needsUpdate := false
-						for i := range vsc.OwnerReferences {
-							if vsc.OwnerReferences[i].Kind == KindObjectKeeper && vsc.OwnerReferences[i].Name == retainerName {
-								if vsc.OwnerReferences[i].UID == "" {
-									vsc.OwnerReferences[i].UID = ok.UID
-									needsUpdate = true
-								}
-							}
-						}
-						if needsUpdate {
-							_ = client.Update(ctx, vsc) // Ignore errors
-						}
-					}
-				}
+				fixSnapshotVSCOwnerRefs(currentVCR)
 			} else if currentVCR.Spec.Mode == ModeDetach {
 				retainerName := NamePrefixRetainerPV + string(currentVCR.UID)
 				ok := &deckhousev1alpha1.ObjectKeeper{}
@@ -358,19 +357,15 @@ var _ = Describe("VolumeCaptureRequest Controller", func() {
 				Expect(client.Create(ctx, vcr)).To(Succeed())
 
 				// When: reconcile until VSC is created (but not terminal yet - waiting for ReadyToUse)
-				csiVSCName := fmt.Sprintf("snapshot-%s", string(vcr.UID))
-				retainerName := NamePrefixRetainer + csiVSCName
-				// Reconcile a few times to ensure VSC is created
+				targetUID := "uid-test-pvc"
+				csiVSCName := snapshotVSCName(vcr.UID, targetUID)
+				retainerName := objectKeeperNameForVCR(vcr.UID)
 				for i := 0; i < 5; i++ {
+					ensureSnapshotObjectKeeperUID(vcr.UID)
 					result, err := ctrl.Reconcile(ctx, reconcile.Request{NamespacedName: types.NamespacedName{Name: vcr.Name, Namespace: vcr.Namespace}})
 					Expect(err).ToNot(HaveOccurred())
-					// Handle requeue due to empty UID (fake client workaround)
 					if result.RequeueAfter > 0 && result.RequeueAfter == time.Second {
-						ok := &deckhousev1alpha1.ObjectKeeper{}
-						if err := client.Get(ctx, types.NamespacedName{Name: retainerName}, ok); err == nil && ok.UID == "" {
-							ok.UID = types.UID("ok-uid-" + string(vcr.UID))
-							_ = client.Update(ctx, ok) // Ignore errors
-						}
+						ensureSnapshotObjectKeeperUID(vcr.UID)
 					}
 				}
 
@@ -478,12 +473,12 @@ var _ = Describe("VolumeCaptureRequest Controller", func() {
 				Expect(client.Create(ctx, vcr)).To(Succeed())
 
 				// Create VSC with error (simulating CSI driver failure)
-				csiVSCName := fmt.Sprintf("snapshot-%s", string(vcr.UID))
+				targetUID := "uid-test-pvc"
+				csiVSCName := snapshotVSCName(vcr.UID, targetUID)
 				errorMsg := "provided secret is empty"
 				vsc := newReadyVSC(csiVSCName, false, nil)
 
-				// Create ObjectKeeper first
-				retainerName := NamePrefixRetainer + csiVSCName
+				retainerName := objectKeeperNameForVCR(vcr.UID)
 				objectKeeper := &deckhousev1alpha1.ObjectKeeper{
 					ObjectMeta: metav1.ObjectMeta{
 						Name: retainerName,
@@ -844,18 +839,15 @@ var _ = Describe("VolumeCaptureRequest Controller", func() {
 			Expect(client.Create(ctx, vcr)).To(Succeed())
 
 			// Reconcile until VSC is created
-			csiVSCName := fmt.Sprintf("snapshot-%s", string(vcr.UID))
-			retainerName := NamePrefixRetainer + csiVSCName
+			targetUID := "uid-test-pvc"
+			csiVSCName := snapshotVSCName(vcr.UID, targetUID)
+			retainerName := objectKeeperNameForVCR(vcr.UID)
 			for i := 0; i < 5; i++ {
+				ensureSnapshotObjectKeeperUID(vcr.UID)
 				result, err := ctrl.Reconcile(ctx, reconcile.Request{NamespacedName: types.NamespacedName{Name: vcr.Name, Namespace: vcr.Namespace}})
 				Expect(err).ToNot(HaveOccurred())
-				// Handle requeue due to empty UID (fake client workaround)
 				if result.RequeueAfter > 0 && result.RequeueAfter == time.Second {
-					ok := &deckhousev1alpha1.ObjectKeeper{}
-					if err := client.Get(ctx, types.NamespacedName{Name: retainerName}, ok); err == nil && ok.UID == "" {
-						ok.UID = types.UID("ok-uid-" + string(vcr.UID))
-						_ = client.Update(ctx, ok) // Ignore errors
-					}
+					ensureSnapshotObjectKeeperUID(vcr.UID)
 				}
 			}
 
@@ -939,6 +931,112 @@ var _ = Describe("VolumeCaptureRequest Controller", func() {
 			deletedVCR := &storagev1alpha1.VolumeCaptureRequest{}
 			err := client.Get(ctx, types.NamespacedName{Name: vcr.Name, Namespace: vcr.Namespace}, deletedVCR)
 			Expect(apierrors.IsNotFound(err)).To(BeTrue(), "VCR should be deleted by TTL scanner")
+		})
+	})
+
+	Describe("LEVEL 2: Bulk Snapshot mode (PR-F-2)", func() {
+		setupTwoTargetFixture := func(vcrName string) (*storagev1alpha1.VolumeCaptureRequest, string, string) {
+			storageClass := newStorageClassWithVSC("test-sc", "test-driver", "test-vsc-class")
+			Expect(client.Create(ctx, storageClass)).To(Succeed())
+			vscClass := newVolumeSnapshotClass("test-vsc-class", "test-driver")
+			Expect(client.Create(ctx, vscClass)).To(Succeed())
+
+			Expect(client.Create(ctx, newCSIPV("test-pv-a", "test-driver", "handle-a"))).To(Succeed())
+			Expect(client.Create(ctx, newCSIPV("test-pv-b", "test-driver", "handle-b"))).To(Succeed())
+			Expect(client.Create(ctx, newBoundPVC("pvc-a", "default", "test-sc", "test-pv-a"))).To(Succeed())
+			Expect(client.Create(ctx, newBoundPVC("pvc-b", "default", "test-sc", "test-pv-b"))).To(Succeed())
+
+			targetA := pvcTarget("default", "pvc-a", "uid-pvc-a")
+			targetB := pvcTarget("default", "pvc-b", "uid-pvc-b")
+			vcr := newVCR(vcrName, "default", ModeSnapshot, []storagev1alpha1.VolumeCaptureTarget{targetA, targetB})
+			Expect(client.Create(ctx, vcr)).To(Succeed())
+			return vcr, snapshotVSCName(vcr.UID, targetA.UID), snapshotVSCName(vcr.UID, targetB.UID)
+		}
+
+		It("should capture two PVC targets into two VSCs and reach Ready=True", func() {
+			vcr, vscA, vscB := setupTwoTargetFixture("test-vcr-bulk-2")
+			for i := 0; i < 8; i++ {
+				ensureSnapshotObjectKeeperUID(vcr.UID)
+				_, err := ctrl.Reconcile(ctx, reconcile.Request{NamespacedName: types.NamespacedName{Name: vcr.Name, Namespace: vcr.Namespace}})
+				Expect(err).ToNot(HaveOccurred())
+			}
+			for _, name := range []string{vscA, vscB} {
+				vsc := &snapshotv1.VolumeSnapshotContent{}
+				Expect(client.Get(ctx, types.NamespacedName{Name: name}, vsc)).To(Succeed())
+				vsc.Status = &snapshotv1.VolumeSnapshotContentStatus{ReadyToUse: pointer.Bool(true)}
+				Expect(client.Status().Update(ctx, vsc)).To(Succeed())
+			}
+			Expect(reconcileUntilTerminal(vcr, 10)).To(Succeed())
+
+			updated := &storagev1alpha1.VolumeCaptureRequest{}
+			Expect(client.Get(ctx, types.NamespacedName{Name: vcr.Name, Namespace: vcr.Namespace}, updated)).To(Succeed())
+			ready := getCondition(updated.Status.Conditions, storagev1alpha1.ConditionTypeReady)
+			Expect(ready).ToNot(BeNil())
+			Expect(ready.Status).To(Equal(metav1.ConditionTrue))
+			Expect(ready.Reason).To(Equal(storagev1alpha1.ConditionReasonCompleted))
+			Expect(updated.Status.DataRefs).To(HaveLen(2))
+
+			ok := &deckhousev1alpha1.ObjectKeeper{}
+			Expect(client.Get(ctx, types.NamespacedName{Name: objectKeeperNameForVCR(vcr.UID)}, ok)).To(Succeed())
+		})
+
+		It("should report TargetsPending when one target is ready and one is pending", func() {
+			vcr, vscA, _ := setupTwoTargetFixture("test-vcr-bulk-pending")
+			for i := 0; i < 5; i++ {
+				ensureSnapshotObjectKeeperUID(vcr.UID)
+				_, err := ctrl.Reconcile(ctx, reconcile.Request{NamespacedName: types.NamespacedName{Name: vcr.Name, Namespace: vcr.Namespace}})
+				Expect(err).ToNot(HaveOccurred())
+			}
+			vsc := &snapshotv1.VolumeSnapshotContent{}
+			Expect(client.Get(ctx, types.NamespacedName{Name: vscA}, vsc)).To(Succeed())
+			vsc.Status = &snapshotv1.VolumeSnapshotContentStatus{ReadyToUse: pointer.Bool(true)}
+			Expect(client.Status().Update(ctx, vsc)).To(Succeed())
+
+			ensureSnapshotObjectKeeperUID(vcr.UID)
+			_, err := ctrl.Reconcile(ctx, reconcile.Request{NamespacedName: types.NamespacedName{Name: vcr.Name, Namespace: vcr.Namespace}})
+			Expect(err).ToNot(HaveOccurred())
+
+			updated := &storagev1alpha1.VolumeCaptureRequest{}
+			Expect(client.Get(ctx, types.NamespacedName{Name: vcr.Name, Namespace: vcr.Namespace}, updated)).To(Succeed())
+			ready := getCondition(updated.Status.Conditions, storagev1alpha1.ConditionTypeReady)
+			Expect(ready).ToNot(BeNil())
+			Expect(ready.Status).To(Equal(metav1.ConditionFalse))
+			Expect(ready.Reason).To(Equal(storagev1alpha1.ConditionReasonTargetsPending))
+			Expect(updated.Status.DataRefs).To(HaveLen(1))
+		})
+
+		It("should fail the whole VCR when one target VSC has a terminal CSI error", func() {
+			vcr, vscA, vscB := setupTwoTargetFixture("test-vcr-bulk-fail")
+			errMsg := "snapshot failed"
+			for _, name := range []string{vscA, vscB} {
+				vsc := newReadyVSC(name, false, &errMsg)
+				Expect(client.Create(ctx, vsc)).To(Succeed())
+			}
+
+			Expect(reconcileUntilTerminal(vcr, 10)).To(Succeed())
+			updated := &storagev1alpha1.VolumeCaptureRequest{}
+			Expect(client.Get(ctx, types.NamespacedName{Name: vcr.Name, Namespace: vcr.Namespace}, updated)).To(Succeed())
+			ready := getCondition(updated.Status.Conditions, storagev1alpha1.ConditionTypeReady)
+			Expect(ready.Status).To(Equal(metav1.ConditionFalse))
+			Expect(ready.Reason).To(Equal(storagev1alpha1.ConditionReasonSnapshotCreationFailed))
+		})
+
+		It("should be idempotent across repeated reconciles", func() {
+			vcr, vscA, vscB := setupTwoTargetFixture("test-vcr-bulk-idempotent")
+			for i := 0; i < 3; i++ {
+				ensureSnapshotObjectKeeperUID(vcr.UID)
+				_, err := ctrl.Reconcile(ctx, reconcile.Request{NamespacedName: types.NamespacedName{Name: vcr.Name, Namespace: vcr.Namespace}})
+				Expect(err).ToNot(HaveOccurred())
+			}
+			vscList := &snapshotv1.VolumeSnapshotContentList{}
+			Expect(client.List(ctx, vscList)).To(Succeed())
+			names := map[string]struct{}{}
+			for _, item := range vscList.Items {
+				names[item.Name] = struct{}{}
+			}
+			Expect(names).To(HaveKey(vscA))
+			Expect(names).To(HaveKey(vscB))
+			Expect(len(names)).To(Equal(2))
 		})
 	})
 })

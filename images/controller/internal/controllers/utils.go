@@ -17,6 +17,7 @@ limitations under the License.
 package controllers
 
 import (
+	storagev1alpha1 "github.com/deckhouse/storage-foundation/api/v1alpha1"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
@@ -44,4 +45,20 @@ func isConditionFalse(conditions []metav1.Condition, conditionType string) bool 
 func isTerminal(conditions []metav1.Condition, conditionType string) bool {
 	cond := meta.FindStatusCondition(conditions, conditionType)
 	return cond != nil && (cond.Status == metav1.ConditionTrue || cond.Status == metav1.ConditionFalse)
+}
+
+// isVolumeCaptureTerminal reports whether VCR reconcile should stop.
+// Ready=False with TargetsPending is non-terminal (bulk capture still in progress).
+func isVolumeCaptureTerminal(conditions []metav1.Condition) bool {
+	cond := meta.FindStatusCondition(conditions, storagev1alpha1.ConditionTypeReady)
+	if cond == nil {
+		return false
+	}
+	if cond.Status == metav1.ConditionTrue {
+		return true
+	}
+	if cond.Status == metav1.ConditionFalse && cond.Reason != storagev1alpha1.ConditionReasonTargetsPending {
+		return true
+	}
+	return false
 }

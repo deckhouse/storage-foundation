@@ -23,7 +23,6 @@ import (
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
-	storagev1 "k8s.io/api/storage/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -107,7 +106,7 @@ func (r *VolumeCaptureRequestController) Reconcile(ctx context.Context, req ctrl
 	// IMPORTANT: Temporary VolumeSnapshot (proxy-VS) cleanup happens in step 12 of processSnapshotMode
 	// before VCR status is set to Ready. This ensures VS is deleted immediately upon VCR completion.
 	// If VCR is already Ready, VS should already be cleaned up (or never existed).
-	if isTerminal(vcr.Status.Conditions, storagev1alpha1.ConditionTypeReady) {
+	if isVolumeCaptureTerminal(vcr.Status.Conditions) {
 		// VCR is terminal - TTL cleanup is handled by background TTL scanner, not in reconcile loop
 		// This ensures reconcile loop doesn't block on TTL checks
 		l.V(1).Info("VCR is terminal, skipping reconcile")
@@ -162,137 +161,15 @@ func (r *VolumeCaptureRequestController) Reconcile(ctx context.Context, req ctrl
 // - Any error in VSC.status.error is terminal
 // - VCR never retries snapshot creation
 func (r *VolumeCaptureRequestController) processSnapshotMode(ctx context.Context, vcr *storagev1alpha1.VolumeCaptureRequest) (ctrl.Result, error) {
-	var err error
 	l := log.FromContext(ctx).WithValues("vcr", fmt.Sprintf("%s/%s", vcr.Namespace, vcr.Name), "mode", "Snapshot")
-	l.Info("Processing VolumeCaptureRequest in Snapshot mode")
+	l.Info("Processing VolumeCaptureRequest in Snapshot mode", "targets", len(vcr.Spec.Targets))
 
-	// ============================================================================
-	// Stage 1: Validate inputs
-	// ============================================================================
-
-	// 1. Validate spec (PR-F-2: bulk targets loop; PR-F-1: exactly one target)
-	target, err := singleVolumeCaptureTarget(vcr.Spec)
-	if err != nil {
+	if err := validateSnapshotTargets(vcr.Spec.Targets); err != nil {
 		l.Error(err, "Invalid spec.targets")
 		return r.markFailed(ctx, vcr, storagev1alpha1.ConditionReasonInternalError, err.Error())
 	}
-	l = l.WithValues("pvc", fmt.Sprintf("%s/%s", target.Namespace, target.Name))
 
-	// 2. Check RBAC: try to get PVC (similar to MCR)
-	l.Info("Getting PVC", "pvc", fmt.Sprintf("%s/%s", target.Namespace, target.Name))
-	pvc := &corev1.PersistentVolumeClaim{}
-	if err = r.Get(ctx, client.ObjectKey{
-		Namespace: target.Namespace,
-		Name:      target.Name,
-	}, pvc); err != nil {
-		if apierrors.IsNotFound(err) {
-			l.Error(err, "PVC not found")
-			return r.markFailed(ctx, vcr, storagev1alpha1.ConditionReasonNotFound, fmt.Sprintf("PVC %s/%s not found", target.Namespace, target.Name))
-		}
-		if apierrors.IsForbidden(err) {
-			l.Error(err, "Access denied to PVC")
-			return r.markFailed(ctx, vcr, storagev1alpha1.ConditionReasonRBACDenied, fmt.Sprintf("Access denied to PVC %s/%s", target.Namespace, target.Name))
-		}
-		l.Error(err, "Failed to get PVC")
-		return ctrl.Result{}, fmt.Errorf("failed to get PVC: %w", err)
-	}
-	l.Info("PVC found", "volumeName", pvc.Spec.VolumeName)
-
-	// 3. Check if PVC is bound
-	if pvc.Spec.VolumeName == "" {
-		l.Error(nil, "PVC is not bound")
-		return r.markFailed(ctx, vcr, storagev1alpha1.ConditionReasonInternalError, fmt.Sprintf("PVC %s/%s is not bound", pvc.Namespace, pvc.Name))
-	}
-
-	// 4. Get PV to extract volume handle
-	l.Info("Getting PV", "pv", pvc.Spec.VolumeName)
-	pv := &corev1.PersistentVolume{}
-	if err = r.Get(ctx, client.ObjectKey{Name: pvc.Spec.VolumeName}, pv); err != nil {
-		if apierrors.IsNotFound(err) {
-			l.Error(err, "PV not found")
-			return r.markFailed(ctx, vcr, storagev1alpha1.ConditionReasonNotFound, fmt.Sprintf("PV %s not found", pvc.Spec.VolumeName))
-		}
-		l.Error(err, "Failed to get PV")
-		return ctrl.Result{}, fmt.Errorf("failed to get PV: %w", err)
-	}
-
-	// Check if PV has CSI volume handle
-	if pv.Spec.CSI == nil || pv.Spec.CSI.VolumeHandle == "" {
-		l.Error(nil, "PV does not have CSI volume handle", "pv", pv.Name, "hasCSI", pv.Spec.CSI != nil)
-		return r.markFailed(ctx, vcr, storagev1alpha1.ConditionReasonInternalError, fmt.Sprintf("PV %s does not have CSI volume handle", pv.Name))
-	}
-	l.Info("PV found", "driver", pv.Spec.CSI.Driver, "volumeHandle", pv.Spec.CSI.VolumeHandle)
-
-	// ============================================================================
-	// Stage 2: Resolve inputs (StorageClass, VolumeSnapshotClass)
-	// ============================================================================
-
-	// 5. Get VolumeSnapshotClass from StorageClass annotation (needed for VSC creation)
-	// VCR uses VolumeSnapshotClass specified in StorageClass annotation storage.deckhouse.io/volumesnapshotclass
-	// This is the Deckhouse way: StorageClass explicitly declares which VolumeSnapshotClass to use
-	if pvc.Spec.StorageClassName == nil || *pvc.Spec.StorageClassName == "" {
-		l.Error(nil, "PVC does not have StorageClassName")
-		return r.markFailed(ctx, vcr, storagev1alpha1.ConditionReasonInternalError, "PVC does not have StorageClassName")
-	}
-	storageClassName := *pvc.Spec.StorageClassName
-	l.Info("Getting StorageClass", "storageClass", storageClassName)
-	storageClass := &storagev1.StorageClass{}
-	// StorageClass is read via APIReader (direct API, no cache) since it's cluster-level
-	// configuration that doesn't need to be watched or cached.
-	// Controllers MUST read StorageClass via APIReader. APIReader is a required dependency.
-	if err = r.APIReader.Get(ctx, client.ObjectKey{Name: storageClassName}, storageClass); err != nil {
-		if apierrors.IsNotFound(err) {
-			l.Error(err, "StorageClass not found")
-			return r.markFailed(ctx, vcr, storagev1alpha1.ConditionReasonNotFound, fmt.Sprintf("StorageClass %s not found", storageClassName))
-		}
-		if apierrors.IsForbidden(err) {
-			l.Error(err, "Access denied to StorageClass")
-			return r.markFailed(ctx, vcr, storagev1alpha1.ConditionReasonRBACDenied, fmt.Sprintf("Access denied to StorageClass %s", storageClassName))
-		}
-		l.Error(err, "Failed to get StorageClass")
-		return ctrl.Result{}, fmt.Errorf("failed to get StorageClass: %w", err)
-	}
-	// Get VolumeSnapshotClass name from StorageClass annotation
-	vscClassName, ok := storageClass.Annotations["storage.deckhouse.io/volumesnapshotclass"]
-	if !ok || vscClassName == "" {
-		l.Error(nil, "StorageClass does not have storage.deckhouse.io/volumesnapshotclass annotation", "storageClass", storageClassName)
-		return r.markFailed(ctx, vcr, storagev1alpha1.ConditionReasonNotFound,
-			fmt.Sprintf("StorageClass %s does not have storage.deckhouse.io/volumesnapshotclass annotation", storageClassName))
-	}
-	l.Info("Found VolumeSnapshotClass name from StorageClass annotation", "vscClass", vscClassName)
-	// Get VolumeSnapshotClass
-	vscClass := &snapshotv1.VolumeSnapshotClass{}
-	if err = r.Get(ctx, client.ObjectKey{Name: vscClassName}, vscClass); err != nil {
-		if apierrors.IsNotFound(err) {
-			l.Error(err, "VolumeSnapshotClass not found")
-			return r.markFailed(ctx, vcr, storagev1alpha1.ConditionReasonNotFound, fmt.Sprintf("VolumeSnapshotClass %s (from StorageClass %s annotation) not found", vscClassName, storageClassName))
-		}
-		if apierrors.IsForbidden(err) {
-			l.Error(err, "Access denied to VolumeSnapshotClass")
-			return r.markFailed(ctx, vcr, storagev1alpha1.ConditionReasonRBACDenied, fmt.Sprintf("Access denied to VolumeSnapshotClass %s (from StorageClass %s annotation)", vscClassName, storageClassName))
-		}
-		l.Error(err, "Failed to get VolumeSnapshotClass")
-		return ctrl.Result{}, fmt.Errorf("failed to get VolumeSnapshotClass: %w", err)
-	}
-	// Validate that VolumeSnapshotClass driver matches PV CSI driver
-	pvDriver := pv.Spec.CSI.Driver
-	if vscClass.Driver != pvDriver {
-		l.Error(nil, "VolumeSnapshotClass driver does not match PV CSI driver",
-			"vscDriver", vscClass.Driver, "pvDriver", pvDriver)
-		return r.markFailed(ctx, vcr, storagev1alpha1.ConditionReasonInternalError,
-			fmt.Sprintf("VolumeSnapshotClass %s driver %s does not match PV CSI driver %s", vscClassName, vscClass.Driver, pvDriver))
-	}
-	l.Info("Found VolumeSnapshotClass", "name", vscClass.Name, "driver", vscClass.Driver)
-
-	// ============================================================================
-	// Stage 3: Ensure ownership (ObjectKeeper)
-	// ============================================================================
-
-	// 6. Ensure ObjectKeeper exists FIRST - before creating VSC
-	// INVARIANT: ObjectKeeper must exist before creating artifacts (VSC/PV)
-	// This ensures proper ownership chain: ObjectKeeper → VSC
-	csiVSCName := fmt.Sprintf("snapshot-%s", string(vcr.UID))
-	retainerName := NamePrefixRetainer + csiVSCName
+	retainerName := objectKeeperNameForVCR(vcr.UID)
 	objectKeeper, result, err := r.ensureObjectKeeper(ctx, retainerName, vcr)
 	if err != nil {
 		return ctrl.Result{}, err
@@ -301,132 +178,64 @@ func (r *VolumeCaptureRequestController) processSnapshotMode(ctx context.Context
 		return result, nil
 	}
 
-	// ============================================================================
-	// Stage 4: Ensure VSC exists
-	// ============================================================================
+	dataRefs := append([]storagev1alpha1.VolumeDataBinding(nil), vcr.Status.DataRefs...)
+	var readyCount int
+	var pending bool
+	var requeueAfter time.Duration
+	var firstTerminal *snapshotTargetError
 
-	// 7. Create VolumeSnapshotContent directly (VCR is the source of truth)
-	// According to ADR: VCR creates VSC directly, no snapshot-controller involvement
-	//
-	// IMPORTANT: VCR does NOT recreate VSC after terminal errors.
-	// If VSC exists but has errors, VCR will mark itself as Failed (see step 8).
-	// This ensures VCR is a fire-and-forget operation without retry logic.
-	//
-	// Check if VSC already exists (idempotency - don't recreate)
-	l.Info("Checking for existing VolumeSnapshotContent", "vscName", csiVSCName)
-	csiVSC := &snapshotv1.VolumeSnapshotContent{}
-	err = r.Get(ctx, client.ObjectKey{Name: csiVSCName}, csiVSC)
-	if apierrors.IsNotFound(err) {
-		l.Info("VolumeSnapshotContent not found, creating new one")
-		// Create VSC with proper spec and ownerRefs
-		volumeHandle := pv.Spec.CSI.VolumeHandle
-		vscClassName := vscClass.Name // Use the found default VolumeSnapshotClass name
-		controllerTrue := true
-		blockOwnerDeletion := true
-		csiVSC = &snapshotv1.VolumeSnapshotContent{
-			ObjectMeta: metav1.ObjectMeta{
-				Name: csiVSCName,
-				OwnerReferences: []metav1.OwnerReference{
-					{
-						APIVersion:         APIGroupDeckhouse,
-						Kind:               KindObjectKeeper,
-						Name:               retainerName,
-						UID:                objectKeeper.UID,
-						Controller:         &controllerTrue,
-						BlockOwnerDeletion: &blockOwnerDeletion,
-					},
-				},
-			},
-			Spec: snapshotv1.VolumeSnapshotContentSpec{
-				Driver:                  vscClass.Driver,
-				VolumeSnapshotClassName: &vscClassName,
-				DeletionPolicy:          vscClass.DeletionPolicy,
-				Source: snapshotv1.VolumeSnapshotContentSource{
-					VolumeHandle: &volumeHandle,
-				},
-				// ADR forbids VolumeSnapshot - volumeSnapshotRef must be empty
-				VolumeSnapshotRef: corev1.ObjectReference{},
-			},
+	for _, target := range vcr.Spec.Targets {
+		tr, targetResult, err := r.processSnapshotTarget(ctx, vcr, objectKeeper, retainerName, target)
+		if err != nil {
+			return ctrl.Result{}, err
 		}
-		if err = r.Create(ctx, csiVSC); err != nil {
-			return ctrl.Result{}, fmt.Errorf("failed to create VolumeSnapshotContent: %w", err)
+		if targetResult.Requeue || targetResult.RequeueAfter > 0 {
+			pending = true
+			if targetResult.RequeueAfter > requeueAfter {
+				requeueAfter = targetResult.RequeueAfter
+			}
 		}
-		l.Info("Created VolumeSnapshotContent", "name", csiVSCName)
-		// After Create(), controller-runtime populates csiVSC.UID automatically
-		// We rely on informer cache - if UID is not populated, it will be available on next reconcile
-		// Newly created VSC won't have Status yet - requeue to let external-snapshotter process it
-		return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
-	} else if err != nil {
-		return ctrl.Result{}, fmt.Errorf("failed to get VolumeSnapshotContent: %w", err)
-	}
-	// VSC exists - continue to wait for ReadyToUse (idempotency)
-
-	// ============================================================================
-	// Stage 5: Wait for completion / finalize
-	// ============================================================================
-
-	// 8. Wait for external-snapshotter to set ReadyToUse=true on VSC
-	//
-	// Decision algorithm (according to ADR):
-	//   if VCR Ready or Failed (observed):
-	//       exit reconcile
-	//   if VSC not found:
-	//       create VSC
-	//       requeue
-	//   if VSC.status.error exists (regardless of ReadyToUse):
-	//       mark VCR Failed
-	//       exit reconcile
-	//   if VSC.status.readyToUse == true:
-	//       mark VCR Ready
-	//       exit reconcile
-	//   else:
-	//       requeue (wait for snapshot-controller)
-	//
-	// VCR is a fire-and-forget operation:
-	//   - VCR does NOT recreate VSC after terminal errors
-	//   - VCR does NOT try to "heal" VSC
-	//   - VSC.status.error is the single source of truth for snapshot errors
-	//   - Any terminal error in VSC → terminal state in VCR
-	//   - Error has priority over ReadyToUse (if both exist, error wins)
-
-	// Check for terminal CSI errors FIRST (error has priority over ReadyToUse)
-	// Terminal error: Status.Error.Message is set and non-empty
-	// Examples: "provided secret is empty", NotFound/Forbidden for secrets, invalid arguments, PermissionDenied
-	// VCR does NOT interpret CSI error codes - it only checks for presence of error message
-	// IMPORTANT: Check error even if ReadyToUse==true (error has priority)
-	if csiVSC.Status != nil && csiVSC.Status.Error != nil && csiVSC.Status.Error.Message != nil && *csiVSC.Status.Error.Message != "" {
-		errorMsg := *csiVSC.Status.Error.Message
-		// Include VSC name and PVC name in error message for better debugging
-		errorDetails := fmt.Sprintf("VSC %s, PVC %s/%s: %s", csiVSCName, pvc.Namespace, pvc.Name, errorMsg)
-		// Include error time if available
-		if csiVSC.Status.Error.Time != nil {
-			errorDetails = fmt.Sprintf("%s (error time: %s)", errorDetails, csiVSC.Status.Error.Time.Format(time.RFC3339))
+		if tr.terminal != nil && firstTerminal == nil {
+			firstTerminal = tr.terminal
 		}
-		// Mark VCR as failed with DataRef pointing to the problematic VSC
-		// This is a terminal error - VCR will not retry or recreate VSC
-		return r.markFailedSnapshot(ctx, vcr, csiVSCName, storagev1alpha1.ConditionReasonSnapshotCreationFailed,
-			fmt.Sprintf("CSI snapshot creation failed: %s", errorDetails))
+		if tr.binding != nil {
+			dataRefs = upsertVolumeDataBinding(dataRefs, *tr.binding)
+		}
+		if tr.ready {
+			readyCount++
+		}
+		if tr.pending {
+			pending = true
+		}
 	}
 
-	// Check ReadyToUse status (only if no error)
-	if csiVSC.Status == nil || csiVSC.Status.ReadyToUse == nil || !*csiVSC.Status.ReadyToUse {
-		// Temporary state: VSC exists but snapshot-controller hasn't processed it yet
-		// This is NOT an error - just wait for snapshot-controller to update status
-		l.Info("Waiting for external-snapshotter to set ReadyToUse=true", "name", csiVSCName)
-		// Use longer requeue interval for snapshot operations to avoid API pressure
-		// External-snapshotter needs time to call CSI CreateSnapshot and update status
-		return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
+	total := len(vcr.Spec.Targets)
+	if firstTerminal != nil {
+		l.Error(nil, "Target capture failed", "targetUID", firstTerminal.target.UID, "reason", firstTerminal.reason)
+		return r.markFailedSnapshotForTarget(ctx, vcr, firstTerminal.target, firstTerminal.vscName, firstTerminal.reason, firstTerminal.message)
 	}
 
-	// 9. Update VCR status (VSC is ready)
-	// VSC.status.readyToUse == true → mark VCR as Ready (terminal success state)
-	setVolumeSnapshotDataRef(vcr, target, csiVSCName)
-	if err := r.finalizeVCR(ctx, vcr, metav1.ConditionTrue, storagev1alpha1.ConditionReasonCompleted, fmt.Sprintf("CSI VolumeSnapshotContent %s ready", csiVSCName)); err != nil {
+	if readyCount == total {
+		vcr.Status.DataRefs = dataRefs
+		msg := fmt.Sprintf("all %d targets ready", total)
+		if err := r.finalizeVCR(ctx, vcr, metav1.ConditionTrue, storagev1alpha1.ConditionReasonCompleted, msg); err != nil {
+			return ctrl.Result{}, err
+		}
+		l.Info("VolumeCaptureRequest completed", "mode", "Snapshot", "targets", total)
+		return ctrl.Result{}, nil
+	}
+
+	if err := r.patchVCRSnapshotProgress(ctx, vcr, dataRefs, readyCount, total); err != nil {
 		return ctrl.Result{}, err
 	}
+	if pending {
+		if requeueAfter == 0 {
+			requeueAfter = 5 * time.Second
+		}
+		return ctrl.Result{RequeueAfter: requeueAfter}, nil
+	}
 
-	l.Info("VolumeCaptureRequest completed", "mode", "Snapshot", "csiVSC", csiVSCName)
-	return ctrl.Result{}, nil
+	return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
 }
 
 // processDetachMode handles Detach mode: detaches PV from PVC
@@ -435,8 +244,8 @@ func (r *VolumeCaptureRequestController) processSnapshotMode(ctx context.Context
 func (r *VolumeCaptureRequestController) processDetachMode(ctx context.Context, vcr *storagev1alpha1.VolumeCaptureRequest) (ctrl.Result, error) {
 	l := log.FromContext(ctx).WithValues("vcr", fmt.Sprintf("%s/%s", vcr.Namespace, vcr.Name), "mode", "Detach")
 
-	// 1. Validate spec (PR-F-2: bulk targets loop; PR-F-1: exactly one target)
-	target, err := singleVolumeCaptureTarget(vcr.Spec)
+	// 1. Validate spec (Detach: single target only; bulk Detach out of scope)
+	target, err := detachVolumeCaptureTarget(vcr.Spec)
 	if err != nil {
 		return r.markFailed(ctx, vcr, storagev1alpha1.ConditionReasonInternalError, err.Error())
 	}
@@ -798,16 +607,11 @@ func (r *VolumeCaptureRequestController) markFailed(ctx context.Context, vcr *st
 //   - VCR does NOT try to "heal" VSC or recreate it
 //   - VSC.status.error is the single source of truth for snapshot errors
 func (r *VolumeCaptureRequestController) markFailedSnapshot(ctx context.Context, vcr *storagev1alpha1.VolumeCaptureRequest, vscName, reason, message string) (ctrl.Result, error) {
-	if vscName != "" {
-		if target, err := singleVolumeCaptureTarget(vcr.Spec); err == nil {
-			setVolumeSnapshotDataRef(vcr, target, vscName)
-		}
+	var target storagev1alpha1.VolumeCaptureTarget
+	if len(vcr.Spec.Targets) > 0 {
+		target = vcr.Spec.Targets[0]
 	}
-
-	if err := r.finalizeVCR(ctx, vcr, metav1.ConditionFalse, reason, message); err != nil {
-		return ctrl.Result{}, err
-	}
-	return ctrl.Result{}, nil
+	return r.markFailedSnapshotForTarget(ctx, vcr, target, vscName, reason, message)
 }
 
 // finalizeVCR finalizes VCR by setting Ready condition, CompletionTimestamp, updating status, and TTL annotation.

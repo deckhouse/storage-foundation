@@ -1,6 +1,6 @@
 # PR-F: Bulk VolumeCaptureRequest (`targets[]`, `status.dataRefs[]`)
 
-**Status:** **PR-F-1 (API only) ✅ done** — bulk controller loop is **PR-F-2** (in progress / not started).  
+**Status:** **PR-F-1 ✅** API contract · **PR-F-2 ✅** bulk Snapshot controller semantics (Detach still single-target).  
 **Blocks:** state-snapshotter N5 **PR-4** (publish `SnapshotContent.status.dataRefs[]` from VCR).  
 **Aligned with:** state-snapshotter [`volume-node-dual-capture.md`](../../state-snapshotter/docs/state-snapshotter-rework/design/volume-node-dual-capture.md), spec §3.9, implementation-plan §2.4.5 **PR-F**.
 
@@ -18,7 +18,20 @@
 | Controller behavior | **unchanged semantics** — `singleVolumeCaptureTarget` shim (exactly one target); compile fixes + `dataRefs[]` status shape only |
 | Duplicate `targets[].uid` at apiserver | **TODO PR-F-2** — map-list keys; no envtest in `api/` module |
 
-**PR-F-2 next:** per-target controller loop, aggregate `Ready`, incremental `dataRefs[]`, `TargetsPending` reason, envtest for 2 PVC / duplicate uid.
+## PR-F-2 (bulk Snapshot controller) — done
+
+| Deliverable | State |
+|-------------|--------|
+| Per-target loop `processSnapshotTarget` | ✅ `volumecapturerequest_snapshot_bulk.go` |
+| VSC naming `snapshot-{vcrUID}-{shortTargetUID}` | ✅ |
+| ObjectKeeper `retainer-vcr-{vcrUID}` (one per VCR) | ✅ |
+| Incremental `status.dataRefs[]` upsert by `targetUID` | ✅ |
+| Aggregate `Ready`: all ready → `Completed`; pending → `TargetsPending`; any target error → whole VCR failed | ✅ |
+| `isVolumeCaptureTerminal` excludes `TargetsPending` (reconcile continues) | ✅ |
+| Detach mode | unchanged — single target only |
+| Tests | ✅ LEVEL 2 bulk ginkgo + unit tests for naming/upsert |
+
+**Next (out of PR-F):** state-snapshotter **PR-4** publish; duplicate `targets[].uid` apiserver enforcement if needed.
 
 ## Goal
 
@@ -33,7 +46,7 @@ Extend **VolumeCaptureRequest (VCR)** so one request captures **0..N PVC targets
 | **Spec** | `spec.mode`, `spec.targets[]` (`VolumeCaptureTarget`: apiVersion/kind/namespace/name/uid) |
 | **Status** | `status.dataRefs[]` (`VolumeDataBinding`: targetUID, target, artifact), `status.conditions[]`, `status.completionTimestamp` |
 | **Conditions** | Single type `Ready` (`api/v1alpha1/conditions.go`); reasons include `Completed`, `NotFound`, `SnapshotCreationFailed`, … — **no** aggregate-pending reason yet |
-| **Snapshot flow** | `processSnapshotMode`: **single-target shim** — validate one PVC from `spec.targets[0]` → … → set `dataRefs[]` + `Ready=True` (bulk loop: PR-F-2) |
+| **Snapshot flow** | `processSnapshotMode`: loop `spec.targets[]` → one VSC per target → incremental `dataRefs[]` → `Ready=True` when all targets ready |
 | **ObjectKeeper** | Name `retainer-{vscName}` (derived from VSC, not VCR); `FollowObject` → this VCR; **controller owner** of VSC |
 | **Detach flow** | Detach flow still uses the single-target shim over `spec.targets[0]`; status is written to `dataRefs[]` with PersistentVolume artifact. Bulk Detach is out of PR-F-1/PR-F-2 unless explicitly scoped. |
 | **TTL / cleanup** | `cleanupArtifactsForVCR` iterates `status.dataRefs[].artifact` |
@@ -152,9 +165,9 @@ After **PR-F** is deployed:
 - [x] **PR-F-1** API types: `VolumeCaptureTarget`, `VolumeDataBinding`; `spec.targets[]`, `status.dataRefs[]`
 - [x] **PR-F-1** CRD + codegen; remove `persistentVolumeClaimRef` / `dataRef` / `volumeSnapshotClassName` from active contract
 - [x] **PR-F-1** CEL: empty `spec.targets` rejected for Snapshot mode; OpenAPI `minLength=1` on uid / targetUID / artifact fields
-- [ ] **PR-F-2** Admission/runtime: duplicate `targets[].uid` rejected at reconcile (apiserver map-list where enforced)
-- [ ] **PR-F-2** Controller: iterate `spec.targets[]`; create/track VSC per target; append `status.dataRefs[]`
-- [ ] Ready aggregation: all targets → `Ready=True`
+- [x] **PR-F-2** Controller: iterate `spec.targets[]`; create/track VSC per target; append `status.dataRefs[]`
+- [x] **PR-F-2** Ready aggregation: all targets → `Ready=True`; pending → `TargetsPending`
+- [ ] Duplicate `targets[].uid` at apiserver (map-list); controller rejects duplicates in `validateSnapshotTargets`
 - [ ] Unit tests: 0/1/2 targets; one pending; one failed; duplicate uid rejected
 - [ ] Integration: 2 PVC → 1 VCR → 2 VSC → 2 `dataRefs[]` → `Ready=True`
 - [ ] Document breaking change for any external VCR consumers (singular ref removal)

@@ -22,35 +22,25 @@ import (
 	storagev1alpha1 "github.com/deckhouse/storage-foundation/api/v1alpha1"
 )
 
-const prf2BulkTargetsMessage = "bulk VCR controller not implemented (PR-F-2)"
-
-// singleVolumeCaptureTarget is a PR-F-1 compile shim: existing controller logic still handles one PVC.
-// PR-F-2 replaces this with a per-target loop over spec.targets[].
-func singleVolumeCaptureTarget(spec storagev1alpha1.VolumeCaptureRequestSpec) (storagev1alpha1.VolumeCaptureTarget, error) {
+// detachVolumeCaptureTarget validates Detach mode still uses exactly one target (bulk Detach out of scope).
+func detachVolumeCaptureTarget(spec storagev1alpha1.VolumeCaptureRequestSpec) (storagev1alpha1.VolumeCaptureTarget, error) {
 	switch len(spec.Targets) {
 	case 0:
 		return storagev1alpha1.VolumeCaptureTarget{}, fmt.Errorf("spec.targets is required")
 	case 1:
 		return spec.Targets[0], nil
 	default:
-		return storagev1alpha1.VolumeCaptureTarget{}, fmt.Errorf("%s: expected one target, got %d", prf2BulkTargetsMessage, len(spec.Targets))
+		return storagev1alpha1.VolumeCaptureTarget{}, fmt.Errorf("Detach mode supports exactly one target, got %d", len(spec.Targets))
 	}
 }
 
 func setVolumeSnapshotDataRef(vcr *storagev1alpha1.VolumeCaptureRequest, target storagev1alpha1.VolumeCaptureTarget, vscName string) {
-	vcr.Status.DataRefs = []storagev1alpha1.VolumeDataBinding{{
-		TargetUID: target.UID,
-		Target:    target,
-		Artifact: storagev1alpha1.VolumeDataArtifactRef{
-			APIVersion: "snapshot.storage.k8s.io/v1",
-			Kind:       "VolumeSnapshotContent",
-			Name:       vscName,
-		},
-	}}
+	binding := volumeSnapshotBinding(target, vscName)
+	vcr.Status.DataRefs = upsertVolumeDataBinding(vcr.Status.DataRefs, binding)
 }
 
 func setPersistentVolumeDataRef(vcr *storagev1alpha1.VolumeCaptureRequest, target storagev1alpha1.VolumeCaptureTarget, pvName string) {
-	vcr.Status.DataRefs = []storagev1alpha1.VolumeDataBinding{{
+	vcr.Status.DataRefs = upsertVolumeDataBinding(vcr.Status.DataRefs, storagev1alpha1.VolumeDataBinding{
 		TargetUID: target.UID,
 		Target:    target,
 		Artifact: storagev1alpha1.VolumeDataArtifactRef{
@@ -58,7 +48,7 @@ func setPersistentVolumeDataRef(vcr *storagev1alpha1.VolumeCaptureRequest, targe
 			Kind:       "PersistentVolume",
 			Name:       pvName,
 		},
-	}}
+	})
 }
 
 func firstDataArtifactRef(status storagev1alpha1.VolumeCaptureRequestStatus) (storagev1alpha1.VolumeDataArtifactRef, bool) {
