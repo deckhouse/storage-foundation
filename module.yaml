@@ -1,5 +1,5 @@
 name: storage-foundation
-stage: "General Availability"
+stage: "Experimental"
 subsystems:
   - storage
   - infrastructure
