@@ -178,7 +178,7 @@ func (r *VolumeCaptureRequestController) processSnapshotMode(ctx context.Context
 		return result, nil
 	}
 
-	dataRefs := append([]storagev1alpha1.VolumeDataBinding(nil), vcr.Status.DataRefs...)
+	var bindingUpdates []storagev1alpha1.VolumeDataBinding
 	var readyCount int
 	var pending bool
 	var requeueAfter time.Duration
@@ -199,7 +199,7 @@ func (r *VolumeCaptureRequestController) processSnapshotMode(ctx context.Context
 			firstTerminal = tr.terminal
 		}
 		if tr.binding != nil {
-			dataRefs = upsertVolumeDataBinding(dataRefs, *tr.binding)
+			bindingUpdates = append(bindingUpdates, *tr.binding)
 		}
 		if tr.ready {
 			readyCount++
@@ -216,7 +216,7 @@ func (r *VolumeCaptureRequestController) processSnapshotMode(ctx context.Context
 	}
 
 	if readyCount == total {
-		vcr.Status.DataRefs = dataRefs
+		vcr.Status.DataRefs = mergeVolumeDataBindings(vcr.Status.DataRefs, bindingUpdates)
 		msg := fmt.Sprintf("all %d targets ready", total)
 		if err := r.finalizeVCR(ctx, vcr, metav1.ConditionTrue, storagev1alpha1.ConditionReasonCompleted, msg); err != nil {
 			return ctrl.Result{}, err
@@ -225,7 +225,7 @@ func (r *VolumeCaptureRequestController) processSnapshotMode(ctx context.Context
 		return ctrl.Result{}, nil
 	}
 
-	if err := r.patchVCRSnapshotProgress(ctx, vcr, dataRefs, readyCount, total); err != nil {
+	if err := r.patchVCRSnapshotProgress(ctx, vcr, bindingUpdates, readyCount, total); err != nil {
 		return ctrl.Result{}, err
 	}
 	if pending {
@@ -595,23 +595,6 @@ func (r *VolumeCaptureRequestController) markFailed(ctx context.Context, vcr *st
 		return ctrl.Result{}, err
 	}
 	return ctrl.Result{}, nil
-}
-
-// markFailedSnapshot marks VCR as failed with optional DataRef pointing to VSC
-//
-// This is used when snapshot creation fails and we want to reference the problematic VSC.
-// After calling this function, VCR enters a terminal Failed state and will not be reconciled again.
-//
-// VCR invariants:
-//   - Any terminal error in VSC → terminal state in VCR
-//   - VCR does NOT try to "heal" VSC or recreate it
-//   - VSC.status.error is the single source of truth for snapshot errors
-func (r *VolumeCaptureRequestController) markFailedSnapshot(ctx context.Context, vcr *storagev1alpha1.VolumeCaptureRequest, vscName, reason, message string) (ctrl.Result, error) {
-	var target storagev1alpha1.VolumeCaptureTarget
-	if len(vcr.Spec.Targets) > 0 {
-		target = vcr.Spec.Targets[0]
-	}
-	return r.markFailedSnapshotForTarget(ctx, vcr, target, vscName, reason, message)
 }
 
 // finalizeVCR finalizes VCR by setting Ready condition, CompletionTimestamp, updating status, and TTL annotation.

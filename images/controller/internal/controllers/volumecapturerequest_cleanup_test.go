@@ -124,3 +124,72 @@ func TestCleanupArtifactsForVCR_DeletesPVOrphans(t *testing.T) {
 		t.Fatal("expected PersistentVolume to be deleted")
 	}
 }
+
+func TestCleanupArtifactsForVCR_TwoDataRefsOrphansDeleted(t *testing.T) {
+	scheme := runtime.NewScheme()
+	_ = storagev1alpha1.AddToScheme(scheme)
+	_ = snapshotv1.AddToScheme(scheme)
+
+	vcr := &storagev1alpha1.VolumeCaptureRequest{
+		ObjectMeta: metav1.ObjectMeta{Name: "vcr-bulk-cleanup", Namespace: "default"},
+		Status: storagev1alpha1.VolumeCaptureRequestStatus{
+			DataRefs: []storagev1alpha1.VolumeDataBinding{
+				vcrDataRefBinding("uid-1", "VolumeSnapshotContent", "vsc-orphan-1", "snapshot.storage.k8s.io/v1"),
+				vcrDataRefBinding("uid-2", "VolumeSnapshotContent", "vsc-orphan-2", "snapshot.storage.k8s.io/v1"),
+			},
+		},
+	}
+	vsc1 := &snapshotv1.VolumeSnapshotContent{ObjectMeta: metav1.ObjectMeta{Name: "vsc-orphan-1"}}
+	vsc2 := &snapshotv1.VolumeSnapshotContent{ObjectMeta: metav1.ObjectMeta{Name: "vsc-orphan-2"}}
+
+	client := fake.NewClientBuilder().WithScheme(scheme).WithObjects(vcr, vsc1, vsc2).Build()
+	controller := &VolumeCaptureRequestController{Client: client}
+
+	if err := controller.cleanupArtifactsForVCR(context.Background(), vcr); err != nil {
+		t.Fatalf("cleanupArtifactsForVCR failed: %v", err)
+	}
+	for _, name := range []string{"vsc-orphan-1", "vsc-orphan-2"} {
+		if err := client.Get(context.Background(), ctrlclient.ObjectKey{Name: name}, &snapshotv1.VolumeSnapshotContent{}); err == nil {
+			t.Fatalf("expected VolumeSnapshotContent %s to be deleted", name)
+		}
+	}
+}
+
+func TestCleanupArtifactsForVCR_TwoDataRefsSkipsManaged(t *testing.T) {
+	scheme := runtime.NewScheme()
+	_ = storagev1alpha1.AddToScheme(scheme)
+	_ = snapshotv1.AddToScheme(scheme)
+
+	managedOwner := []metav1.OwnerReference{{
+		APIVersion: "test.deckhouse.io/v1alpha1",
+		Kind:       "TestSnapshotContent",
+		Name:       "content-managed",
+		UID:        "uid-managed",
+	}}
+	orphanOwner := []metav1.OwnerReference{}
+
+	vcr := &storagev1alpha1.VolumeCaptureRequest{
+		ObjectMeta: metav1.ObjectMeta{Name: "vcr-bulk-cleanup-2", Namespace: "default"},
+		Status: storagev1alpha1.VolumeCaptureRequestStatus{
+			DataRefs: []storagev1alpha1.VolumeDataBinding{
+				vcrDataRefBinding("uid-m", "VolumeSnapshotContent", "vsc-managed", "snapshot.storage.k8s.io/v1"),
+				vcrDataRefBinding("uid-o", "VolumeSnapshotContent", "vsc-orphan", "snapshot.storage.k8s.io/v1"),
+			},
+		},
+	}
+	vscManaged := &snapshotv1.VolumeSnapshotContent{ObjectMeta: metav1.ObjectMeta{Name: "vsc-managed", OwnerReferences: managedOwner}}
+	vscOrphan := &snapshotv1.VolumeSnapshotContent{ObjectMeta: metav1.ObjectMeta{Name: "vsc-orphan", OwnerReferences: orphanOwner}}
+
+	client := fake.NewClientBuilder().WithScheme(scheme).WithObjects(vcr, vscManaged, vscOrphan).Build()
+	controller := &VolumeCaptureRequestController{Client: client}
+
+	if err := controller.cleanupArtifactsForVCR(context.Background(), vcr); err != nil {
+		t.Fatalf("cleanupArtifactsForVCR failed: %v", err)
+	}
+	if err := client.Get(context.Background(), ctrlclient.ObjectKey{Name: "vsc-managed"}, &snapshotv1.VolumeSnapshotContent{}); err != nil {
+		t.Fatalf("expected managed VSC to remain: %v", err)
+	}
+	if err := client.Get(context.Background(), ctrlclient.ObjectKey{Name: "vsc-orphan"}, &snapshotv1.VolumeSnapshotContent{}); err == nil {
+		t.Fatal("expected orphan VSC to be deleted")
+	}
+}

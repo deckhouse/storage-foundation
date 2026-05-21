@@ -1,6 +1,6 @@
 # PR-F: Bulk VolumeCaptureRequest (`targets[]`, `status.dataRefs[]`)
 
-**Status:** **PR-F-1 ✅** API contract · **PR-F-2 ✅** bulk Snapshot controller semantics (Detach still single-target).  
+**Status:** **PR-F-1 ✅** API contract · **PR-F-2 ✅** bulk Snapshot controller · **PR-F-2 hardening ✅** artifact handling (Detach still single-target).  
 **Blocks:** state-snapshotter N5 **PR-4** (publish `SnapshotContent.status.dataRefs[]` from VCR).  
 **Aligned with:** state-snapshotter [`volume-node-dual-capture.md`](../../state-snapshotter/docs/state-snapshotter-rework/design/volume-node-dual-capture.md), spec §3.9, implementation-plan §2.4.5 **PR-F**.
 
@@ -23,7 +23,7 @@
 | Deliverable | State |
 |-------------|--------|
 | Per-target loop `processSnapshotTarget` | ✅ `volumecapturerequest_snapshot_bulk.go` |
-| VSC naming `snapshot-{vcrUID}-{shortTargetUID}` | ✅ |
+| VSC naming `snapshot-{vcrUID}-{sha256(targetUID)[:12]}` | ✅ |
 | ObjectKeeper `retainer-vcr-{vcrUID}` (one per VCR) | ✅ |
 | Incremental `status.dataRefs[]` upsert by `targetUID` | ✅ |
 | Aggregate `Ready`: all ready → `Completed`; pending → `TargetsPending`; any target error → whole VCR failed | ✅ |
@@ -31,7 +31,17 @@
 | Detach mode | unchanged — single target only |
 | Tests | ✅ LEVEL 2 bulk ginkgo + unit tests for naming/upsert |
 
-**Next (out of PR-F):** state-snapshotter **PR-4** publish; duplicate `targets[].uid` apiserver enforcement if needed.
+## PR-F-2 hardening — done
+
+| Topic | Behavior |
+|-------|----------|
+| **ObjectKeeper UID guard** | Before creating a VSC, re-read `retainer-vcr-{vcrUID}`; if `UID==""`, `RequeueAfter=1s` — no VSC with empty ObjectKeeper `ownerReference.uid` |
+| **VSC naming** | Deterministic `snapshot-{vcrUID}-{hash}` where `hash = sha256(targetUID)` first 12 hex chars (no suffix-collision on last-8-chars) |
+| **`dataRefs[]` merge** | `patchVCRSnapshotProgress` merges `current.Status.DataRefs` + per-reconcile updates inside `RetryOnConflict` (upsert by `targetUID`) |
+| **Snapshot failures** | Only `markFailedSnapshotForTarget(target, …)` — no `Targets[0]` wrapper |
+| **TTL cleanup** | `cleanupArtifactsForVCR` iterates **all** `status.dataRefs[]`; orphan VSC deleted, managed (`*SnapshotContent` ownerRef) retained |
+
+**Next (out of PR-F):** state-snapshotter **PR-4** publish; optional apiserver duplicate-`uid` enforcement.
 
 ## Goal
 
@@ -47,7 +57,7 @@ Extend **VolumeCaptureRequest (VCR)** so one request captures **0..N PVC targets
 | **Status** | `status.dataRefs[]` (`VolumeDataBinding`: targetUID, target, artifact), `status.conditions[]`, `status.completionTimestamp` |
 | **Conditions** | Single type `Ready` (`api/v1alpha1/conditions.go`); reasons include `Completed`, `NotFound`, `SnapshotCreationFailed`, … — **no** aggregate-pending reason yet |
 | **Snapshot flow** | `processSnapshotMode`: loop `spec.targets[]` → one VSC per target → incremental `dataRefs[]` → `Ready=True` when all targets ready |
-| **ObjectKeeper** | Name `retainer-{vscName}` (derived from VSC, not VCR); `FollowObject` → this VCR; **controller owner** of VSC |
+| **ObjectKeeper** | Name `retainer-vcr-{vcrUID}` (one per VCR); `FollowObject` → this VCR; **controller owner** of each VSC |
 | **Detach flow** | Detach flow still uses the single-target shim over `spec.targets[0]`; status is written to `dataRefs[]` with PersistentVolume artifact. Bulk Detach is out of PR-F-1/PR-F-2 unless explicitly scoped. |
 | **TTL / cleanup** | `cleanupArtifactsForVCR` iterates `status.dataRefs[].artifact` |
 | **Tests** | Ginkgo + cleanup unit tests assert `status.dataRefs[]` |
@@ -220,7 +230,7 @@ After **PR-F** is deployed:
 
 - **No** dual-write to `dataRef` / `persistentVolumeClaimRef`.
 - **No** apiserver conversion webhook unless cluster has existing VCR objects that must be migrated (if none in prod, hard cut).
-- Update all controller paths: `markFailedSnapshot`, TTL cleanup, tests — **only** `dataRefs[]`.
+- Update all controller paths: `markFailedSnapshotForTarget`, TTL cleanup, tests — **only** `dataRefs[]`.
 - Grep repo + downstream for `DataRef`, `PersistentVolumeClaimRef` on VCR.
 
 ### 6. Tests

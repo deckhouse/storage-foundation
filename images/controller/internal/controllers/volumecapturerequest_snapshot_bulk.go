@@ -18,8 +18,9 @@ package controllers
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
-	"strings"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
@@ -55,16 +56,24 @@ func objectKeeperNameForVCR(vcrUID types.UID) string {
 	return NamePrefixRetainerVCR + string(vcrUID)
 }
 
-func shortTargetUID(targetUID string) string {
-	compact := strings.ReplaceAll(targetUID, "-", "")
-	if len(compact) <= 8 {
-		return compact
-	}
-	return compact[len(compact)-8:]
+const snapshotTargetHashHexLen = 12
+
+// targetUIDHash returns a stable short hash of target UID for VSC naming (avoids suffix collisions).
+func targetUIDHash(targetUID string) string {
+	sum := sha256.Sum256([]byte(targetUID))
+	return hex.EncodeToString(sum[:])[:snapshotTargetHashHexLen]
 }
 
 func snapshotVSCName(vcrUID types.UID, targetUID string) string {
-	return fmt.Sprintf("snapshot-%s-%s", string(vcrUID), shortTargetUID(targetUID))
+	return fmt.Sprintf("snapshot-%s-%s", string(vcrUID), targetUIDHash(targetUID))
+}
+
+func mergeVolumeDataBindings(existing, updates []storagev1alpha1.VolumeDataBinding) []storagev1alpha1.VolumeDataBinding {
+	out := append([]storagev1alpha1.VolumeDataBinding(nil), existing...)
+	for _, binding := range updates {
+		out = upsertVolumeDataBinding(out, binding)
+	}
+	return out
 }
 
 func validateSnapshotTargets(targets []storagev1alpha1.VolumeCaptureTarget) error {
@@ -109,21 +118,18 @@ func upsertVolumeDataBinding(bindings []storagev1alpha1.VolumeDataBinding, bindi
 func (r *VolumeCaptureRequestController) patchVCRSnapshotProgress(
 	ctx context.Context,
 	vcr *storagev1alpha1.VolumeCaptureRequest,
-	dataRefs []storagev1alpha1.VolumeDataBinding,
+	dataRefUpdates []storagev1alpha1.VolumeDataBinding,
 	readyCount, total int,
 ) error {
 	message := fmt.Sprintf("%d of %d targets ready", readyCount, total)
 	now := metav1.Now()
-	desired := vcr.Status.DeepCopy()
-	desired.DataRefs = dataRefs
-	setSingleCondition(&desired.Conditions, metav1.Condition{
+	pendingCondition := metav1.Condition{
 		Type:               storagev1alpha1.ConditionTypeReady,
 		Status:             metav1.ConditionFalse,
 		Reason:             storagev1alpha1.ConditionReasonTargetsPending,
 		Message:            message,
 		LastTransitionTime: now,
-	})
-	desired.CompletionTimestamp = nil
+	}
 
 	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
 		current := &storagev1alpha1.VolumeCaptureRequest{}
@@ -131,11 +137,26 @@ func (r *VolumeCaptureRequestController) patchVCRSnapshotProgress(
 			return err
 		}
 		base := current.DeepCopy()
-		current.Status.DataRefs = desired.DataRefs
-		current.Status.Conditions = desired.Conditions
+		current.Status.DataRefs = mergeVolumeDataBindings(current.Status.DataRefs, dataRefUpdates)
+		setSingleCondition(&current.Status.Conditions, pendingCondition)
 		current.Status.CompletionTimestamp = nil
 		return r.Status().Patch(ctx, current, client.MergeFrom(base))
 	})
+}
+
+// requeueIfObjectKeeperUIDEmpty re-reads ObjectKeeper; returns RequeueAfter=1s when UID is not yet assigned.
+func (r *VolumeCaptureRequestController) requeueIfObjectKeeperUIDEmpty(
+	ctx context.Context,
+	retainerName string,
+) (*deckhousev1alpha1.ObjectKeeper, ctrl.Result, error) {
+	objectKeeper := &deckhousev1alpha1.ObjectKeeper{}
+	if err := r.Get(ctx, client.ObjectKey{Name: retainerName}, objectKeeper); err != nil {
+		return nil, ctrl.Result{}, err
+	}
+	if objectKeeper.UID == "" {
+		return nil, ctrl.Result{RequeueAfter: time.Second}, nil
+	}
+	return objectKeeper, ctrl.Result{}, nil
 }
 
 func (r *VolumeCaptureRequestController) processSnapshotTarget(
@@ -250,6 +271,16 @@ func (r *VolumeCaptureRequestController) processSnapshotTarget(
 	csiVSC := &snapshotv1.VolumeSnapshotContent{}
 	err := r.Get(ctx, client.ObjectKey{Name: csiVSCName}, csiVSC)
 	if apierrors.IsNotFound(err) {
+		freshKeeper, requeueResult, err := r.requeueIfObjectKeeperUIDEmpty(ctx, retainerName)
+		if err != nil {
+			return snapshotTargetResult{}, ctrl.Result{}, err
+		}
+		if requeueResult.Requeue || requeueResult.RequeueAfter > 0 {
+			l.Info("ObjectKeeper UID not assigned yet, requeue before creating VSC", "retainer", retainerName)
+			return snapshotTargetResult{pending: true}, requeueResult, nil
+		}
+		objectKeeper = freshKeeper
+
 		volumeHandle := pv.Spec.CSI.VolumeHandle
 		vscClassName := vscClass.Name
 		controllerTrue := true

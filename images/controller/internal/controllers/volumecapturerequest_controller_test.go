@@ -1021,6 +1021,45 @@ var _ = Describe("VolumeCaptureRequest Controller", func() {
 			Expect(ready.Reason).To(Equal(storagev1alpha1.ConditionReasonSnapshotCreationFailed))
 		})
 
+		It("should requeue without creating VSC when ObjectKeeper UID is empty", func() {
+			storageClass := newStorageClassWithVSC("test-sc", "test-driver", "test-vsc-class")
+			Expect(client.Create(ctx, storageClass)).To(Succeed())
+			vscClass := newVolumeSnapshotClass("test-vsc-class", "test-driver")
+			Expect(client.Create(ctx, vscClass)).To(Succeed())
+			Expect(client.Create(ctx, newCSIPV("test-pv-guard", "test-driver", "handle-guard"))).To(Succeed())
+			Expect(client.Create(ctx, newBoundPVC("pvc-guard", "default", "test-sc", "test-pv-guard"))).To(Succeed())
+
+			targetUID := "uid-pvc-guard"
+			vcr := newVCR("test-vcr-ok-uid-guard", "default", ModeSnapshot, []storagev1alpha1.VolumeCaptureTarget{
+				pvcTarget("default", "pvc-guard", targetUID),
+			})
+			Expect(client.Create(ctx, vcr)).To(Succeed())
+
+			retainerName := objectKeeperNameForVCR(vcr.UID)
+			Expect(client.Create(ctx, &deckhousev1alpha1.ObjectKeeper{
+				ObjectMeta: metav1.ObjectMeta{Name: retainerName},
+				Spec: deckhousev1alpha1.ObjectKeeperSpec{
+					Mode: "FollowObject",
+					FollowObjectRef: &deckhousev1alpha1.FollowObjectRef{
+						APIVersion: APIGroupStorageDeckhouse,
+						Kind:       KindVolumeCaptureRequest,
+						Namespace:  vcr.Namespace,
+						Name:       vcr.Name,
+						UID:        string(vcr.UID),
+					},
+				},
+			})).To(Succeed())
+
+			result, err := ctrl.Reconcile(ctx, reconcile.Request{NamespacedName: types.NamespacedName{Name: vcr.Name, Namespace: vcr.Namespace}})
+			Expect(err).ToNot(HaveOccurred())
+			Expect(result.RequeueAfter).To(Equal(time.Second))
+
+			vscName := snapshotVSCName(vcr.UID, targetUID)
+			vsc := &snapshotv1.VolumeSnapshotContent{}
+			err = client.Get(ctx, types.NamespacedName{Name: vscName}, vsc)
+			Expect(apierrors.IsNotFound(err)).To(BeTrue())
+		})
+
 		It("should be idempotent across repeated reconciles", func() {
 			vcr, vscA, vscB := setupTwoTargetFixture("test-vcr-bulk-idempotent")
 			for i := 0; i < 3; i++ {
