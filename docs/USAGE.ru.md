@@ -1,14 +1,15 @@
 ---
 title: "Модуль storage-foundation: примеры конфигурации"
+description: "Примеры создания снапшотов томов, восстановления из снапшотов и клонирования PVC с помощью модуля storage-foundation."
 ---
 
-### Использование снапшотов
+## Использование снапшотов
 
 Чтобы использовать снапшоты, укажите конкретный `VolumeSnapshotClass`.
 Чтобы получить список доступных VolumeSnapshotClass в вашем кластере, выполните:
 
 ```shell
-kubectl get volumesnapshotclasses.snapshot.storage.k8s.io
+d8 k get volumesnapshotclasses.snapshot.storage.k8s.io
 ```
 
 Затем вы сможете использовать VolumeSnapshotClass для создания снапшота из существующего тома:
@@ -26,8 +27,8 @@ spec:
 
 Спустя небольшой промежуток времени снапшот будет готов:
 
-```yaml
-$ kubectl describe volumesnapshots.snapshot.storage.k8s.io my-first-snapshot
+```console
+$ d8 k describe volumesnapshots.snapshot.storage.k8s.io my-first-snapshot
 ...
 Spec:
   Source:
@@ -60,11 +61,11 @@ spec:
       storage: 500Mi
 ```
 
-### Клонирование CSI-томов
+## Клонирование CSI-томов
 
 На основе концепции снапшотов также можно выполнить клонирование Persistent Volume, а именно, существующих PersistentVolumeClaim (PVC).
-Однако спецификация CSI не позволяет производить клонирование томов в пространстве имен и StorageClass'ах, отличных от оригинального PVC.
-(обратитесь [к документации Kubernetes](https://kubernetes.io/docs/concepts/storage/volume-pvc-datasource/), чтобы узнать больше об ограничениях).
+Однако спецификация CSI допускает ряд ограничений при клонировании томов в неймспейсах или StorageClass-ах, отличных от оригинального PVC.
+Подробнее об ограничениях см. [в документации Kubernetes](https://kubernetes.io/docs/concepts/storage/volume-pvc-datasource/).
 
 Чтобы клонировать том, создайте новый PVC и укажите исходный PVC в `dataSource`:
 
