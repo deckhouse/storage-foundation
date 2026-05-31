@@ -1,0 +1,84 @@
+# Manual RBAC manifest for VRR (VolumeRestoreRequest) executor support.
+#
+# In Deckhouse the patched external-provisioner runs as a sidecar inside the
+# CSI driver controller Pod (for example ServiceAccount "csi" in namespace
+# "d8-csi-ceph"), deployed by the CSI driver module - NOT by storage-foundation.
+# storage-foundation only builds the patched provisioner image and owns the VRR
+# lifecycle controller (images/controller). The provisioner-SA therefore needs
+# these additional permissions wherever the sidecar is deployed.
+#
+# Architectural contract (see docs/architecture/controller-pattern.md):
+#   - external-provisioner is the low-level VRR EXECUTOR only.
+#   - It watches VolumeRestoreRequest, runs CSI CreateVolume, creates PV/PVC,
+#     emits events. It MUST NOT write volumerestorerequests/status.
+#   - VRR status / lifecycle / ObjectKeeper / TTL / finalizers are owned by the
+#     storage-foundation VRR controller (d8:<chart>:controller ClusterRole).
+#
+# Usage:
+#   kubectl apply -f hack/vrr-rbac-manual.yaml
+#
+# Or bind to a specific driver SA with the helper script:
+#   ./hack/apply-vrr-rbac.sh [namespace] [serviceaccount-name]
+#
+# NOTE: A driver's existing provisioner ClusterRole usually already grants most
+# of these (PV/PVC/SC/VSC/secrets/events) for normal provisioning. The only
+# strictly net-new permission for VRR is "volumerestorerequests" get/list/watch.
+# This manifest lists the full executor set so it is self-contained; all rules
+# are additive and safe to apply.
+
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: vrr-provisioner-executor
+rules:
+  # VolumeRestoreRequest - the executor watches VRRs. NO /status: the executor
+  # never writes VRR status (owned by the storage-foundation VRR controller).
+  - apiGroups: ["storage.deckhouse.io"]
+    resources: ["volumerestorerequests"]
+    verbs: ["get", "list", "watch"]
+
+  # PersistentVolume - created from the CSI CreateVolume response.
+  - apiGroups: [""]
+    resources: ["persistentvolumes"]
+    verbs: ["get", "list", "watch", "create", "update", "patch"]
+
+  # PersistentVolumeClaim - created in the target namespace and bound to the PV.
+  - apiGroups: [""]
+    resources: ["persistentvolumeclaims"]
+    verbs: ["get", "list", "watch", "create", "update", "patch"]
+
+  # VolumeSnapshotContent - restore source (read-only).
+  - apiGroups: ["snapshot.storage.k8s.io"]
+    resources: ["volumesnapshotcontents"]
+    verbs: ["get", "list", "watch"]
+
+  # StorageClass - resolved to derive provisioner parameters / secret refs.
+  - apiGroups: ["storage.k8s.io"]
+    resources: ["storageclasses"]
+    verbs: ["get", "list", "watch"]
+
+  # Secrets - provisioner credentials referenced by StorageClass parameters
+  # (csi.storage.k8s.io/provisioner-secret-*). Only needed if drivers use them.
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["get", "list", "watch"]
+
+  # Events - emitted by the executor for restore progress/errors.
+  - apiGroups: [""]
+    resources: ["events"]
+    verbs: ["create", "patch", "update"]
+---
+# Example binding. Adjust the ServiceAccount name/namespace to the CSI driver
+# that runs the patched provisioner sidecar (here: csi-ceph).
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: vrr-provisioner-executor-d8-csi-ceph
+subjects:
+  - kind: ServiceAccount
+    name: csi
+    namespace: d8-csi-ceph
+roleRef:
+  kind: ClusterRole
+  name: vrr-provisioner-executor
+  apiGroup: rbac.authorization.k8s.io

@@ -1,0 +1,1566 @@
+diff --git a/cmd/csi-provisioner/csi-provisioner.go b/cmd/csi-provisioner/csi-provisioner.go
+index 9b96ba627..3be675dd9 100644
+--- a/cmd/csi-provisioner/csi-provisioner.go
++++ b/cmd/csi-provisioner/csi-provisioner.go
+@@ -30,6 +30,7 @@ import (
+ 	"time"
+ 
+ 	"github.com/container-storage-interface/spec/lib/go/csi"
++	storagev1alpha1 "github.com/deckhouse/storage-foundation/api/v1alpha1"
+ 	"github.com/prometheus/client_golang/prometheus"
+ 	"github.com/prometheus/client_golang/prometheus/promhttp"
+ 	flag "github.com/spf13/pflag"
+@@ -43,12 +44,17 @@ import (
+ 	"k8s.io/apimachinery/pkg/util/validation"
+ 	server "k8s.io/apiserver/pkg/server"
+ 	utilfeature "k8s.io/apiserver/pkg/util/feature"
++	"k8s.io/client-go/dynamic"
++	"k8s.io/client-go/dynamic/dynamicinformer"
+ 	"k8s.io/client-go/informers"
+ 	"k8s.io/client-go/kubernetes"
++	"k8s.io/client-go/kubernetes/scheme"
++	corev1 "k8s.io/client-go/kubernetes/typed/core/v1"
+ 	listersv1 "k8s.io/client-go/listers/core/v1"
+ 	storagelistersv1 "k8s.io/client-go/listers/storage/v1"
+ 	"k8s.io/client-go/rest"
+ 	"k8s.io/client-go/tools/clientcmd"
++	"k8s.io/client-go/tools/record"
+ 	"k8s.io/client-go/util/workqueue"
+ 	utilflag "k8s.io/component-base/cli/flag"
+ 	"k8s.io/component-base/featuregate"
+@@ -210,6 +216,12 @@ func main() {
+ 		klog.Fatalf("Failed to create snapshot client: %v", err)
+ 	}
+ 
++	// Create dynamic client for working with VRR (VolumeRestoreRequest)
++	dynamicClient, err := dynamic.NewForConfig(config)
++	if err != nil {
++		klog.Fatalf("Failed to create dynamic client: %v", err)
++	}
++
+ 	var gatewayClient gatewayclientset.Interface
+ 	if utilfeature.DefaultFeatureGate.Enabled(features.CrossNamespaceVolumeDataSource) {
+ 		// gatewayclientset.NewForConfig creates a new Clientset for GatewayClient
+@@ -396,6 +408,33 @@ func main() {
+ 	claimQueue := workqueue.NewTypedRateLimitingQueueWithConfig(claimRateLimiter, workqueue.TypedRateLimitingQueueConfig[string]{Name: "claims"})
+ 	claimInformer := factory.Core().V1().PersistentVolumeClaims().Informer()
+ 
++	// -------------------------------
++	// VolumeRestoreRequest (VRR) informer
++	vrrGVR := schema.GroupVersionResource{
++		Group:    "storage.deckhouse.io",
++		Version:  "v1alpha1",
++		Resource: "volumerestorerequests",
++	}
++	vrrInformerFactory := dynamicinformer.NewFilteredDynamicSharedInformerFactory(
++		dynamicClient,
++		ctrl.ResyncPeriodOfCsiNodeInformer,
++		v1.NamespaceAll,
++		nil,
++	)
++	vrrInformer := vrrInformerFactory.ForResource(vrrGVR).Informer()
++
++	// Register the storage-foundation API types so the event recorder can build
++	// object references for VolumeRestoreRequest events.
++	if err := storagev1alpha1.AddToScheme(scheme.Scheme); err != nil {
++		klog.Fatalf("Failed to register storage-foundation scheme: %v", err)
++	}
++
++	// Event recorder for the VRR executor (the provisioner library manages its own events separately).
++	broadcaster := record.NewBroadcaster()
++	broadcaster.StartLogging(klog.Infof)
++	broadcaster.StartRecordingToSink(&corev1.EventSinkImpl{Interface: clientset.CoreV1().Events(v1.NamespaceAll)})
++	eventRecorder := broadcaster.NewRecorder(scheme.Scheme, v1.EventSource{Component: "external-provisioner"})
++
+ 	// Setup options
+ 	provisionerOptions := []func(*controller.ProvisionController) error{
+ 		controller.LeaderElection(false), // Always disable leader election in provisioner lib. Leader election should be done here in the CSI provisioner level instead.
+@@ -635,6 +674,28 @@ func main() {
+ 		controllerCapabilities,
+ 	)
+ 
++	// VRR executor: low-level VolumeRestoreRequest restore operation executor.
++	// It only performs the restore (CSI CreateVolume -> PV/PVC -> events) for VRRs
++	// targeting this CSI driver and never writes VRR status; the storage-foundation
++	// controller owns the VRR lifecycle and status. The constructor registers the
++	// informer enqueue handlers; processing runs in workers (see vrrExecutor.Run).
++	vrrExecutor := ctrl.NewVRRExecutor(
++		clientset,
++		csi.NewControllerClient(grpcClient),
++		snapClient,
++		provisionerName,
++		identity,
++		*operationTimeout,
++		*volumeNamePrefix,
++		*volumeNameUUIDLength,
++		*defaultFSType,
++		scLister,
++		vrrInformer,
++		eventRecorder,
++		pluginCapabilities,
++		controllerCapabilities,
++	)
++
+ 	// handle SIGTERM and SIGINT by cancelling the context.
+ 	var (
+ 		terminate       func()          // called when all controllers are finished
+@@ -666,6 +727,9 @@ func main() {
+ 			// wait for sync.
+ 			factoryForNamespace.Start(ctx.Done())
+ 		}
++		// Start VRR informer factory and executor workers.
++		vrrInformerFactory.Start(ctx.Done())
++		go vrrExecutor.Run(ctx, int(*workerThreads))
+ 		cacheSyncResult := factory.WaitForCacheSync(ctx.Done())
+ 		for _, v := range cacheSyncResult {
+ 			if !v {
+diff --git a/go.mod b/go.mod
+index 9e1264600..bd9848a5e 100644
+--- a/go.mod
++++ b/go.mod
+@@ -4,6 +4,7 @@ go 1.25.7
+ 
+ require (
+ 	github.com/container-storage-interface/spec v1.12.0
++	github.com/deckhouse/storage-foundation/api v0.0.0
+ 	github.com/golang/mock v1.6.0
+ 	github.com/google/uuid v1.6.0 // indirect
+ 	github.com/kubernetes-csi/csi-lib-utils v0.23.2
+diff --git a/pkg/controller/vrr_handler.go b/pkg/controller/vrr_handler.go
+new file mode 100644
+index 000000000..6e596e468
+--- /dev/null
++++ b/pkg/controller/vrr_handler.go
+@@ -0,0 +1,730 @@
++/*
++Copyright 2025 Flant JSC
++
++Licensed under the Apache License, Version 2.0 (the "License");
++you may not use this file except in compliance with the License.
++You may obtain a copy of the License at
++
++    http://www.apache.org/licenses/LICENSE-2.0
++
++Unless required by applicable law or agreed to in writing, software
++distributed under the License is distributed on an "AS IS" BASIS,
++WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++See the License for the specific language governing permissions and
++limitations under the License.
++*/
++
++package controller
++
++import (
++	"context"
++	"fmt"
++	"maps"
++	"strings"
++	"time"
++
++	"github.com/container-storage-interface/spec/lib/go/csi"
++	"github.com/kubernetes-csi/csi-lib-utils/accessmodes"
++	"github.com/kubernetes-csi/csi-lib-utils/rpc"
++	snapclientset "github.com/kubernetes-csi/external-snapshotter/client/v8/clientset/versioned"
++	v1 "k8s.io/api/core/v1"
++	storagev1 "k8s.io/api/storage/v1"
++	apierrors "k8s.io/apimachinery/pkg/api/errors"
++	"k8s.io/apimachinery/pkg/api/meta"
++	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
++	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
++	"k8s.io/apimachinery/pkg/runtime"
++	"k8s.io/apimachinery/pkg/types"
++	"k8s.io/apimachinery/pkg/util/wait"
++	"k8s.io/client-go/kubernetes"
++	storagelistersv1 "k8s.io/client-go/listers/storage/v1"
++	"k8s.io/client-go/tools/cache"
++	"k8s.io/client-go/tools/record"
++	"k8s.io/client-go/util/workqueue"
++	"k8s.io/klog/v2"
++
++	storagev1alpha1 "github.com/deckhouse/storage-foundation/api/v1alpha1"
++)
++
++// objectKeeperRefAnnotation carries the ObjectKeeper owner reference set by the
++// storage-foundation VRR lifecycle controller. The executor only consumes it.
++const objectKeeperRefAnnotation = "storage.deckhouse.io/object-keeper-ref"
++
++// VRRExecutor is the low-level executor of VolumeRestoreRequest (VRR) restore operations.
++//
++// Architecture (symmetric to VolumeCaptureRequest):
++//   - The VRR *lifecycle controller* lives in storage-foundation. It owns the CR
++//     lifecycle, ObjectKeeper, TTL, finalizers, conditions/status and high-level
++//     orchestration. It creates the ObjectKeeper, polls the target PVC and, when the
++//     PVC is Bound, sets VRR Ready=True (or Failed on a permanent error).
++//   - This executor (running inside external-provisioner) only performs the restore
++//     operation for VRRs targeting this CSI driver:
++//     watch/enqueue VRR -> filter by CSI driver -> validate source -> CSI CreateVolume
++//     -> create PV + PVC -> emit events. It is idempotent and retry-safe.
++//
++// The executor MUST NOT write VRR status. Status ownership belongs to the
++// storage-foundation controller. Retryable errors are requeued via the workqueue;
++// they never drive the VRR into a terminal state.
++type VRRExecutor struct {
++	kubeClient             kubernetes.Interface
++	csiClient              csi.ControllerClient
++	snapshotClient         snapclientset.Interface
++	driverName             string
++	identity               string
++	timeout                time.Duration
++	volumeNamePrefix       string
++	volumeNameUUIDLength   int
++	defaultFSType          string
++	scLister               storagelistersv1.StorageClassLister
++	eventRecorder          record.EventRecorder
++	pluginCapabilities     rpc.PluginCapabilitySet
++	controllerCapabilities rpc.ControllerCapabilitySet
++
++	vrrIndexer   cache.Indexer
++	vrrHasSynced cache.InformerSynced
++	queue        workqueue.TypedRateLimitingInterface[string]
++}
++
++// NewVRRExecutor creates a new VRR executor and registers the enqueue handlers on
++// the provided VRR informer. The informer is expected to be a dynamic informer for
++// the storage.deckhouse.io/v1alpha1 volumerestorerequests resource.
++func NewVRRExecutor(
++	kubeClient kubernetes.Interface,
++	csiClient csi.ControllerClient,
++	snapshotClient snapclientset.Interface,
++	driverName string,
++	identity string,
++	timeout time.Duration,
++	volumeNamePrefix string,
++	volumeNameUUIDLength int,
++	defaultFSType string,
++	scLister storagelistersv1.StorageClassLister,
++	vrrInformer cache.SharedIndexInformer,
++	eventRecorder record.EventRecorder,
++	pluginCapabilities rpc.PluginCapabilitySet,
++	controllerCapabilities rpc.ControllerCapabilitySet,
++) *VRRExecutor {
++	e := &VRRExecutor{
++		kubeClient:             kubeClient,
++		csiClient:              csiClient,
++		snapshotClient:         snapshotClient,
++		driverName:             driverName,
++		identity:               identity,
++		timeout:                timeout,
++		volumeNamePrefix:       volumeNamePrefix,
++		volumeNameUUIDLength:   volumeNameUUIDLength,
++		defaultFSType:          defaultFSType,
++		scLister:               scLister,
++		eventRecorder:          eventRecorder,
++		pluginCapabilities:     pluginCapabilities,
++		controllerCapabilities: controllerCapabilities,
++		vrrIndexer:             vrrInformer.GetIndexer(),
++		vrrHasSynced:           vrrInformer.HasSynced,
++		queue: workqueue.NewTypedRateLimitingQueueWithConfig(
++			workqueue.DefaultTypedControllerRateLimiter[string](),
++			workqueue.TypedRateLimitingQueueConfig[string]{Name: "volumerestorerequests"},
++		),
++	}
++
++	// The informer callback only enqueues a key; the actual restore runs in workers.
++	// This keeps the informer goroutine responsive and makes processing retry-safe.
++	if _, err := vrrInformer.AddEventHandler(cache.ResourceEventHandlerFuncs{
++		AddFunc:    e.enqueue,
++		UpdateFunc: func(_, newObj any) { e.enqueue(newObj) },
++	}); err != nil {
++		klog.Errorf("Failed to register VRR event handler: %v", err)
++	}
++
++	return e
++}
++
++// Run starts the executor workers and blocks until the context is cancelled.
++func (e *VRRExecutor) Run(ctx context.Context, workers int) {
++	defer e.queue.ShutDown()
++
++	klog.Info("Starting VRR executor")
++	if !cache.WaitForCacheSync(ctx.Done(), e.vrrHasSynced) {
++		klog.Error("Failed to wait for VRR informer cache to sync")
++		return
++	}
++
++	for i := 0; i < workers; i++ {
++		go wait.UntilWithContext(ctx, e.runWorker, time.Second)
++	}
++
++	<-ctx.Done()
++	klog.Info("Stopping VRR executor")
++}
++
++func (e *VRRExecutor) enqueue(obj any) {
++	key, err := cache.MetaNamespaceKeyFunc(obj)
++	if err != nil {
++		klog.Errorf("VRR enqueue: failed to derive key: %v", err)
++		return
++	}
++	e.queue.Add(key)
++}
++
++func (e *VRRExecutor) runWorker(ctx context.Context) {
++	for e.processNextItem(ctx) {
++	}
++}
++
++func (e *VRRExecutor) processNextItem(ctx context.Context) bool {
++	key, shutdown := e.queue.Get()
++	if shutdown {
++		return false
++	}
++	defer e.queue.Done(key)
++
++	if err := e.syncHandler(ctx, key); err != nil {
++		// Retryable error: requeue with rate limiting. This never marks the VRR
++		// terminal - terminal state is decided by the storage-foundation controller.
++		klog.Errorf("VRR %s: sync failed, requeueing: %v", key, err)
++		e.queue.AddRateLimited(key)
++		return true
++	}
++
++	e.queue.Forget(key)
++	return true
++}
++
++// syncHandler reads the VRR from the informer cache and runs the executor logic.
++func (e *VRRExecutor) syncHandler(ctx context.Context, key string) error {
++	obj, exists, err := e.vrrIndexer.GetByKey(key)
++	if err != nil {
++		return err
++	}
++	if !exists {
++		// VRR deleted - nothing for the executor to do; the controller and
++		// ObjectKeeper handle cleanup of any created artifacts.
++		klog.V(4).Infof("VRR %s: not found in cache, skipping", key)
++		return nil
++	}
++
++	u, ok := obj.(*unstructured.Unstructured)
++	if !ok {
++		klog.Warningf("VRR %s: unexpected object type %T, skipping", key, obj)
++		return nil
++	}
++
++	vrr := &storagev1alpha1.VolumeRestoreRequest{}
++	if err := runtime.DefaultUnstructuredConverter.FromUnstructured(u.UnstructuredContent(), vrr); err != nil {
++		// Malformed object is not retryable.
++		klog.Errorf("VRR %s: failed to convert object: %v", key, err)
++		return nil
++	}
++
++	return e.reconcile(ctx, vrr)
++}
++
++// reconcile performs the executor-only restore logic for a single VRR.
++//
++// It returns an error only for retryable conditions (so the workqueue retries).
++// Permanent/invalid requests are reported via events and return nil; the
++// storage-foundation controller is responsible for marking such VRRs terminal.
++func (e *VRRExecutor) reconcile(ctx context.Context, vrr *storagev1alpha1.VolumeRestoreRequest) error {
++	// Minimal validation.
++	if vrr.Spec.StorageClassName == "" {
++		e.eventRecorder.Eventf(vrr, v1.EventTypeWarning, "VRRInvalidSpec",
++			"StorageClassName is required but not specified")
++		klog.Warningf("VRR %s/%s has empty StorageClassName, ignoring", vrr.Namespace, vrr.Name)
++		return nil
++	}
++
++	// CRITICAL SECURITY INVARIANT: the driver filter MUST be the first executable
++	// step after minimal validation. In multi-CSI clusters this prevents this
++	// provisioner from acting on PVCs/PVs belonging to other CSI drivers.
++	sc, err := e.scLister.Get(vrr.Spec.StorageClassName)
++	if err != nil {
++		if apierrors.IsNotFound(err) {
++			// Not our StorageClass (or not present yet): ignore silently.
++			return nil
++		}
++		return err
++	}
++	if sc.Provisioner != e.driverName {
++		// Not our driver: ignore silently.
++		return nil
++	}
++
++	// Skip VRRs already driven to a terminal state by the controller (read-only).
++	if isTerminalVRR(vrr.Status.Conditions) {
++		klog.V(4).Infof("VRR %s/%s is terminal, skipping", vrr.Namespace, vrr.Name)
++		return nil
++	}
++
++	// Deterministic target volume (PV) name derived from the VRR UID.
++	pvName, err := makeVolumeName(e.volumeNamePrefix, string(vrr.UID), e.volumeNameUUIDLength)
++	if err != nil {
++		return fmt.Errorf("failed to generate volume name: %w", err)
++	}
++
++	// Idempotency / conflict detection on the target PVC.
++	existingPVC, err := e.kubeClient.CoreV1().PersistentVolumeClaims(vrr.Spec.TargetNamespace).Get(ctx, vrr.Spec.TargetPVCName, metav1.GetOptions{})
++	switch {
++	case err == nil:
++		if existingPVC.Spec.VolumeName != "" && existingPVC.Spec.VolumeName != pvName {
++			// The target PVC is already bound to a different volume - likely a
++			// conflict with another owner. Report and let the controller decide.
++			e.eventRecorder.Eventf(vrr, v1.EventTypeWarning, "VRRTargetPVCConflict",
++				"Target PVC %s/%s is bound to volume %q, expected %q",
++				vrr.Spec.TargetNamespace, vrr.Spec.TargetPVCName, existingPVC.Spec.VolumeName, pvName)
++			klog.Warningf("VRR %s/%s: target PVC conflict (bound to %q, expected %q)",
++				vrr.Namespace, vrr.Name, existingPVC.Spec.VolumeName, pvName)
++			return nil
++		}
++		// Target PVC already created by a previous run: executor is done. The
++		// controller observes the PVC and finalizes the VRR status.
++		klog.V(4).Infof("VRR %s/%s: target PVC %s/%s already exists, nothing to do",
++			vrr.Namespace, vrr.Name, vrr.Spec.TargetNamespace, vrr.Spec.TargetPVCName)
++		return nil
++	case !apierrors.IsNotFound(err):
++		return fmt.Errorf("failed to check target PVC %s/%s: %w", vrr.Spec.TargetNamespace, vrr.Spec.TargetPVCName, err)
++	}
++
++	switch vrr.Spec.SourceRef.Kind {
++	case "VolumeSnapshotContent":
++		return e.restoreFromVSC(ctx, vrr, sc, pvName)
++	case "PersistentVolume":
++		return e.restoreFromPV(ctx, vrr, sc, pvName)
++	default:
++		e.eventRecorder.Eventf(vrr, v1.EventTypeWarning, "VRRInvalidSource",
++			"Unsupported source kind: %s", vrr.Spec.SourceRef.Kind)
++		klog.Warningf("VRR %s/%s has unsupported source kind %q, ignoring", vrr.Namespace, vrr.Name, vrr.Spec.SourceRef.Kind)
++		return nil
++	}
++}
++
++// restoreFromVSC restores a volume from a VolumeSnapshotContent and creates PV + PVC.
++//
++// It does not wait for the PVC to become Bound and does not update VRR status;
++// those are the responsibility of the storage-foundation controller.
++func (e *VRRExecutor) restoreFromVSC(ctx context.Context, vrr *storagev1alpha1.VolumeRestoreRequest, sc *storagev1.StorageClass, pvName string) error {
++	vsc, err := e.snapshotClient.SnapshotV1().VolumeSnapshotContents().Get(ctx, vrr.Spec.SourceRef.Name, metav1.GetOptions{})
++	if err != nil {
++		if apierrors.IsNotFound(err) {
++			// Source may appear later; retry.
++			return fmt.Errorf("VolumeSnapshotContent %s not found", vrr.Spec.SourceRef.Name)
++		}
++		return fmt.Errorf("failed to get VolumeSnapshotContent %s: %w", vrr.Spec.SourceRef.Name, err)
++	}
++
++	if vsc.ObjectMeta.DeletionTimestamp != nil {
++		return fmt.Errorf("VolumeSnapshotContent %s is currently being deleted", vsc.Name)
++	}
++
++	if vsc.Status == nil || vsc.Status.ReadyToUse == nil || !*vsc.Status.ReadyToUse {
++		if vsc.Status != nil && vsc.Status.Error != nil && vsc.Status.Error.Message != nil {
++			return fmt.Errorf("VolumeSnapshotContent %s has error: %s", vsc.Name, *vsc.Status.Error.Message)
++		}
++		// Not ready yet: retryable, not terminal.
++		return fmt.Errorf("VolumeSnapshotContent %s is not ReadyToUse yet", vsc.Name)
++	}
++
++	// CONTRACT: prefer Status.SnapshotHandle; fall back to Spec.Source.SnapshotHandle.
++	var snapshotHandle string
++	switch {
++	case vsc.Status != nil && vsc.Status.SnapshotHandle != nil:
++		snapshotHandle = *vsc.Status.SnapshotHandle
++	case vsc.Spec.Source.SnapshotHandle != nil:
++		snapshotHandle = *vsc.Spec.Source.SnapshotHandle
++	default:
++		return fmt.Errorf("snapshot handle not available in VolumeSnapshotContent %s", vsc.Name)
++	}
++
++	klog.V(2).Infof("restoreFromVSC: VRR %s/%s, VSC %s, snapshotHandle %s", vrr.Namespace, vrr.Name, vsc.Name, snapshotHandle)
++
++	volumeCaps := []*csi.VolumeCapability{
++		{
++			AccessType: &csi.VolumeCapability_Mount{
++				Mount: &csi.VolumeCapability_MountVolume{
++					FsType: e.defaultFSType,
++				},
++			},
++			AccessMode: &csi.VolumeCapability_AccessMode{
++				Mode: csi.VolumeCapability_AccessMode_SINGLE_NODE_WRITER,
++			},
++		},
++	}
++
++	capacityBytes := int64(1024 * 1024 * 1024) // 1Gi default
++	if vsc.Status != nil && vsc.Status.RestoreSize != nil {
++		capacityBytes = *vsc.Status.RestoreSize
++	}
++
++	contentSource := &csi.VolumeContentSource{
++		Type: &csi.VolumeContentSource_Snapshot{
++			Snapshot: &csi.VolumeContentSource_SnapshotSource{
++				SnapshotId: snapshotHandle,
++			},
++		},
++	}
++
++	pv, err := e.ensurePV(ctx, vrr, sc, pvName, volumeCaps, capacityBytes, contentSource, e.defaultFSType,
++		fmt.Sprintf("Successfully created PV %s from snapshot", pvName))
++	if err != nil {
++		return err
++	}
++
++	return e.createPVCFromVRR(ctx, vrr, pv)
++}
++
++// restoreFromPV restores a volume by cloning an existing PersistentVolume and creates PV + PVC.
++func (e *VRRExecutor) restoreFromPV(ctx context.Context, vrr *storagev1alpha1.VolumeRestoreRequest, sc *storagev1.StorageClass, pvName string) error {
++	sourcePV, err := e.kubeClient.CoreV1().PersistentVolumes().Get(ctx, vrr.Spec.SourceRef.Name, metav1.GetOptions{})
++	if err != nil {
++		if apierrors.IsNotFound(err) {
++			return fmt.Errorf("PersistentVolume %s not found", vrr.Spec.SourceRef.Name)
++		}
++		return fmt.Errorf("failed to get PersistentVolume %s: %w", vrr.Spec.SourceRef.Name, err)
++	}
++
++	if sourcePV.ObjectMeta.DeletionTimestamp != nil {
++		return fmt.Errorf("PersistentVolume %s is currently being deleted", sourcePV.Name)
++	}
++	if sourcePV.Spec.CSI == nil {
++		return fmt.Errorf("PersistentVolume %s does not have CSI source", sourcePV.Name)
++	}
++	if sourcePV.Spec.CSI.Driver != e.driverName {
++		return fmt.Errorf("PersistentVolume %s is handled by a different CSI driver (%s), expected %s", sourcePV.Name, sourcePV.Spec.CSI.Driver, e.driverName)
++	}
++
++	volumeHandle := sourcePV.Spec.CSI.VolumeHandle
++	if volumeHandle == "" {
++		return fmt.Errorf("PersistentVolume %s has empty VolumeHandle", sourcePV.Name)
++	}
++
++	klog.V(2).Infof("restoreFromPV: VRR %s/%s, source PV %s, volumeHandle %s", vrr.Namespace, vrr.Name, sourcePV.Name, volumeHandle)
++
++	volumeCaps, err := e.getVolumeCapabilitiesFromPV(sourcePV, sc)
++	if err != nil {
++		return fmt.Errorf("failed to get volume capabilities from PV: %w", err)
++	}
++
++	capacityBytes := int64(1024 * 1024 * 1024) // 1Gi default
++	if capacity, ok := sourcePV.Spec.Capacity[v1.ResourceStorage]; ok {
++		capacityBytes = capacity.Value()
++	}
++
++	contentSource := &csi.VolumeContentSource{
++		Type: &csi.VolumeContentSource_Volume{
++			Volume: &csi.VolumeContentSource_VolumeSource{
++				VolumeId: volumeHandle,
++			},
++		},
++	}
++
++	pv, err := e.ensurePV(ctx, vrr, sc, pvName, volumeCaps, capacityBytes, contentSource, e.getFSTypeFromPV(sourcePV),
++		fmt.Sprintf("Successfully created PV %s from PersistentVolume %s", pvName, sourcePV.Name))
++	if err != nil {
++		return err
++	}
++
++	return e.createPVCFromVRR(ctx, vrr, pv)
++}
++
++// ensurePV idempotently provisions the target PV: it returns an existing PV if one
++// is already present, otherwise it calls CSI CreateVolume and creates the PV object.
++func (e *VRRExecutor) ensurePV(
++	ctx context.Context,
++	vrr *storagev1alpha1.VolumeRestoreRequest,
++	sc *storagev1.StorageClass,
++	pvName string,
++	volumeCaps []*csi.VolumeCapability,
++	capacityBytes int64,
++	contentSource *csi.VolumeContentSource,
++	fsType string,
++	pvCreatedMessage string,
++) (*v1.PersistentVolume, error) {
++	// Idempotency: a previous attempt may have created the PV but not the PVC.
++	if existingPV, err := e.kubeClient.CoreV1().PersistentVolumes().Get(ctx, pvName, metav1.GetOptions{}); err == nil {
++		klog.V(2).Infof("ensurePV: PV %s already exists, reusing it for VRR %s/%s", pvName, vrr.Namespace, vrr.Name)
++		return existingPV, nil
++	} else if !apierrors.IsNotFound(err) {
++		return nil, fmt.Errorf("failed to check if PV %s exists: %w", pvName, err)
++	}
++
++	// Resolve provisioner secret credentials from the StorageClass parameters.
++	// The PVC does not exist yet, so secret templates can only reference the PV name.
++	var provisionerCredentials map[string]string
++	provisionerSecretRef, err := getSecretReference(provisionerSecretParams, sc.Parameters, pvName, nil)
++	if err != nil {
++		// Missing/invalid secret reference is acceptable - some drivers need no secrets.
++		klog.V(5).Infof("ensurePV: no secret reference in StorageClass for VRR %s/%s: %v", vrr.Namespace, vrr.Name, err)
++	} else if provisionerSecretRef != nil {
++		provisionerCredentials, err = getCredentials(ctx, e.kubeClient, provisionerSecretRef)
++		if err != nil {
++			return nil, fmt.Errorf("failed to get provisioner credentials: %w", err)
++		}
++	}
++
++	req := csi.CreateVolumeRequest{
++		Name:                pvName,
++		Parameters:          sc.Parameters,
++		VolumeCapabilities:  volumeCaps,
++		CapacityRange:       &csi.CapacityRange{RequiredBytes: capacityBytes},
++		VolumeContentSource: contentSource,
++		Secrets:             provisionerCredentials,
++	}
++
++	createCtx, cancel := context.WithTimeout(ctx, e.timeout)
++	defer cancel()
++
++	klog.V(2).Infof("ensurePV: calling CSI CreateVolume for VRR %s/%s, volumeName %s", vrr.Namespace, vrr.Name, pvName)
++	rep, err := e.csiClient.CreateVolume(createCtx, &req)
++	if err != nil {
++		return nil, fmt.Errorf("CSI CreateVolume failed: %w", err)
++	}
++	if rep.Volume == nil {
++		return nil, fmt.Errorf("CSI CreateVolume returned nil volume")
++	}
++	klog.V(2).Infof("ensurePV: CSI CreateVolume succeeded for VRR %s/%s, volumeHandle %s", vrr.Namespace, vrr.Name, rep.Volume.VolumeId)
++
++	pv, err := createPVFromCSIResponse(rep.Volume, sc, pvName, e.driverName, e.identity, volumeCaps, fsType)
++	if err != nil {
++		return nil, fmt.Errorf("failed to build PV object from CSI response: %w", err)
++	}
++
++	createdPV, err := e.kubeClient.CoreV1().PersistentVolumes().Create(ctx, pv, metav1.CreateOptions{})
++	if err != nil {
++		if apierrors.IsAlreadyExists(err) {
++			// Race: PV created concurrently between Get and Create.
++			existingPV, getErr := e.kubeClient.CoreV1().PersistentVolumes().Get(ctx, pvName, metav1.GetOptions{})
++			if getErr != nil {
++				return nil, fmt.Errorf("PV %s already exists but failed to get it: %w", pvName, getErr)
++			}
++			return existingPV, nil
++		}
++		return nil, fmt.Errorf("failed to create PV %s: %w", pvName, err)
++	}
++
++	klog.V(2).Infof("ensurePV: created PV %s for VRR %s/%s", pvName, vrr.Namespace, vrr.Name)
++	e.eventRecorder.Eventf(vrr, v1.EventTypeNormal, "VRRPVCreated", "%s", pvCreatedMessage)
++	return createdPV, nil
++}
++
++// createPVCFromVRR creates a PersistentVolumeClaim bound to the restored PV.
++//
++// CONTRACT:
++//   - PVC MUST have VolumeName set explicitly (no scheduler binding).
++//   - PVC MUST NOT have dataSource or dataSourceRef (restore without VolumeSnapshot API).
++//   - PVC MAY have an OwnerReference to the ObjectKeeper (from a VRR annotation set by
++//     the storage-foundation controller).
++//   - AlreadyExists is treated as idempotent success.
++func (e *VRRExecutor) createPVCFromVRR(ctx context.Context, vrr *storagev1alpha1.VolumeRestoreRequest, pv *v1.PersistentVolume) error {
++	storageClassName := vrr.Spec.StorageClassName
++	pvc := &v1.PersistentVolumeClaim{
++		ObjectMeta: metav1.ObjectMeta{
++			Name:      vrr.Spec.TargetPVCName,
++			Namespace: vrr.Spec.TargetNamespace,
++		},
++		Spec: v1.PersistentVolumeClaimSpec{
++			StorageClassName: &storageClassName,
++			VolumeName:       pv.Name, // explicit binding, no scheduler
++			AccessModes:      pv.Spec.AccessModes,
++			VolumeMode:       pv.Spec.VolumeMode,
++			Resources: v1.VolumeResourceRequirements{
++				Requests: v1.ResourceList{
++					v1.ResourceStorage: pv.Spec.Capacity[v1.ResourceStorage],
++				},
++			},
++		},
++	}
++
++	// Set the ObjectKeeper OwnerReference if present. The executor trusts the VRR
++	// controller and does not look ObjectKeeper up itself.
++	if refStr, ok := vrr.Annotations[objectKeeperRefAnnotation]; ok && refStr != "" {
++		ownerRef, err := parseObjectKeeperRef(refStr)
++		if err != nil {
++			klog.Warningf("VRR %s/%s: failed to parse ObjectKeeper ref annotation: %v", vrr.Namespace, vrr.Name, err)
++		} else {
++			pvc.OwnerReferences = []metav1.OwnerReference{ownerRef}
++		}
++	}
++
++	if _, err := e.kubeClient.CoreV1().PersistentVolumeClaims(vrr.Spec.TargetNamespace).Create(ctx, pvc, metav1.CreateOptions{}); err != nil {
++		if apierrors.IsAlreadyExists(err) {
++			klog.V(2).Infof("createPVCFromVRR: PVC %s/%s already exists, idempotent success", vrr.Spec.TargetNamespace, vrr.Spec.TargetPVCName)
++			return nil
++		}
++		return fmt.Errorf("failed to create PVC %s/%s: %w", vrr.Spec.TargetNamespace, vrr.Spec.TargetPVCName, err)
++	}
++
++	klog.V(2).Infof("createPVCFromVRR: created PVC %s/%s for VRR %s/%s", vrr.Spec.TargetNamespace, vrr.Spec.TargetPVCName, vrr.Namespace, vrr.Name)
++	e.eventRecorder.Eventf(vrr, v1.EventTypeNormal, "VRRPVCCreated", "Successfully created PVC %s/%s", vrr.Spec.TargetNamespace, vrr.Spec.TargetPVCName)
++	return nil
++}
++
++// parseObjectKeeperRef parses an ObjectKeeper owner reference from an annotation.
++//
++// Expected format: "apiVersion|kind|name|uid"
++// Example: "deckhouse.io/v1alpha1|ObjectKeeper|ret-pvc-abc123|def456"
++//
++// The executor does NOT validate existence - it trusts the VRR controller.
++func parseObjectKeeperRef(refStr string) (metav1.OwnerReference, error) {
++	parts := strings.Split(refStr, "|")
++	if len(parts) != 4 {
++		return metav1.OwnerReference{}, fmt.Errorf("invalid ObjectKeeper ref format: expected 'apiVersion|kind|name|uid', got %d parts", len(parts))
++	}
++
++	apiVersion, kind, name, uid := parts[0], parts[1], parts[2], parts[3]
++	if apiVersion == "" || kind == "" || name == "" || uid == "" {
++		return metav1.OwnerReference{}, fmt.Errorf("invalid ObjectKeeper ref: empty fields not allowed")
++	}
++
++	controller := true
++	return metav1.OwnerReference{
++		APIVersion: apiVersion,
++		Kind:       kind,
++		Name:       name,
++		UID:        types.UID(uid),
++		Controller: &controller,
++	}, nil
++}
++
++// createPVFromCSIResponse builds a PersistentVolume object from a CSI CreateVolume response.
++func createPVFromCSIResponse(
++	volume *csi.Volume,
++	sc *storagev1.StorageClass,
++	pvName string,
++	driverName string,
++	identity string,
++	volumeCaps []*csi.VolumeCapability,
++	fsType string,
++) (*v1.PersistentVolume, error) {
++	respCap := volume.GetCapacityBytes()
++	if respCap == 0 {
++		// CSI spec: capacity = 0 means unknown, use default.
++		respCap = 1024 * 1024 * 1024 // 1Gi default
++	}
++
++	volumeAttributes := map[string]string{
++		"storage.kubernetes.io/csiProvisionerIdentity": identity,
++	}
++	if volume.VolumeContext != nil {
++		maps.Copy(volumeAttributes, volume.VolumeContext)
++	}
++
++	accessModes := []v1.PersistentVolumeAccessMode{v1.ReadWriteOnce}
++	if len(volumeCaps) > 0 {
++		switch volumeCaps[0].GetAccessMode().GetMode() {
++		case csi.VolumeCapability_AccessMode_SINGLE_NODE_WRITER:
++			accessModes = []v1.PersistentVolumeAccessMode{v1.ReadWriteOnce}
++		case csi.VolumeCapability_AccessMode_MULTI_NODE_MULTI_WRITER:
++			accessModes = []v1.PersistentVolumeAccessMode{v1.ReadWriteMany}
++		case csi.VolumeCapability_AccessMode_MULTI_NODE_READER_ONLY:
++			accessModes = []v1.PersistentVolumeAccessMode{v1.ReadOnlyMany}
++		}
++	}
++
++	var volumeMode *v1.PersistentVolumeMode
++	if len(volumeCaps) > 0 {
++		if volumeCaps[0].GetBlock() != nil {
++			blockMode := v1.PersistentVolumeBlock
++			volumeMode = &blockMode
++		} else {
++			fsMode := v1.PersistentVolumeFilesystem
++			volumeMode = &fsMode
++		}
++	}
++
++	pvReadOnly := false
++	if len(volumeCaps) == 1 && volumeCaps[0].GetAccessMode().GetMode() == csi.VolumeCapability_AccessMode_MULTI_NODE_READER_ONLY {
++		pvReadOnly = true
++	}
++
++	csiPVSource := &v1.CSIPersistentVolumeSource{
++		Driver:           driverName,
++		VolumeHandle:     volume.VolumeId,
++		VolumeAttributes: volumeAttributes,
++		ReadOnly:         pvReadOnly,
++	}
++	if volumeMode == nil || *volumeMode == v1.PersistentVolumeFilesystem {
++		csiPVSource.FSType = fsType
++	}
++
++	pv := &v1.PersistentVolume{
++		ObjectMeta: metav1.ObjectMeta{
++			Name: pvName,
++		},
++		Spec: v1.PersistentVolumeSpec{
++			AccessModes:  accessModes,
++			MountOptions: sc.MountOptions,
++			Capacity: v1.ResourceList{
++				v1.ResourceStorage: bytesToQuantity(respCap),
++			},
++			PersistentVolumeSource: v1.PersistentVolumeSource{
++				CSI: csiPVSource,
++			},
++			VolumeMode: volumeMode,
++		},
++	}
++
++	// No deletion secrets for VRR-provisioned volumes.
++	metav1.SetMetaDataAnnotation(&pv.ObjectMeta, "volume.kubernetes.io/provisioner-deletion-secret-name", "")
++	metav1.SetMetaDataAnnotation(&pv.ObjectMeta, "volume.kubernetes.io/provisioner-deletion-secret-namespace", "")
++
++	if sc.ReclaimPolicy != nil {
++		pv.Spec.PersistentVolumeReclaimPolicy = *sc.ReclaimPolicy
++	}
++
++	if len(volume.AccessibleTopology) > 0 {
++		pv.Spec.NodeAffinity = GenerateVolumeNodeAffinity(volume.AccessibleTopology)
++	}
++
++	return pv, nil
++}
++
++// getVolumeCapabilitiesFromPV converts PV AccessModes and VolumeMode to CSI VolumeCapabilities.
++func (e *VRRExecutor) getVolumeCapabilitiesFromPV(pv *v1.PersistentVolume, sc *storagev1.StorageClass) ([]*csi.VolumeCapability, error) {
++	supportsSingleNodeMultiWriter := e.controllerCapabilities[csi.ControllerServiceCapability_RPC_SINGLE_NODE_MULTI_WRITER]
++
++	accessModes := pv.Spec.AccessModes
++	if len(accessModes) == 0 {
++		accessModes = []v1.PersistentVolumeAccessMode{v1.ReadWriteOnce}
++	}
++
++	csiAccessMode, err := accessmodes.ToCSIAccessMode(accessModes, supportsSingleNodeMultiWriter)
++	if err != nil {
++		return nil, fmt.Errorf("failed to convert AccessModes to CSI access mode: %w", err)
++	}
++
++	isBlock := pv.Spec.VolumeMode != nil && *pv.Spec.VolumeMode == v1.PersistentVolumeBlock
++	if isBlock {
++		return []*csi.VolumeCapability{
++			{
++				AccessType: getAccessTypeBlock(),
++				AccessMode: &csi.VolumeCapability_AccessMode{Mode: csiAccessMode},
++			},
++		}, nil
++	}
++
++	fsType := e.getFSTypeFromPV(pv)
++	var mountFlags []string
++	if sc != nil {
++		mountFlags = sc.MountOptions
++	}
++
++	return []*csi.VolumeCapability{
++		{
++			AccessType: getAccessTypeMount(fsType, mountFlags),
++			AccessMode: &csi.VolumeCapability_AccessMode{Mode: csiAccessMode},
++		},
++	}, nil
++}
++
++// getFSTypeFromPV extracts FSType from a PV, falling back to the executor default.
++func (e *VRRExecutor) getFSTypeFromPV(pv *v1.PersistentVolume) string {
++	if pv.Spec.CSI != nil && pv.Spec.CSI.FSType != "" {
++		return pv.Spec.CSI.FSType
++	}
++	return e.defaultFSType
++}
++
++// isTerminalVRR reports whether the VRR is in a terminal state (Ready=True or Ready=False).
++// This is a read-only optimization; the executor never writes VRR status.
++func isTerminalVRR(conditions []metav1.Condition) bool {
++	cond := meta.FindStatusCondition(conditions, storagev1alpha1.ConditionTypeReady)
++	return cond != nil && (cond.Status == metav1.ConditionTrue || cond.Status == metav1.ConditionFalse)
++}
+diff --git a/vendor/github.com/deckhouse/storage-foundation/api/v1alpha1/conditions.go b/vendor/github.com/deckhouse/storage-foundation/api/v1alpha1/conditions.go
+new file mode 100644
+index 000000000..6a5f51f28
+--- /dev/null
++++ b/vendor/github.com/deckhouse/storage-foundation/api/v1alpha1/conditions.go
+@@ -0,0 +1,51 @@
++/*
++Copyright 2025 Flant JSC
++
++Licensed under the Apache License, Version 2.0 (the "License");
++you may not use this file except in compliance with the License.
++You may obtain a copy of the License at
++
++    http://www.apache.org/licenses/LICENSE-2.0
++
++Unless required by applicable law or agreed to in writing, software
++distributed under the License is distributed on an "AS IS" BASIS,
++WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++See the License for the specific language governing permissions and
++limitations under the License.
++*/
++
++package v1alpha1
++
++// Condition type constants
++// Only Ready condition is used - it is set to True on success or False on final failure
++const (
++	ConditionTypeReady = "Ready"
++)
++
++// Condition reason constants
++const (
++	// ConditionReasonCompleted indicates successful completion
++	ConditionReasonCompleted = "Completed"
++	// ConditionReasonInvalidMode indicates invalid mode was specified
++	ConditionReasonInvalidMode = "InvalidMode"
++	// ConditionReasonIncompatible indicates incompatible configuration (e.g., WFFC or cross-SC restore)
++	ConditionReasonIncompatible = "Incompatible"
++	// ConditionReasonInvalidTTL indicates invalid TTL annotation format
++	ConditionReasonInvalidTTL = "InvalidTTL"
++	// ConditionReasonInternalError indicates internal error
++	ConditionReasonInternalError = "InternalError"
++	// ConditionReasonNotFound indicates resource not found
++	ConditionReasonNotFound = "NotFound"
++	// ConditionReasonRBACDenied indicates RBAC permission denied
++	ConditionReasonRBACDenied = "RBACDenied"
++	// ConditionReasonInvalidSource indicates invalid source specified
++	ConditionReasonInvalidSource = "InvalidSource"
++	// ConditionReasonPVBound indicates PV is bound and cannot be detached
++	ConditionReasonPVBound = "PVBound"
++	// ConditionReasonSnapshotCreationFailed indicates CSI snapshot creation failed
++	ConditionReasonSnapshotCreationFailed = "SnapshotCreationFailed"
++	// ConditionReasonTargetsPending indicates one or more capture targets are not ready yet
++	ConditionReasonTargetsPending = "TargetsPending"
++	// ConditionReasonRestoreFailed indicates restore operation failed
++	ConditionReasonRestoreFailed = "RestoreFailed"
++)
+diff --git a/vendor/github.com/deckhouse/storage-foundation/api/v1alpha1/doc.go b/vendor/github.com/deckhouse/storage-foundation/api/v1alpha1/doc.go
+new file mode 100644
+index 000000000..1d11ccbe0
+--- /dev/null
++++ b/vendor/github.com/deckhouse/storage-foundation/api/v1alpha1/doc.go
+@@ -0,0 +1,19 @@
++/*
++Copyright 2025 Flant JSC
++
++Licensed under the Apache License, Version 2.0 (the "License");
++you may not use this file except in compliance with the License.
++You may obtain a copy of the License at
++
++    http://www.apache.org/licenses/LICENSE-2.0
++
++Unless required by applicable law or agreed to in writing, software
++distributed under the License is distributed on an "AS IS" BASIS,
++WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++See the License for the specific language governing permissions and
++limitations under the License.
++*/
++
++// Package v1alpha1 contains API Schema definitions for the storage.deckhouse.io v1alpha1 API group.
++// +groupName=storage.deckhouse.io
++package v1alpha1
+diff --git a/vendor/github.com/deckhouse/storage-foundation/api/v1alpha1/objectreference_types.go b/vendor/github.com/deckhouse/storage-foundation/api/v1alpha1/objectreference_types.go
+new file mode 100644
+index 000000000..27f010c5e
+--- /dev/null
++++ b/vendor/github.com/deckhouse/storage-foundation/api/v1alpha1/objectreference_types.go
+@@ -0,0 +1,28 @@
++/*
++Copyright 2025 Flant JSC
++
++Licensed under the Apache License, Version 2.0 (the "License");
++you may not use this file except in compliance with the License.
++You may obtain a copy of the License at
++
++    http://www.apache.org/licenses/LICENSE-2.0
++
++Unless required by applicable law or agreed to in writing, software
++distributed under the License is distributed on an "AS IS" BASIS,
++WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++See the License for the specific language governing permissions and
++limitations under the License.
++*/
++
++package v1alpha1
++
++// +k8s:deepcopy-gen=true
++// ObjectReference references a Kubernetes object
++type ObjectReference struct {
++	// Name is the name of the referenced object
++	Name string `json:"name"`
++	// Namespace is the namespace of the referenced object (optional)
++	Namespace string `json:"namespace,omitempty"`
++	// Kind is the kind of the referenced object (e.g., "VolumeSnapshotContent", "PersistentVolume")
++	Kind string `json:"kind,omitempty"`
++}
+diff --git a/vendor/github.com/deckhouse/storage-foundation/api/v1alpha1/register.go b/vendor/github.com/deckhouse/storage-foundation/api/v1alpha1/register.go
+new file mode 100644
+index 000000000..f4490804e
+--- /dev/null
++++ b/vendor/github.com/deckhouse/storage-foundation/api/v1alpha1/register.go
+@@ -0,0 +1,47 @@
++/*
++Copyright 2025 Flant JSC
++
++Licensed under the Apache License, Version 2.0 (the "License");
++you may not use this file except in compliance with the License.
++You may obtain a copy of the License at
++
++    http://www.apache.org/licenses/LICENSE-2.0
++
++Unless required by applicable law or agreed to in writing, software
++distributed under the License is distributed on an "AS IS" BASIS,
++WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++See the License for the specific language governing permissions and
++limitations under the License.
++*/
++
++package v1alpha1
++
++import (
++	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
++	"k8s.io/apimachinery/pkg/runtime"
++	"k8s.io/apimachinery/pkg/runtime/schema"
++)
++
++const (
++	APIGroup   = "storage.deckhouse.io"
++	APIVersion = "v1alpha1"
++)
++
++var (
++	// GroupVersion is group version used to register these objects
++	GroupVersion  = schema.GroupVersion{Group: APIGroup, Version: APIVersion}
++	SchemeBuilder = runtime.NewSchemeBuilder(AddKnownTypes)
++	AddToScheme   = SchemeBuilder.AddToScheme
++)
++
++// AddKnownTypes adds the set of types defined in this package to the given scheme.
++func AddKnownTypes(scheme *runtime.Scheme) error {
++	scheme.AddKnownTypes(GroupVersion,
++		&VolumeCaptureRequest{},
++		&VolumeCaptureRequestList{},
++		&VolumeRestoreRequest{},
++		&VolumeRestoreRequestList{},
++	)
++	metav1.AddToGroupVersion(scheme, GroupVersion)
++	return nil
++}
+diff --git a/vendor/github.com/deckhouse/storage-foundation/api/v1alpha1/volumecapturerequest_types.go b/vendor/github.com/deckhouse/storage-foundation/api/v1alpha1/volumecapturerequest_types.go
+new file mode 100644
+index 000000000..5b81d70e4
+--- /dev/null
++++ b/vendor/github.com/deckhouse/storage-foundation/api/v1alpha1/volumecapturerequest_types.go
+@@ -0,0 +1,129 @@
++/*
++Copyright 2025 Flant JSC
++
++Licensed under the Apache License, Version 2.0 (the "License");
++you may not use this file except in compliance with the License.
++You may obtain a copy of the License at
++
++    http://www.apache.org/licenses/LICENSE-2.0
++
++Unless required by applicable law or agreed to in writing, software
++distributed under the License is distributed on an "AS IS" BASIS,
++WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++See the License for the specific language governing permissions and
++limitations under the License.
++*/
++
++package v1alpha1
++
++import (
++	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
++)
++
++const (
++	VolumeCaptureModeSnapshot = "Snapshot"
++	VolumeCaptureModeDetach   = "Detach"
++)
++
++// +k8s:deepcopy-gen=true
++// VolumeCaptureTarget identifies a PVC (or future volume target) to capture.
++type VolumeCaptureTarget struct {
++	// UID is the map key for spec.targets (PersistentVolumeClaim UID).
++	// +kubebuilder:validation:Required
++	// +kubebuilder:validation:MinLength=1
++	UID string `json:"uid"`
++
++	// +kubebuilder:validation:Required
++	// +kubebuilder:validation:MinLength=1
++	APIVersion string `json:"apiVersion"`
++	// +kubebuilder:validation:Required
++	// +kubebuilder:validation:MinLength=1
++	Kind string `json:"kind"`
++	// +kubebuilder:validation:Required
++	// +kubebuilder:validation:MinLength=1
++	Name string `json:"name"`
++	// +kubebuilder:validation:Required
++	// +kubebuilder:validation:MinLength=1
++	Namespace string `json:"namespace"`
++}
++
++// +k8s:deepcopy-gen=true
++// VolumeDataArtifactRef points to a durable data artifact produced by the data path.
++// It MUST reference a final artifact such as VolumeSnapshotContent or PersistentVolume.
++// It MUST NOT reference execution requests such as VolumeCaptureRequest.
++type VolumeDataArtifactRef struct {
++	// +kubebuilder:validation:Required
++	// +kubebuilder:validation:MinLength=1
++	APIVersion string `json:"apiVersion"`
++	// +kubebuilder:validation:Required
++	// +kubebuilder:validation:MinLength=1
++	Kind string `json:"kind"`
++	// +kubebuilder:validation:Required
++	// +kubebuilder:validation:MinLength=1
++	Name string `json:"name"`
++}
++
++// +k8s:deepcopy-gen=true
++// VolumeDataBinding associates a capture target with its durable data artifact on one VCR.
++type VolumeDataBinding struct {
++	// TargetUID is the map key for status.dataRefs (matches spec.targets[].uid).
++	// +kubebuilder:validation:Required
++	// +kubebuilder:validation:MinLength=1
++	TargetUID string `json:"targetUID"`
++
++	// Target identifies the PVC target captured in this binding.
++	Target VolumeCaptureTarget `json:"target"`
++
++	// Artifact references the cluster-scoped durable data artifact.
++	Artifact VolumeDataArtifactRef `json:"artifact"`
++}
++
++// +k8s:deepcopy-gen=true
++// VolumeCaptureRequestSpec defines the desired state of VolumeCaptureRequest
++type VolumeCaptureRequestSpec struct {
++	// Mode specifies the capture mode: "Snapshot" or "Detach"
++	// +kubebuilder:validation:Enum=Snapshot;Detach
++	// +kubebuilder:validation:Required
++	Mode string `json:"mode"`
++
++	// Targets lists PVC/volume targets to capture in this request (bulk, one VCR per logical snapshot node).
++	// +listType=map
++	// +listMapKey=uid
++	// +optional
++	Targets []VolumeCaptureTarget `json:"targets,omitempty"`
++}
++
++// +k8s:deepcopy-gen=true
++// VolumeCaptureRequestStatus defines the observed state of VolumeCaptureRequest
++type VolumeCaptureRequestStatus struct {
++	// CompletionTimestamp is the time when the capture request completed
++	CompletionTimestamp *metav1.Time `json:"completionTimestamp,omitempty"`
++	// Conditions represent the latest available observations of the resource's state
++	Conditions []metav1.Condition `json:"conditions,omitempty"`
++
++	// DataRefs lists per-target durable data artifacts (for example VolumeSnapshotContent).
++	// +listType=map
++	// +listMapKey=targetUID
++	// +optional
++	DataRefs []VolumeDataBinding `json:"dataRefs,omitempty"`
++}
++
++// +kubebuilder:object:root=true
++// +kubebuilder:subresource:status
++// +kubebuilder:validation:XValidation:rule="self.spec.mode != 'Snapshot' || (has(self.spec.targets) && size(self.spec.targets) > 0)",message="spec.targets must not be empty when mode is Snapshot"
++// +kubebuilder:printcolumn:name="Age",type="date",JSONPath=".metadata.creationTimestamp"
++// VolumeCaptureRequest is the Schema for the volumecapturerequests API
++type VolumeCaptureRequest struct {
++	metav1.TypeMeta   `json:",inline"`
++	metav1.ObjectMeta `json:"metadata,omitempty"`
++
++	Spec   VolumeCaptureRequestSpec   `json:"spec,omitempty"`
++	Status VolumeCaptureRequestStatus `json:"status,omitempty"`
++}
++
++// +kubebuilder:object:root=true
++type VolumeCaptureRequestList struct {
++	metav1.TypeMeta `json:",inline"`
++	metav1.ListMeta `json:"metadata,omitempty"`
++	Items           []VolumeCaptureRequest `json:"items"`
++}
+diff --git a/vendor/github.com/deckhouse/storage-foundation/api/v1alpha1/volumerestorerequest_types.go b/vendor/github.com/deckhouse/storage-foundation/api/v1alpha1/volumerestorerequest_types.go
+new file mode 100644
+index 000000000..273d707c7
+--- /dev/null
++++ b/vendor/github.com/deckhouse/storage-foundation/api/v1alpha1/volumerestorerequest_types.go
+@@ -0,0 +1,68 @@
++/*
++Copyright 2025 Flant JSC
++
++Licensed under the Apache License, Version 2.0 (the "License");
++you may not use this file except in compliance with the License.
++You may obtain a copy of the License at
++
++    http://www.apache.org/licenses/LICENSE-2.0
++
++Unless required by applicable law or agreed to in writing, software
++distributed under the License is distributed on an "AS IS" BASIS,
++WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++See the License for the specific language governing permissions and
++limitations under the License.
++*/
++
++package v1alpha1
++
++import (
++	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
++)
++
++// +k8s:deepcopy-gen=true
++// VolumeRestoreRequestSpec defines the desired state of VolumeRestoreRequest
++type VolumeRestoreRequestSpec struct {
++	// SourceRef references the source data to restore from (VolumeSnapshotContent or PersistentVolume)
++	SourceRef ObjectReference `json:"sourceRef"`
++	// ServiceNamespace is the namespace used for intermediate CSI objects (defaults to "d8-storage-foundation")
++	ServiceNamespace string `json:"serviceNamespace,omitempty"`
++	// TargetNamespace is the namespace where the restored PVC will be created
++	TargetNamespace string `json:"targetNamespace"`
++	// TargetPVCName is the name of the PVC to create
++	TargetPVCName string `json:"targetPVCName"`
++	// StorageClassName is the storage class to use for the restored PVC
++	StorageClassName string `json:"storageClassName,omitempty"`
++}
++
++// +k8s:deepcopy-gen=true
++// VolumeRestoreRequestStatus defines the observed state of VolumeRestoreRequest
++type VolumeRestoreRequestStatus struct {
++	// CompletionTimestamp is the time when the restore request completed
++	CompletionTimestamp *metav1.Time `json:"completionTimestamp,omitempty"`
++	// Conditions represent the latest available observations of the resource's state
++	Conditions []metav1.Condition `json:"conditions,omitempty"`
++	// TargetPVCRef references the created target PVC
++	TargetPVCRef *ObjectReference `json:"targetPVCRef,omitempty"`
++}
++
++// +kubebuilder:object:root=true
++// +kubebuilder:subresource:status
++// +kubebuilder:printcolumn:name="Age",type="date",JSONPath=".metadata.creationTimestamp"
++
++// VolumeRestoreRequest is the Schema for the volumerestorerequests API
++type VolumeRestoreRequest struct {
++	metav1.TypeMeta   `json:",inline"`
++	metav1.ObjectMeta `json:"metadata,omitempty"`
++	Spec              VolumeRestoreRequestSpec   `json:"spec,omitempty"`
++	Status            VolumeRestoreRequestStatus `json:"status,omitempty"`
++}
++
++// +kubebuilder:object:root=true
++
++// VolumeRestoreRequestList contains a list of VolumeRestoreRequest
++type VolumeRestoreRequestList struct {
++	metav1.TypeMeta `json:",inline"`
++	metav1.ListMeta `json:"metadata,omitempty"`
++	Items           []VolumeRestoreRequest `json:"items"`
++}
+diff --git a/vendor/github.com/deckhouse/storage-foundation/api/v1alpha1/zz_generated.deepcopy.go b/vendor/github.com/deckhouse/storage-foundation/api/v1alpha1/zz_generated.deepcopy.go
+new file mode 100644
+index 000000000..58c1cac7e
+--- /dev/null
++++ b/vendor/github.com/deckhouse/storage-foundation/api/v1alpha1/zz_generated.deepcopy.go
+@@ -0,0 +1,304 @@
++//go:build !ignore_autogenerated
++
++/*
++Copyright 2025 Flant JSC
++
++Licensed under the Apache License, Version 2.0 (the "License");
++you may not use this file except in compliance with the License.
++You may obtain a copy of the License at
++
++    http://www.apache.org/licenses/LICENSE-2.0
++
++Unless required by applicable law or agreed to in writing, software
++distributed under the License is distributed on an "AS IS" BASIS,
++WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++See the License for the specific language governing permissions and
++limitations under the License.
++*/
++
++// Code generated by controller-gen. DO NOT EDIT.
++
++package v1alpha1
++
++import (
++	"k8s.io/apimachinery/pkg/apis/meta/v1"
++	"k8s.io/apimachinery/pkg/runtime"
++)
++
++// DeepCopyInto is an autogenerated deepcopy function, copying the receiver, writing into out. in must be non-nil.
++func (in *ObjectReference) DeepCopyInto(out *ObjectReference) {
++	*out = *in
++}
++
++// DeepCopy is an autogenerated deepcopy function, copying the receiver, creating a new ObjectReference.
++func (in *ObjectReference) DeepCopy() *ObjectReference {
++	if in == nil {
++		return nil
++	}
++	out := new(ObjectReference)
++	in.DeepCopyInto(out)
++	return out
++}
++
++// DeepCopyInto is an autogenerated deepcopy function, copying the receiver, writing into out. in must be non-nil.
++func (in *VolumeCaptureRequest) DeepCopyInto(out *VolumeCaptureRequest) {
++	*out = *in
++	out.TypeMeta = in.TypeMeta
++	in.ObjectMeta.DeepCopyInto(&out.ObjectMeta)
++	in.Spec.DeepCopyInto(&out.Spec)
++	in.Status.DeepCopyInto(&out.Status)
++}
++
++// DeepCopy is an autogenerated deepcopy function, copying the receiver, creating a new VolumeCaptureRequest.
++func (in *VolumeCaptureRequest) DeepCopy() *VolumeCaptureRequest {
++	if in == nil {
++		return nil
++	}
++	out := new(VolumeCaptureRequest)
++	in.DeepCopyInto(out)
++	return out
++}
++
++// DeepCopyObject is an autogenerated deepcopy function, copying the receiver, creating a new runtime.Object.
++func (in *VolumeCaptureRequest) DeepCopyObject() runtime.Object {
++	if c := in.DeepCopy(); c != nil {
++		return c
++	}
++	return nil
++}
++
++// DeepCopyInto is an autogenerated deepcopy function, copying the receiver, writing into out. in must be non-nil.
++func (in *VolumeCaptureRequestList) DeepCopyInto(out *VolumeCaptureRequestList) {
++	*out = *in
++	out.TypeMeta = in.TypeMeta
++	in.ListMeta.DeepCopyInto(&out.ListMeta)
++	if in.Items != nil {
++		in, out := &in.Items, &out.Items
++		*out = make([]VolumeCaptureRequest, len(*in))
++		for i := range *in {
++			(*in)[i].DeepCopyInto(&(*out)[i])
++		}
++	}
++}
++
++// DeepCopy is an autogenerated deepcopy function, copying the receiver, creating a new VolumeCaptureRequestList.
++func (in *VolumeCaptureRequestList) DeepCopy() *VolumeCaptureRequestList {
++	if in == nil {
++		return nil
++	}
++	out := new(VolumeCaptureRequestList)
++	in.DeepCopyInto(out)
++	return out
++}
++
++// DeepCopyObject is an autogenerated deepcopy function, copying the receiver, creating a new runtime.Object.
++func (in *VolumeCaptureRequestList) DeepCopyObject() runtime.Object {
++	if c := in.DeepCopy(); c != nil {
++		return c
++	}
++	return nil
++}
++
++// DeepCopyInto is an autogenerated deepcopy function, copying the receiver, writing into out. in must be non-nil.
++func (in *VolumeCaptureRequestSpec) DeepCopyInto(out *VolumeCaptureRequestSpec) {
++	*out = *in
++	if in.Targets != nil {
++		in, out := &in.Targets, &out.Targets
++		*out = make([]VolumeCaptureTarget, len(*in))
++		copy(*out, *in)
++	}
++}
++
++// DeepCopy is an autogenerated deepcopy function, copying the receiver, creating a new VolumeCaptureRequestSpec.
++func (in *VolumeCaptureRequestSpec) DeepCopy() *VolumeCaptureRequestSpec {
++	if in == nil {
++		return nil
++	}
++	out := new(VolumeCaptureRequestSpec)
++	in.DeepCopyInto(out)
++	return out
++}
++
++// DeepCopyInto is an autogenerated deepcopy function, copying the receiver, writing into out. in must be non-nil.
++func (in *VolumeCaptureRequestStatus) DeepCopyInto(out *VolumeCaptureRequestStatus) {
++	*out = *in
++	if in.CompletionTimestamp != nil {
++		in, out := &in.CompletionTimestamp, &out.CompletionTimestamp
++		*out = (*in).DeepCopy()
++	}
++	if in.Conditions != nil {
++		in, out := &in.Conditions, &out.Conditions
++		*out = make([]v1.Condition, len(*in))
++		for i := range *in {
++			(*in)[i].DeepCopyInto(&(*out)[i])
++		}
++	}
++	if in.DataRefs != nil {
++		in, out := &in.DataRefs, &out.DataRefs
++		*out = make([]VolumeDataBinding, len(*in))
++		copy(*out, *in)
++	}
++}
++
++// DeepCopy is an autogenerated deepcopy function, copying the receiver, creating a new VolumeCaptureRequestStatus.
++func (in *VolumeCaptureRequestStatus) DeepCopy() *VolumeCaptureRequestStatus {
++	if in == nil {
++		return nil
++	}
++	out := new(VolumeCaptureRequestStatus)
++	in.DeepCopyInto(out)
++	return out
++}
++
++// DeepCopyInto is an autogenerated deepcopy function, copying the receiver, writing into out. in must be non-nil.
++func (in *VolumeCaptureTarget) DeepCopyInto(out *VolumeCaptureTarget) {
++	*out = *in
++}
++
++// DeepCopy is an autogenerated deepcopy function, copying the receiver, creating a new VolumeCaptureTarget.
++func (in *VolumeCaptureTarget) DeepCopy() *VolumeCaptureTarget {
++	if in == nil {
++		return nil
++	}
++	out := new(VolumeCaptureTarget)
++	in.DeepCopyInto(out)
++	return out
++}
++
++// DeepCopyInto is an autogenerated deepcopy function, copying the receiver, writing into out. in must be non-nil.
++func (in *VolumeDataArtifactRef) DeepCopyInto(out *VolumeDataArtifactRef) {
++	*out = *in
++}
++
++// DeepCopy is an autogenerated deepcopy function, copying the receiver, creating a new VolumeDataArtifactRef.
++func (in *VolumeDataArtifactRef) DeepCopy() *VolumeDataArtifactRef {
++	if in == nil {
++		return nil
++	}
++	out := new(VolumeDataArtifactRef)
++	in.DeepCopyInto(out)
++	return out
++}
++
++// DeepCopyInto is an autogenerated deepcopy function, copying the receiver, writing into out. in must be non-nil.
++func (in *VolumeDataBinding) DeepCopyInto(out *VolumeDataBinding) {
++	*out = *in
++	out.Target = in.Target
++	out.Artifact = in.Artifact
++}
++
++// DeepCopy is an autogenerated deepcopy function, copying the receiver, creating a new VolumeDataBinding.
++func (in *VolumeDataBinding) DeepCopy() *VolumeDataBinding {
++	if in == nil {
++		return nil
++	}
++	out := new(VolumeDataBinding)
++	in.DeepCopyInto(out)
++	return out
++}
++
++// DeepCopyInto is an autogenerated deepcopy function, copying the receiver, writing into out. in must be non-nil.
++func (in *VolumeRestoreRequest) DeepCopyInto(out *VolumeRestoreRequest) {
++	*out = *in
++	out.TypeMeta = in.TypeMeta
++	in.ObjectMeta.DeepCopyInto(&out.ObjectMeta)
++	out.Spec = in.Spec
++	in.Status.DeepCopyInto(&out.Status)
++}
++
++// DeepCopy is an autogenerated deepcopy function, copying the receiver, creating a new VolumeRestoreRequest.
++func (in *VolumeRestoreRequest) DeepCopy() *VolumeRestoreRequest {
++	if in == nil {
++		return nil
++	}
++	out := new(VolumeRestoreRequest)
++	in.DeepCopyInto(out)
++	return out
++}
++
++// DeepCopyObject is an autogenerated deepcopy function, copying the receiver, creating a new runtime.Object.
++func (in *VolumeRestoreRequest) DeepCopyObject() runtime.Object {
++	if c := in.DeepCopy(); c != nil {
++		return c
++	}
++	return nil
++}
++
++// DeepCopyInto is an autogenerated deepcopy function, copying the receiver, writing into out. in must be non-nil.
++func (in *VolumeRestoreRequestList) DeepCopyInto(out *VolumeRestoreRequestList) {
++	*out = *in
++	out.TypeMeta = in.TypeMeta
++	in.ListMeta.DeepCopyInto(&out.ListMeta)
++	if in.Items != nil {
++		in, out := &in.Items, &out.Items
++		*out = make([]VolumeRestoreRequest, len(*in))
++		for i := range *in {
++			(*in)[i].DeepCopyInto(&(*out)[i])
++		}
++	}
++}
++
++// DeepCopy is an autogenerated deepcopy function, copying the receiver, creating a new VolumeRestoreRequestList.
++func (in *VolumeRestoreRequestList) DeepCopy() *VolumeRestoreRequestList {
++	if in == nil {
++		return nil
++	}
++	out := new(VolumeRestoreRequestList)
++	in.DeepCopyInto(out)
++	return out
++}
++
++// DeepCopyObject is an autogenerated deepcopy function, copying the receiver, creating a new runtime.Object.
++func (in *VolumeRestoreRequestList) DeepCopyObject() runtime.Object {
++	if c := in.DeepCopy(); c != nil {
++		return c
++	}
++	return nil
++}
++
++// DeepCopyInto is an autogenerated deepcopy function, copying the receiver, writing into out. in must be non-nil.
++func (in *VolumeRestoreRequestSpec) DeepCopyInto(out *VolumeRestoreRequestSpec) {
++	*out = *in
++	out.SourceRef = in.SourceRef
++}
++
++// DeepCopy is an autogenerated deepcopy function, copying the receiver, creating a new VolumeRestoreRequestSpec.
++func (in *VolumeRestoreRequestSpec) DeepCopy() *VolumeRestoreRequestSpec {
++	if in == nil {
++		return nil
++	}
++	out := new(VolumeRestoreRequestSpec)
++	in.DeepCopyInto(out)
++	return out
++}
++
++// DeepCopyInto is an autogenerated deepcopy function, copying the receiver, writing into out. in must be non-nil.
++func (in *VolumeRestoreRequestStatus) DeepCopyInto(out *VolumeRestoreRequestStatus) {
++	*out = *in
++	if in.CompletionTimestamp != nil {
++		in, out := &in.CompletionTimestamp, &out.CompletionTimestamp
++		*out = (*in).DeepCopy()
++	}
++	if in.Conditions != nil {
++		in, out := &in.Conditions, &out.Conditions
++		*out = make([]v1.Condition, len(*in))
++		for i := range *in {
++			(*in)[i].DeepCopyInto(&(*out)[i])
++		}
++	}
++	if in.TargetPVCRef != nil {
++		in, out := &in.TargetPVCRef, &out.TargetPVCRef
++		*out = new(ObjectReference)
++		**out = **in
++	}
++}
++
++// DeepCopy is an autogenerated deepcopy function, copying the receiver, creating a new VolumeRestoreRequestStatus.
++func (in *VolumeRestoreRequestStatus) DeepCopy() *VolumeRestoreRequestStatus {
++	if in == nil {
++		return nil
++	}
++	out := new(VolumeRestoreRequestStatus)
++	in.DeepCopyInto(out)
++	return out
++}
+diff --git a/vendor/modules.txt b/vendor/modules.txt
+index df5a1976b..5bf13a810 100644
+--- a/vendor/modules.txt
++++ b/vendor/modules.txt
+@@ -31,6 +31,9 @@ github.com/cespare/xxhash/v2
+ # github.com/container-storage-interface/spec v1.12.0
+ ## explicit; go 1.23.0
+ github.com/container-storage-interface/spec/lib/go/csi
++# github.com/deckhouse/storage-foundation/api v0.0.0
++## explicit; go 1.24.0
++github.com/deckhouse/storage-foundation/api/v1alpha1
+ # github.com/coreos/go-semver v0.3.1
+ ## explicit; go 1.8
+ github.com/coreos/go-semver/semver
