@@ -1,4 +1,5 @@
 # Based on https://github.com/kubernetes-csi/external-provisioner/blob/master/Dockerfile
+# rebuild bump: 2026-06-01 (force csi-external-provisioner image rebuild / re-clone fork branch)
 {{- range $key, $rawVer := index $.k8sVersions $.ImageName }}
   {{- $version := toString $key }}
   {{- $src_version := toString $rawVer }}
