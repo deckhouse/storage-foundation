@@ -44,9 +44,22 @@ spec:
           spec:
             description: VolumeRestoreRequestSpec defines the desired state of VolumeRestoreRequest
             properties:
-              serviceNamespace:
-                description: ServiceNamespace is the namespace used for intermediate
-                  CSI objects (defaults to "d8-storage-foundation")
+              accessModes:
+                description: |-
+                  AccessModes is the list of access modes for the restored PVC
+                  (optional, defaults to ReadWriteOnce). Enables parity with the PV-source
+                  restore path (e.g. RWX). Invalid modes are rejected by admission via the Enum below.
+                items:
+                  enum:
+                  - ReadWriteOnce
+                  - ReadOnlyMany
+                  - ReadWriteMany
+                  - ReadWriteOncePod
+                  type: string
+                type: array
+              fsType:
+                description: FsType is the filesystem type for Filesystem volumes (optional,
+                  ignored for Block).
                 type: string
               sourceRef:
                 description: SourceRef references the source data to restore from
@@ -77,10 +90,20 @@ spec:
               targetPVCName:
                 description: TargetPVCName is the name of the PVC to create
                 type: string
+              volumeMode:
+                description: |-
+                  VolumeMode specifies whether the restored volume is Block or Filesystem.
+                  It is required: the executor builds CSI VolumeCapabilities from it and there is
+                  no implicit default (mismatched mode breaks Block volumes).
+                enum:
+                - Block
+                - Filesystem
+                type: string
             required:
             - sourceRef
             - targetNamespace
             - targetPVCName
+            - volumeMode
             type: object
           status:
             description: VolumeRestoreRequestStatus defines the observed state of

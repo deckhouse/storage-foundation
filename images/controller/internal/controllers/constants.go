@@ -90,8 +90,3 @@ const (
 	// DefaultRetentionSnapshotTTL and DefaultRetentionDetachTTL are defined in config package
 	// They are used as fallback if config is not available
 )
-
-// Service namespace constant
-const (
-	ServiceNamespace = "d8-storage-foundation" // Default service namespace for temporary VolumeSnapshot objects
-)
