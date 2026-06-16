@@ -22,9 +22,18 @@ limitations under the License.
 // volumerestorerequests. storage-foundation builds that sidecar image but the backend driver modules
 // do not ship this grant, so we reconcile it here for a hardcoded list of module namespaces.
 //
-// Only volumerestorerequests get/list/watch is granted: the executor reads VRR from its informer
-// cache and never writes status. VolumeCaptureRequest is intentionally excluded - it is handled by
-// the storage-foundation controller (ServiceAccount "controller"), not by any csi-side sidecar.
+// The executor needs two net-new grants on top of a backend driver's stock provisioner role:
+//   - volumerestorerequests get/list/watch: it watches VRRs from a cluster-wide informer and never
+//     writes status (status is owned by the storage-foundation VRR controller).
+//   - persistentvolumeclaims create (plus get/list/watch/update/patch): on a successful restore the
+//     executor creates the target PVC and binds it to the PV. The stock external-provisioner only
+//     creates PVs, so driver roles grant PVC get/list/watch/update but NOT create; without this the
+//     restore stalls with "persistentvolumeclaims is forbidden ... cannot create".
+//
+// PV/VolumeSnapshotContent/StorageClass/Secrets/Events are intentionally NOT granted here: the
+// driver's existing provisioner role already covers them for normal provisioning (the executor's
+// CSI CreateVolume + PV creation + event emission already succeed). VolumeCaptureRequest is also
+// excluded - it is handled by the storage-foundation controller, not by any csi-side sidecar.
 package hooks_common
 
 import (
@@ -176,6 +185,13 @@ func desiredClusterRole() *rbacv1.ClusterRole {
 				APIGroups: []string{"storage.deckhouse.io"},
 				Resources: []string{"volumerestorerequests"},
 				Verbs:     []string{"get", "list", "watch"},
+			},
+			{
+				// The executor creates the target PVC after restoring the PV. Driver provisioner
+				// roles grant PVC get/list/watch/update but not create, so create is the net-new verb.
+				APIGroups: []string{""},
+				Resources: []string{"persistentvolumeclaims"},
+				Verbs:     []string{"get", "list", "watch", "create", "update", "patch"},
 			},
 		},
 	}

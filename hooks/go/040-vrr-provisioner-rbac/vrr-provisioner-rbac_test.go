@@ -44,18 +44,39 @@ func TestDesiredClusterRole(t *testing.T) {
 	if !reflect.DeepEqual(cr.Labels, map[string]string{"heritage": "deckhouse", "module": "storage-foundation"}) {
 		t.Errorf("ClusterRole labels = %v", cr.Labels)
 	}
-	if len(cr.Rules) != 1 {
-		t.Fatalf("expected exactly 1 rule, got %d: %+v", len(cr.Rules), cr.Rules)
+	if len(cr.Rules) != 2 {
+		t.Fatalf("expected exactly 2 rules, got %d: %+v", len(cr.Rules), cr.Rules)
 	}
-	rule := cr.Rules[0]
-	if !reflect.DeepEqual(rule.APIGroups, []string{"storage.deckhouse.io"}) {
-		t.Errorf("apiGroups = %v", rule.APIGroups)
+
+	vrrRule := cr.Rules[0]
+	if !reflect.DeepEqual(vrrRule.APIGroups, []string{"storage.deckhouse.io"}) {
+		t.Errorf("vrr apiGroups = %v", vrrRule.APIGroups)
 	}
-	if !reflect.DeepEqual(rule.Resources, []string{"volumerestorerequests"}) {
-		t.Errorf("resources = %v", rule.Resources)
+	if !reflect.DeepEqual(vrrRule.Resources, []string{"volumerestorerequests"}) {
+		t.Errorf("vrr resources = %v", vrrRule.Resources)
 	}
-	if !reflect.DeepEqual(rule.Verbs, []string{"get", "list", "watch"}) {
-		t.Errorf("verbs = %v, want read-only get/list/watch (executor must not write VRR/status)", rule.Verbs)
+	if !reflect.DeepEqual(vrrRule.Verbs, []string{"get", "list", "watch"}) {
+		t.Errorf("vrr verbs = %v, want read-only get/list/watch (executor must not write VRR/status)", vrrRule.Verbs)
+	}
+
+	pvcRule := cr.Rules[1]
+	if !reflect.DeepEqual(pvcRule.APIGroups, []string{""}) {
+		t.Errorf("pvc apiGroups = %v, want core group", pvcRule.APIGroups)
+	}
+	if !reflect.DeepEqual(pvcRule.Resources, []string{"persistentvolumeclaims"}) {
+		t.Errorf("pvc resources = %v", pvcRule.Resources)
+	}
+	// create is the verb whose absence stalls the restore (driver roles grant only
+	// get/list/watch/update on PVCs); assert it is present.
+	hasCreate := false
+	for _, v := range pvcRule.Verbs {
+		if v == "create" {
+			hasCreate = true
+			break
+		}
+	}
+	if !hasCreate {
+		t.Errorf("pvc verbs = %v, want to include create (executor creates the target PVC)", pvcRule.Verbs)
 	}
 }
 
