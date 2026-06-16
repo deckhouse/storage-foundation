@@ -24,6 +24,23 @@ const (
 	WebhookCertCn           string = "webhooks"
 )
 
+const (
+	// VRRProvisionerExecutorClusterRoleName is the cluster-wide ClusterRole granting the patched
+	// csi-provisioner VRR executor read access to VolumeRestoreRequest across all namespaces.
+	VRRProvisionerExecutorClusterRoleName string = "d8:storage-foundation:vrr-provisioner-executor"
+	// CSIServiceAccountName is the ServiceAccount under which backend CSI driver controller Pods
+	// (and the patched csi-provisioner sidecar) run in their module namespace.
+	CSIServiceAccountName string = "csi"
+)
+
+// VRRExecutorNamespaces is the hardcoded list of backend CSI module namespaces whose `csi`
+// ServiceAccount runs the patched csi-provisioner VRR executor and therefore needs cluster-wide
+// get/list/watch on volumerestorerequests. Binding to a namespace/ServiceAccount that does not
+// exist yet is harmless (it takes effect once the module is enabled). For now only sds-local-volume.
+var VRRExecutorNamespaces = []string{
+	"d8-sds-local-volume",
+}
+
 var AllowedProvisioners = []string{}
 
 var WebhookConfigurationsToDelete = []string{}
