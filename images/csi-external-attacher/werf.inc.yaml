@@ -11,7 +11,7 @@
   {{- end }}
 ---
 image: {{ $.ModuleNamePrefix }}{{ $.ImageName }}-ForK8SGE-{{ $version | replace "." "-" }}
-fromImage: base/distroless
+from: {{ index $.Images "builder/distroless" }}
 import:
 - image: {{ $.ModuleNamePrefix }}{{ $.ImageName }}-artifact-{{ $version | replace "." "-" }}
   add: /csi-attacher
@@ -24,7 +24,7 @@ imageSpec:
     entrypoint: ["/csi-attacher"]
 ---
 image: {{ $.ModuleNamePrefix }}{{ $.ImageName }}-src-artifact-{{ $version | replace "." "-" }}
-fromImage: builder/src
+from: {{ index $.Images "builder/src" }}
 final: false
     {{- if $patch }}
 git:
@@ -48,7 +48,7 @@ shell:
   - rm -rf .git
 ---
 image: {{ $.ModuleNamePrefix }}{{ $.ImageName }}-artifact-{{ $version | replace "." "-" }}
-fromImage: {{ eq $.SVACE_ENABLED "false" | ternary "builder/golang-alpine" "builder/golang-alt-svace" }}
+from: {{ index $.Images (eq $.SVACE_ENABLED "false" | ternary "builder/golang" "builder/alpine-svace") }}
 final: false
 mount:
 {{ include "mount points for golang builds" $ }}
