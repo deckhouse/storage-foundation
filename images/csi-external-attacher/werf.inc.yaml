@@ -61,15 +61,13 @@ secrets:
 - id: GOPROXY
   value: {{ $.GOPROXY }}
 shell:
-  beforeInstall:
-    {{- if eq $.SVACE_ENABLED "false" }}
-    {{- include "alpine packages proxy" $ | nindent 4 }}    
-    - apk add --no-cache make bash
-    {{- else }}
-    - apt-get update 
-    - apt-get install -y make bash
-    {{- end }}  
   install:
+    {{- if eq $.SVACE_ENABLED "false" }}
+    - pm install git make bash
+    {{- else }}
+    {{- include "alpine packages proxy" $ | nindent 4 }}
+    - apk add --no-cache make bash
+    {{- end }}
     - export GO_VERSION=${GOLANG_VERSION} CGO_ENABLED=0 GOOS=linux GOARCH=amd64
     - cd /src
     - GOPROXY=$(cat /run/secrets/GOPROXY) go mod download
