@@ -91,7 +91,7 @@ spec:
                 description: |-
                   source specifies where a snapshot will be created from.
                   May be empty for restore intent (backup controller sets volumeSnapshotContentName after restore).
-                  Otherwise exactly one of persistentVolumeClaimName or volumeSnapshotContentName must be set.
+                  Otherwise exactly one of persistentVolumeClaimName, volumeSnapshotContentName or dataImportName must be set.
                   Immutable after creation (except one-shot set of volumeSnapshotContentName from empty).
                 properties:
                   persistentVolumeClaimName:
@@ -116,18 +116,28 @@ spec:
                     # Immutable except one-shot set from empty (restore controller sets after successful restore)
                     - message: volumeSnapshotContentName is immutable once set
                       rule: size(oldSelf) == 0 || self == oldSelf
+                  dataImportName:
+                    description: |-
+                      dataImportName specifies the name of a DataImport (state-snapshotter.deckhouse.io)
+                      in the same namespace that produces the data artifact for this snapshot during import.
+                      When set, the upstream snapshot-controller does NOT reconcile this VolumeSnapshot; the
+                      state-snapshotter common controller binds it (sets status). Immutable. Deckhouse extension.
+                    type: string
+                    x-kubernetes-validations:
+                    - message: dataImportName is immutable
+                      rule: self == oldSelf
                 type: object
                 x-kubernetes-validations:
                 - message: persistentVolumeClaimName is required once set
                   rule: '!has(oldSelf.persistentVolumeClaimName) || has(self.persistentVolumeClaimName)'
                 - message: volumeSnapshotContentName is required once set
                   rule: '!has(oldSelf.volumeSnapshotContentName) || has(self.volumeSnapshotContentName)'
-                # Allow empty source (restore intent) or exactly one of volumeSnapshotContentName and persistentVolumeClaimName
-                - message: source must be empty (restore intent) or exactly one of volumeSnapshotContentName and persistentVolumeClaimName must be set
+                - message: dataImportName is required once set
+                  rule: '!has(oldSelf.dataImportName) || has(self.dataImportName)'
+                # Allow empty source (restore intent) or at most one of persistentVolumeClaimName, volumeSnapshotContentName, dataImportName
+                - message: source must be empty (restore intent) or exactly one of persistentVolumeClaimName, volumeSnapshotContentName and dataImportName must be set
                   rule: >-
-                    (!has(self.volumeSnapshotContentName) && !has(self.persistentVolumeClaimName))
-                    || (has(self.volumeSnapshotContentName) && !has(self.persistentVolumeClaimName))
-                    || (!has(self.volumeSnapshotContentName) && has(self.persistentVolumeClaimName))
+                    [has(self.persistentVolumeClaimName), has(self.volumeSnapshotContentName), has(self.dataImportName)].filter(x, x).size() <= 1
               volumeSnapshotClassName:
                 description: |-
                   Name of the VolumeSnapshotClass requested by the VolumeSnapshot.
@@ -155,6 +165,13 @@ spec:
               VolumeSnapshotContent objects is successful by ensuring both
               objects point at each other.
             properties:
+              boundSnapshotContentName:
+                description: |-
+                  Name of the cluster-scoped state-snapshotter SnapshotContent (storage.deckhouse.io)
+                  that backs this VolumeSnapshot as a logical node in a snapshot tree. Written by the
+                  state-snapshotter common controller in addition to boundVolumeSnapshotContentName.
+                  Deckhouse extension.
+                type: string
               boundVolumeSnapshotContentName:
                 description: |-
                   Name of the VolumeSnapshotContent object to which this VolumeSnapshot
@@ -301,7 +318,7 @@ spec:
                 description: |-
                   source specifies where a snapshot will be created from.
                   May be empty for restore intent (backup controller sets volumeSnapshotContentName after restore).
-                  Otherwise exactly one of persistentVolumeClaimName or volumeSnapshotContentName must be set.
+                  Otherwise exactly one of persistentVolumeClaimName, volumeSnapshotContentName or dataImportName must be set.
                   Immutable after creation (except one-shot set of volumeSnapshotContentName from empty).
                 properties:
                   persistentVolumeClaimName:
@@ -318,6 +335,13 @@ spec:
                       an existing volume snapshot.
                       Specified if the snapshot already exists and only needs a representation in Kubernetes.
                       For restore intent, backup controller may set this once from empty after successful restore (one-shot update).
+                    type: string
+                  dataImportName:
+                    description: |-
+                      dataImportName specifies the name of a DataImport (state-snapshotter.deckhouse.io)
+                      in the same namespace that produces the data artifact for this snapshot during import.
+                      When set, the upstream snapshot-controller does NOT reconcile this VolumeSnapshot.
+                      Deckhouse extension.
                     type: string
                 type: object
               volumeSnapshotClassName:
@@ -343,6 +367,13 @@ spec:
               VolumeSnapshotContent objects is successful by ensuring both
               objects point at each other.
             properties:
+              boundSnapshotContentName:
+                description: |-
+                  Name of the cluster-scoped state-snapshotter SnapshotContent (storage.deckhouse.io)
+                  that backs this VolumeSnapshot as a logical node in a snapshot tree. Written by the
+                  state-snapshotter common controller in addition to boundVolumeSnapshotContentName.
+                  Deckhouse extension.
+                type: string
               boundVolumeSnapshotContentName:
                 description: |-
                   Name of the VolumeSnapshotContent object to which this VolumeSnapshot
