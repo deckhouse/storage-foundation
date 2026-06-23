@@ -1,5 +1,5 @@
 # Based on https://github.com/kubernetes-csi/external-provisioner/blob/master/Dockerfile
-# rebuild bump: 2026-06-01 (force csi-external-provisioner image rebuild / re-clone fork branch)
+# rebuild bump: 2026-06-23 (re-clone fork branch d8-63742164-vrr to pick up 52947f9b0: VRR executor builds VolumeCapabilities from spec / Block mode)
 {{- range $key, $rawVer := index $.k8sVersions $.ImageName }}
   {{- $version := toString $key }}
   {{- $src_version := toString $rawVer }}
@@ -46,7 +46,7 @@ shell:
   - git clone --depth 1 --branch {{ $src_version }} $(cat /run/secrets/SOURCE_REPO)/kubernetes-csi/external-provisioner.git .
   - echo "=== cloned HEAD ==="
   - git rev-parse HEAD
-  - echo "=== cloned branch ==="
+  - echo "=== cloned  branch ==="
   - git branch --show-current || true
   - echo "=== cloned go.mod ==="
   - grep -nE '^(go|toolchain) ' go.mod
