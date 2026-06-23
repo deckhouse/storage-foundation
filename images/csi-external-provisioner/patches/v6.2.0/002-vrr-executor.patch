@@ -1,5 +1,5 @@
 diff --git a/cmd/csi-provisioner/csi-provisioner.go b/cmd/csi-provisioner/csi-provisioner.go
-index 9b96ba627..3be675dd9 100644
+index 9b96ba627..363a43dd8 100644
 --- a/cmd/csi-provisioner/csi-provisioner.go
 +++ b/cmd/csi-provisioner/csi-provisioner.go
 @@ -30,6 +30,7 @@ import (
@@ -104,34 +104,105 @@ index 9b96ba627..3be675dd9 100644
  	// handle SIGTERM and SIGINT by cancelling the context.
  	var (
  		terminate       func()          // called when all controllers are finished
-@@ -666,6 +727,9 @@ func main() {
+@@ -666,12 +727,20 @@ func main() {
  			// wait for sync.
  			factoryForNamespace.Start(ctx.Done())
  		}
-+		// Start VRR informer factory and executor workers.
++		// Start the VRR informer factory now, but defer starting the executor
++		// workers until after the main factory cache has synced. The executor
++		// reads the StorageClass lister backed by that factory; starting workers
++		// earlier lets a worker see an existing StorageClass as NotFound and, per
++		// the driver-filter contract, silently drop the VRR until the next
++		// informer resync.
 +		vrrInformerFactory.Start(ctx.Done())
-+		go vrrExecutor.Run(ctx, int(*workerThreads))
  		cacheSyncResult := factory.WaitForCacheSync(ctx.Done())
  		for _, v := range cacheSyncResult {
  			if !v {
+ 				klog.Fatalf("Failed to sync Informers!")
+ 			}
+ 		}
++		go vrrExecutor.Run(ctx, int(*workerThreads))
+ 
+ 		if utilfeature.DefaultFeatureGate.Enabled(features.CrossNamespaceVolumeDataSource) {
+ 			if gatewayFactory != nil {
+diff --git a/deploy/kubernetes/rbac.yaml b/deploy/kubernetes/rbac.yaml
+index 3066c0a78..3a9cd196c 100644
+--- a/deploy/kubernetes/rbac.yaml
++++ b/deploy/kubernetes/rbac.yaml
+@@ -29,9 +29,12 @@ rules:
+   - apiGroups: [""]
+     resources: ["persistentvolumes"]
+     verbs: ["get", "list", "watch", "create", "patch", "delete"]
++  # "create" and "patch" are required for the VRR executor, which creates the
++  # target PersistentVolumeClaim during restore (plain provisioning does not
++  # create PVCs, but these verbs are additive and safe).
+   - apiGroups: [""]
+     resources: ["persistentvolumeclaims"]
+-    verbs: ["get", "list", "watch", "update"]
++    verbs: ["get", "list", "watch", "create", "update", "patch"]
+   - apiGroups: ["storage.k8s.io"]
+     resources: ["storageclasses"]
+     verbs: ["get", "list", "watch"]
+@@ -46,8 +49,24 @@ rules:
+   - apiGroups: ["snapshot.storage.k8s.io"]
+     resources: ["volumesnapshots"]
+     verbs: ["get", "list", "watch", "update"]
++  # "watch" is required for the VRR executor, which reads VolumeSnapshotContent
++  # as the restore source.
+   - apiGroups: ["snapshot.storage.k8s.io"]
+     resources: ["volumesnapshotcontents"]
++    verbs: ["get", "list", "watch"]
++  # VolumeRestoreRequest (VRR) support - required for the VRR executor.
++  # The executor only watches VRRs and performs the restore (CSI CreateVolume ->
++  # PV/PVC -> events); it MUST NOT write VRR status. Status/lifecycle ownership
++  # belongs to the storage-foundation VRR controller, so no status subresource
++  # permission is granted here.
++  - apiGroups: ["storage.deckhouse.io"]
++    resources: ["volumerestorerequests"]
++    verbs: ["get", "list", "watch"]
++  # Secrets - provisioner credentials referenced from StorageClass parameters
++  # (csi.storage.k8s.io/provisioner-secret-*). Read by the VRR executor when the
++  # driver requires credentials for CSI CreateVolume.
++  - apiGroups: [""]
++    resources: ["secrets"]
+     verbs: ["get", "list"]
+   - apiGroups: ["storage.k8s.io"]
+     resources: ["csinodes"]
 diff --git a/go.mod b/go.mod
-index 9e1264600..bd9848a5e 100644
+index 9e1264600..d5862ffc3 100644
 --- a/go.mod
 +++ b/go.mod
-@@ -4,6 +4,7 @@ go 1.25.7
+@@ -1,9 +1,10 @@
+ module github.com/kubernetes-csi/external-provisioner/v5
+ 
+-go 1.25.7
++go 1.25.10
  
  require (
  	github.com/container-storage-interface/spec v1.12.0
-+	github.com/deckhouse/storage-foundation/api v0.0.0
++	github.com/deckhouse/storage-foundation/api v0.0.0-20260614235316-b97b1e188226
  	github.com/golang/mock v1.6.0
  	github.com/google/uuid v1.6.0 // indirect
  	github.com/kubernetes-csi/csi-lib-utils v0.23.2
+diff --git a/go.sum b/go.sum
+index fbc500deb..cc4dd56ca 100644
+--- a/go.sum
++++ b/go.sum
+@@ -31,6 +31,8 @@ github.com/davecgh/go-spew v1.1.0/go.mod h1:J7Y8YcW2NihsgmVo/mv3lAwl/skON4iLHjSs
+ github.com/davecgh/go-spew v1.1.1/go.mod h1:J7Y8YcW2NihsgmVo/mv3lAwl/skON4iLHjSsI+c5H38=
+ github.com/davecgh/go-spew v1.1.2-0.20180830191138-d8f796af33cc h1:U9qPSI2PIWSS1VwoXQT9A3Wy9MM3WgvqSxFWenqJduM=
+ github.com/davecgh/go-spew v1.1.2-0.20180830191138-d8f796af33cc/go.mod h1:J7Y8YcW2NihsgmVo/mv3lAwl/skON4iLHjSsI+c5H38=
++github.com/deckhouse/storage-foundation/api v0.0.0-20260614235316-b97b1e188226 h1:chWiDopdMkx0UsAXstu//YpjUaqKhuP8Ni3m+vABwbI=
++github.com/deckhouse/storage-foundation/api v0.0.0-20260614235316-b97b1e188226/go.mod h1:FRaWxya+74ktZMBDr96eudQs9xPkYmMDFiLpl3K7+O8=
+ github.com/distribution/reference v0.6.0 h1:0IXCQ5g4/QMHHkarYzh5l+u8T3t73zM5QvfrDyIgxBk=
+ github.com/distribution/reference v0.6.0/go.mod h1:BbU0aIcezP1/5jX/8MP0YiH4SdvB5Y4f/wlDRiLyi3E=
+ github.com/dustin/go-humanize v1.0.1 h1:GzkhY7T5VNhEkwH0PVJgjz+fX1rhBrR7pRT3mDkpeCY=
 diff --git a/pkg/controller/vrr_handler.go b/pkg/controller/vrr_handler.go
 new file mode 100644
-index 000000000..6e596e468
+index 000000000..4a6c39c28
 --- /dev/null
 +++ b/pkg/controller/vrr_handler.go
-@@ -0,0 +1,730 @@
+@@ -0,0 +1,821 @@
 +/*
 +Copyright 2025 Flant JSC
 +
@@ -388,6 +459,28 @@ index 000000000..6e596e468
 +		return nil
 +	}
 +
++	// VolumeMode is required: the executor builds CSI VolumeCapabilities from it and
++	// there is no implicit default. A wrong/empty mode silently breaks Block volumes,
++	// so reject it as a permanent invalid spec (event-only; status is the controller's).
++	// Validated only after the driver filter so foreign-driver VRRs stay untouched.
++	switch vrr.Spec.VolumeMode {
++	case v1.PersistentVolumeBlock, v1.PersistentVolumeFilesystem:
++	default:
++		e.eventRecorder.Eventf(vrr, v1.EventTypeWarning, "VRRInvalidSpec",
++			"VolumeMode is required and must be Block or Filesystem, got %q", vrr.Spec.VolumeMode)
++		klog.Warningf("VRR %s/%s has invalid VolumeMode %q, ignoring", vrr.Namespace, vrr.Name, vrr.Spec.VolumeMode)
++		return nil
++	}
++
++	// AccessModes are validated here so an invalid spec fails closed (event-only,
++	// return nil) symmetrically with VolumeMode, instead of looping forever in the
++	// retryable capability-conversion error path. Status remains the controller's.
++	if err := validateVRRAccessModes(vrr.Spec.AccessModes); err != nil {
++		e.eventRecorder.Eventf(vrr, v1.EventTypeWarning, "VRRInvalidSpec", "Invalid accessModes: %v", err)
++		klog.Warningf("VRR %s/%s has invalid accessModes %v: %v, ignoring", vrr.Namespace, vrr.Name, vrr.Spec.AccessModes, err)
++		return nil
++	}
++
 +	// Deterministic target volume (PV) name derived from the VRR UID.
 +	pvName, err := makeVolumeName(e.volumeNamePrefix, string(vrr.UID), e.volumeNameUUIDLength)
 +	if err != nil {
@@ -469,17 +562,18 @@ index 000000000..6e596e468
 +
 +	klog.V(2).Infof("restoreFromVSC: VRR %s/%s, VSC %s, snapshotHandle %s", vrr.Namespace, vrr.Name, vsc.Name, snapshotHandle)
 +
-+	volumeCaps := []*csi.VolumeCapability{
-+		{
-+			AccessType: &csi.VolumeCapability_Mount{
-+				Mount: &csi.VolumeCapability_MountVolume{
-+					FsType: e.defaultFSType,
-+				},
-+			},
-+			AccessMode: &csi.VolumeCapability_AccessMode{
-+				Mode: csi.VolumeCapability_AccessMode_SINGLE_NODE_WRITER,
-+			},
-+		},
++	// Build VolumeCapabilities from the VRR spec (volumeMode/fsType/accessModes)
++	// instead of hardcoding Filesystem/SINGLE_NODE_WRITER. CSI snapshots are
++	// mode-agnostic, so Block sources MUST be restored as Block volumes.
++	volumeCaps, err := e.getVolumeCapabilitiesFromVRR(vrr, sc)
++	if err != nil {
++		// An unsupported volumeMode/accessModes combination is a permanent spec
++		// problem, not a transient one: report it and stop (no requeue). The
++		// storage-foundation controller owns the terminal status.
++		e.eventRecorder.Eventf(vrr, v1.EventTypeWarning, "VRRInvalidSpec",
++			"Cannot build volume capabilities: %v", err)
++		klog.Warningf("VRR %s/%s: invalid volume capabilities, ignoring: %v", vrr.Namespace, vrr.Name, err)
++		return nil
 +	}
 +
 +	capacityBytes := int64(1024 * 1024 * 1024) // 1Gi default
@@ -495,13 +589,83 @@ index 000000000..6e596e468
 +		},
 +	}
 +
-+	pv, err := e.ensurePV(ctx, vrr, sc, pvName, volumeCaps, capacityBytes, contentSource, e.defaultFSType,
-+		fmt.Sprintf("Successfully created PV %s from snapshot", pvName))
++	pv, err := e.ensurePV(ctx, vrr, sc, pvName, volumeCaps, capacityBytes, contentSource, e.resolveFSType(vrr),
++		fmt.Sprintf("Successfully created PV %s from snapshot", pvName), effectiveAccessModes(vrr))
 +	if err != nil {
 +		return err
 +	}
 +
 +	return e.createPVCFromVRR(ctx, vrr, pv)
++}
++
++// getVolumeCapabilitiesFromVRR builds CSI VolumeCapabilities from the VRR spec.
++//
++// volumeMode (required) selects Block vs Mount access type; accessModes (optional,
++// defaults to ReadWriteOnce) selects the CSI access mode; fsType (optional) and the
++// StorageClass mount options apply only to Filesystem volumes.
++func (e *VRRExecutor) getVolumeCapabilitiesFromVRR(vrr *storagev1alpha1.VolumeRestoreRequest, sc *storagev1.StorageClass) ([]*csi.VolumeCapability, error) {
++	supportsSingleNodeMultiWriter := e.controllerCapabilities[csi.ControllerServiceCapability_RPC_SINGLE_NODE_MULTI_WRITER]
++
++	csiAccessMode, err := accessmodes.ToCSIAccessMode(effectiveAccessModes(vrr), supportsSingleNodeMultiWriter)
++	if err != nil {
++		return nil, fmt.Errorf("failed to convert AccessModes to CSI access mode: %w", err)
++	}
++
++	switch vrr.Spec.VolumeMode {
++	case v1.PersistentVolumeBlock:
++		return []*csi.VolumeCapability{
++			{
++				AccessType: getAccessTypeBlock(),
++				AccessMode: &csi.VolumeCapability_AccessMode{Mode: csiAccessMode},
++			},
++		}, nil
++	case v1.PersistentVolumeFilesystem:
++		var mountFlags []string
++		if sc != nil {
++			mountFlags = sc.MountOptions
++		}
++		return []*csi.VolumeCapability{
++			{
++				AccessType: getAccessTypeMount(e.resolveFSType(vrr), mountFlags),
++				AccessMode: &csi.VolumeCapability_AccessMode{Mode: csiAccessMode},
++			},
++		}, nil
++	default:
++		return nil, fmt.Errorf("unsupported volumeMode %q (must be Block or Filesystem)", vrr.Spec.VolumeMode)
++	}
++}
++
++// resolveFSType returns the VRR-requested filesystem type, falling back to the
++// executor default. It is only meaningful for Filesystem volumes.
++func (e *VRRExecutor) resolveFSType(vrr *storagev1alpha1.VolumeRestoreRequest) string {
++	if vrr.Spec.FsType != "" {
++		return vrr.Spec.FsType
++	}
++	return e.defaultFSType
++}
++
++// effectiveAccessModes returns the VRR-requested access modes, defaulting to
++// ReadWriteOnce when none are specified. The returned slice is what is recorded on
++// the PV/PVC verbatim (no lossy reverse-mapping from the single CSI access mode).
++func effectiveAccessModes(vrr *storagev1alpha1.VolumeRestoreRequest) []v1.PersistentVolumeAccessMode {
++	if len(vrr.Spec.AccessModes) > 0 {
++		return vrr.Spec.AccessModes
++	}
++	return []v1.PersistentVolumeAccessMode{v1.ReadWriteOnce}
++}
++
++// validateVRRAccessModes rejects unknown access modes so an invalid spec fails
++// closed in reconcile (an empty list is valid and defaults to ReadWriteOnce). It
++// mirrors the CRD Enum on spec.accessModes for clusters where the CRD predates it.
++func validateVRRAccessModes(modes []v1.PersistentVolumeAccessMode) error {
++	for _, m := range modes {
++		switch m {
++		case v1.ReadWriteOnce, v1.ReadOnlyMany, v1.ReadWriteMany, v1.ReadWriteOncePod:
++		default:
++			return fmt.Errorf("unsupported access mode %q (must be one of ReadWriteOnce, ReadOnlyMany, ReadWriteMany, ReadWriteOncePod)", m)
++		}
++	}
++	return nil
 +}
 +
 +// restoreFromPV restores a volume by cloning an existing PersistentVolume and creates PV + PVC.
@@ -550,7 +714,7 @@ index 000000000..6e596e468
 +	}
 +
 +	pv, err := e.ensurePV(ctx, vrr, sc, pvName, volumeCaps, capacityBytes, contentSource, e.getFSTypeFromPV(sourcePV),
-+		fmt.Sprintf("Successfully created PV %s from PersistentVolume %s", pvName, sourcePV.Name))
++		fmt.Sprintf("Successfully created PV %s from PersistentVolume %s", pvName, sourcePV.Name), sourcePV.Spec.AccessModes)
 +	if err != nil {
 +		return err
 +	}
@@ -570,6 +734,7 @@ index 000000000..6e596e468
 +	contentSource *csi.VolumeContentSource,
 +	fsType string,
 +	pvCreatedMessage string,
++	accessModes []v1.PersistentVolumeAccessMode,
 +) (*v1.PersistentVolume, error) {
 +	// Idempotency: a previous attempt may have created the PV but not the PVC.
 +	if existingPV, err := e.kubeClient.CoreV1().PersistentVolumes().Get(ctx, pvName, metav1.GetOptions{}); err == nil {
@@ -615,7 +780,7 @@ index 000000000..6e596e468
 +	}
 +	klog.V(2).Infof("ensurePV: CSI CreateVolume succeeded for VRR %s/%s, volumeHandle %s", vrr.Namespace, vrr.Name, rep.Volume.VolumeId)
 +
-+	pv, err := createPVFromCSIResponse(rep.Volume, sc, pvName, e.driverName, e.identity, volumeCaps, fsType)
++	pv, err := createPVFromCSIResponse(rep.Volume, sc, pvName, e.driverName, e.identity, volumeCaps, fsType, accessModes)
 +	if err != nil {
 +		return nil, fmt.Errorf("failed to build PV object from CSI response: %w", err)
 +	}
@@ -726,6 +891,7 @@ index 000000000..6e596e468
 +	identity string,
 +	volumeCaps []*csi.VolumeCapability,
 +	fsType string,
++	accessModes []v1.PersistentVolumeAccessMode,
 +) (*v1.PersistentVolume, error) {
 +	respCap := volume.GetCapacityBytes()
 +	if respCap == 0 {
@@ -740,16 +906,12 @@ index 000000000..6e596e468
 +		maps.Copy(volumeAttributes, volume.VolumeContext)
 +	}
 +
-+	accessModes := []v1.PersistentVolumeAccessMode{v1.ReadWriteOnce}
-+	if len(volumeCaps) > 0 {
-+		switch volumeCaps[0].GetAccessMode().GetMode() {
-+		case csi.VolumeCapability_AccessMode_SINGLE_NODE_WRITER:
-+			accessModes = []v1.PersistentVolumeAccessMode{v1.ReadWriteOnce}
-+		case csi.VolumeCapability_AccessMode_MULTI_NODE_MULTI_WRITER:
-+			accessModes = []v1.PersistentVolumeAccessMode{v1.ReadWriteMany}
-+		case csi.VolumeCapability_AccessMode_MULTI_NODE_READER_ONLY:
-+			accessModes = []v1.PersistentVolumeAccessMode{v1.ReadOnlyMany}
-+		}
++	// Record the requested access modes verbatim. Reverse-mapping the single CSI
++	// access mode back to a PV access mode is lossy (ReadWriteOncePod collapses to
++	// ReadWriteOnce, multi-mode lists collapse to one), so the originally requested
++	// modes are authoritative for the PV/PVC pair.
++	if len(accessModes) == 0 {
++		accessModes = []v1.PersistentVolumeAccessMode{v1.ReadWriteOnce}
 +	}
 +
 +	var volumeMode *v1.PersistentVolumeMode
@@ -763,10 +925,7 @@ index 000000000..6e596e468
 +		}
 +	}
 +
-+	pvReadOnly := false
-+	if len(volumeCaps) == 1 && volumeCaps[0].GetAccessMode().GetMode() == csi.VolumeCapability_AccessMode_MULTI_NODE_READER_ONLY {
-+		pvReadOnly = true
-+	}
++	pvReadOnly := len(accessModes) == 1 && accessModes[0] == v1.ReadOnlyMany
 +
 +	csiPVSource := &v1.CSIPersistentVolumeSource{
 +		Driver:           driverName,
@@ -785,6 +944,9 @@ index 000000000..6e596e468
 +		Spec: v1.PersistentVolumeSpec{
 +			AccessModes:  accessModes,
 +			MountOptions: sc.MountOptions,
++			// StorageClassName MUST match the target PVC's StorageClassName, otherwise
++			// the persistentvolume-controller refuses to bind (VolumeMismatch).
++			StorageClassName: sc.Name,
 +			Capacity: v1.ResourceList{
 +				v1.ResourceStorage: bytesToQuantity(respCap),
 +			},
@@ -862,12 +1024,12 @@ index 000000000..6e596e468
 +	cond := meta.FindStatusCondition(conditions, storagev1alpha1.ConditionTypeReady)
 +	return cond != nil && (cond.Status == metav1.ConditionTrue || cond.Status == metav1.ConditionFalse)
 +}
-diff --git a/vendor/github.com/deckhouse/storage-foundation/api/v1alpha1/conditions.go b/vendor/github.com/deckhouse/storage-foundation/api/v1alpha1/conditions.go
+diff --git a/pkg/controller/vrr_handler_test.go b/pkg/controller/vrr_handler_test.go
 new file mode 100644
-index 000000000..6a5f51f28
+index 000000000..794ddee41
 --- /dev/null
-+++ b/vendor/github.com/deckhouse/storage-foundation/api/v1alpha1/conditions.go
-@@ -0,0 +1,51 @@
++++ b/pkg/controller/vrr_handler_test.go
+@@ -0,0 +1,1073 @@
 +/*
 +Copyright 2025 Flant JSC
 +
@@ -884,683 +1046,1060 @@ index 000000000..6a5f51f28
 +limitations under the License.
 +*/
 +
-+package v1alpha1
-+
-+// Condition type constants
-+// Only Ready condition is used - it is set to True on success or False on final failure
-+const (
-+	ConditionTypeReady = "Ready"
-+)
-+
-+// Condition reason constants
-+const (
-+	// ConditionReasonCompleted indicates successful completion
-+	ConditionReasonCompleted = "Completed"
-+	// ConditionReasonInvalidMode indicates invalid mode was specified
-+	ConditionReasonInvalidMode = "InvalidMode"
-+	// ConditionReasonIncompatible indicates incompatible configuration (e.g., WFFC or cross-SC restore)
-+	ConditionReasonIncompatible = "Incompatible"
-+	// ConditionReasonInvalidTTL indicates invalid TTL annotation format
-+	ConditionReasonInvalidTTL = "InvalidTTL"
-+	// ConditionReasonInternalError indicates internal error
-+	ConditionReasonInternalError = "InternalError"
-+	// ConditionReasonNotFound indicates resource not found
-+	ConditionReasonNotFound = "NotFound"
-+	// ConditionReasonRBACDenied indicates RBAC permission denied
-+	ConditionReasonRBACDenied = "RBACDenied"
-+	// ConditionReasonInvalidSource indicates invalid source specified
-+	ConditionReasonInvalidSource = "InvalidSource"
-+	// ConditionReasonPVBound indicates PV is bound and cannot be detached
-+	ConditionReasonPVBound = "PVBound"
-+	// ConditionReasonSnapshotCreationFailed indicates CSI snapshot creation failed
-+	ConditionReasonSnapshotCreationFailed = "SnapshotCreationFailed"
-+	// ConditionReasonTargetsPending indicates one or more capture targets are not ready yet
-+	ConditionReasonTargetsPending = "TargetsPending"
-+	// ConditionReasonRestoreFailed indicates restore operation failed
-+	ConditionReasonRestoreFailed = "RestoreFailed"
-+)
-diff --git a/vendor/github.com/deckhouse/storage-foundation/api/v1alpha1/doc.go b/vendor/github.com/deckhouse/storage-foundation/api/v1alpha1/doc.go
-new file mode 100644
-index 000000000..1d11ccbe0
---- /dev/null
-+++ b/vendor/github.com/deckhouse/storage-foundation/api/v1alpha1/doc.go
-@@ -0,0 +1,19 @@
-+/*
-+Copyright 2025 Flant JSC
-+
-+Licensed under the Apache License, Version 2.0 (the "License");
-+you may not use this file except in compliance with the License.
-+You may obtain a copy of the License at
-+
-+    http://www.apache.org/licenses/LICENSE-2.0
-+
-+Unless required by applicable law or agreed to in writing, software
-+distributed under the License is distributed on an "AS IS" BASIS,
-+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-+See the License for the specific language governing permissions and
-+limitations under the License.
-+*/
-+
-+// Package v1alpha1 contains API Schema definitions for the storage.deckhouse.io v1alpha1 API group.
-+// +groupName=storage.deckhouse.io
-+package v1alpha1
-diff --git a/vendor/github.com/deckhouse/storage-foundation/api/v1alpha1/objectreference_types.go b/vendor/github.com/deckhouse/storage-foundation/api/v1alpha1/objectreference_types.go
-new file mode 100644
-index 000000000..27f010c5e
---- /dev/null
-+++ b/vendor/github.com/deckhouse/storage-foundation/api/v1alpha1/objectreference_types.go
-@@ -0,0 +1,28 @@
-+/*
-+Copyright 2025 Flant JSC
-+
-+Licensed under the Apache License, Version 2.0 (the "License");
-+you may not use this file except in compliance with the License.
-+You may obtain a copy of the License at
-+
-+    http://www.apache.org/licenses/LICENSE-2.0
-+
-+Unless required by applicable law or agreed to in writing, software
-+distributed under the License is distributed on an "AS IS" BASIS,
-+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-+See the License for the specific language governing permissions and
-+limitations under the License.
-+*/
-+
-+package v1alpha1
-+
-+// +k8s:deepcopy-gen=true
-+// ObjectReference references a Kubernetes object
-+type ObjectReference struct {
-+	// Name is the name of the referenced object
-+	Name string `json:"name"`
-+	// Namespace is the namespace of the referenced object (optional)
-+	Namespace string `json:"namespace,omitempty"`
-+	// Kind is the kind of the referenced object (e.g., "VolumeSnapshotContent", "PersistentVolume")
-+	Kind string `json:"kind,omitempty"`
-+}
-diff --git a/vendor/github.com/deckhouse/storage-foundation/api/v1alpha1/register.go b/vendor/github.com/deckhouse/storage-foundation/api/v1alpha1/register.go
-new file mode 100644
-index 000000000..f4490804e
---- /dev/null
-+++ b/vendor/github.com/deckhouse/storage-foundation/api/v1alpha1/register.go
-@@ -0,0 +1,47 @@
-+/*
-+Copyright 2025 Flant JSC
-+
-+Licensed under the Apache License, Version 2.0 (the "License");
-+you may not use this file except in compliance with the License.
-+You may obtain a copy of the License at
-+
-+    http://www.apache.org/licenses/LICENSE-2.0
-+
-+Unless required by applicable law or agreed to in writing, software
-+distributed under the License is distributed on an "AS IS" BASIS,
-+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-+See the License for the specific language governing permissions and
-+limitations under the License.
-+*/
-+
-+package v1alpha1
++package controller
 +
 +import (
++	"context"
++	"strings"
++	"testing"
++	"time"
++
++	"github.com/container-storage-interface/spec/lib/go/csi"
++	"github.com/golang/mock/gomock"
++	"github.com/kubernetes-csi/csi-lib-utils/rpc"
++	"google.golang.org/grpc"
++	v1 "k8s.io/api/core/v1"
++	storagev1 "k8s.io/api/storage/v1"
++	apierrors "k8s.io/apimachinery/pkg/api/errors"
++	"k8s.io/apimachinery/pkg/api/resource"
 +	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-+	"k8s.io/apimachinery/pkg/runtime"
-+	"k8s.io/apimachinery/pkg/runtime/schema"
++	"k8s.io/apimachinery/pkg/labels"
++	"k8s.io/apimachinery/pkg/types"
++	"k8s.io/client-go/kubernetes"
++	fakeclientset "k8s.io/client-go/kubernetes/fake"
++	storagelistersv1 "k8s.io/client-go/listers/storage/v1"
++	"k8s.io/client-go/tools/cache"
++	"k8s.io/client-go/tools/record"
++
++	storagev1alpha1 "github.com/deckhouse/storage-foundation/api/v1alpha1"
++	crdv1 "github.com/kubernetes-csi/external-snapshotter/client/v8/apis/volumesnapshot/v1"
++	snapclientset "github.com/kubernetes-csi/external-snapshotter/client/v8/clientset/versioned"
++	snapfake "github.com/kubernetes-csi/external-snapshotter/client/v8/clientset/versioned/fake"
 +)
 +
 +const (
-+	APIGroup   = "storage.deckhouse.io"
-+	APIVersion = "v1alpha1"
++	vrrTestDriverName      = "test-driver"
++	vrrTestIdentity        = "test-identity"
++	vrrTestTimeout         = 10 * time.Second
++	vrrTestVolumePrefix    = "pvc"
++	vrrTestDefaultFSType   = "ext4"
++	vrrTestStorageClass    = "test-sc"
++	vrrTestTargetNamespace = "test-ns"
++	vrrTestTargetPVCName   = "test-pvc"
++	vrrTestSnapshotHandle  = "snapshot-handle-123"
++	vrrTestVolumeHandle    = "volume-handle-456"
 +)
 +
-+var (
-+	// GroupVersion is group version used to register these objects
-+	GroupVersion  = schema.GroupVersion{Group: APIGroup, Version: APIVersion}
-+	SchemeBuilder = runtime.NewSchemeBuilder(AddKnownTypes)
-+	AddToScheme   = SchemeBuilder.AddToScheme
-+)
-+
-+// AddKnownTypes adds the set of types defined in this package to the given scheme.
-+func AddKnownTypes(scheme *runtime.Scheme) error {
-+	scheme.AddKnownTypes(GroupVersion,
-+		&VolumeCaptureRequest{},
-+		&VolumeCaptureRequestList{},
-+		&VolumeRestoreRequest{},
-+		&VolumeRestoreRequestList{},
-+	)
-+	metav1.AddToGroupVersion(scheme, GroupVersion)
-+	return nil
-+}
-diff --git a/vendor/github.com/deckhouse/storage-foundation/api/v1alpha1/volumecapturerequest_types.go b/vendor/github.com/deckhouse/storage-foundation/api/v1alpha1/volumecapturerequest_types.go
-new file mode 100644
-index 000000000..5b81d70e4
---- /dev/null
-+++ b/vendor/github.com/deckhouse/storage-foundation/api/v1alpha1/volumecapturerequest_types.go
-@@ -0,0 +1,129 @@
-+/*
-+Copyright 2025 Flant JSC
-+
-+Licensed under the Apache License, Version 2.0 (the "License");
-+you may not use this file except in compliance with the License.
-+You may obtain a copy of the License at
-+
-+    http://www.apache.org/licenses/LICENSE-2.0
-+
-+Unless required by applicable law or agreed to in writing, software
-+distributed under the License is distributed on an "AS IS" BASIS,
-+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-+See the License for the specific language governing permissions and
-+limitations under the License.
-+*/
-+
-+package v1alpha1
-+
-+import (
-+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-+)
-+
-+const (
-+	VolumeCaptureModeSnapshot = "Snapshot"
-+	VolumeCaptureModeDetach   = "Detach"
-+)
-+
-+// +k8s:deepcopy-gen=true
-+// VolumeCaptureTarget identifies a PVC (or future volume target) to capture.
-+type VolumeCaptureTarget struct {
-+	// UID is the map key for spec.targets (PersistentVolumeClaim UID).
-+	// +kubebuilder:validation:Required
-+	// +kubebuilder:validation:MinLength=1
-+	UID string `json:"uid"`
-+
-+	// +kubebuilder:validation:Required
-+	// +kubebuilder:validation:MinLength=1
-+	APIVersion string `json:"apiVersion"`
-+	// +kubebuilder:validation:Required
-+	// +kubebuilder:validation:MinLength=1
-+	Kind string `json:"kind"`
-+	// +kubebuilder:validation:Required
-+	// +kubebuilder:validation:MinLength=1
-+	Name string `json:"name"`
-+	// +kubebuilder:validation:Required
-+	// +kubebuilder:validation:MinLength=1
-+	Namespace string `json:"namespace"`
-+}
-+
-+// +k8s:deepcopy-gen=true
-+// VolumeDataArtifactRef points to a durable data artifact produced by the data path.
-+// It MUST reference a final artifact such as VolumeSnapshotContent or PersistentVolume.
-+// It MUST NOT reference execution requests such as VolumeCaptureRequest.
-+type VolumeDataArtifactRef struct {
-+	// +kubebuilder:validation:Required
-+	// +kubebuilder:validation:MinLength=1
-+	APIVersion string `json:"apiVersion"`
-+	// +kubebuilder:validation:Required
-+	// +kubebuilder:validation:MinLength=1
-+	Kind string `json:"kind"`
-+	// +kubebuilder:validation:Required
-+	// +kubebuilder:validation:MinLength=1
-+	Name string `json:"name"`
-+}
-+
-+// +k8s:deepcopy-gen=true
-+// VolumeDataBinding associates a capture target with its durable data artifact on one VCR.
-+type VolumeDataBinding struct {
-+	// TargetUID is the map key for status.dataRefs (matches spec.targets[].uid).
-+	// +kubebuilder:validation:Required
-+	// +kubebuilder:validation:MinLength=1
-+	TargetUID string `json:"targetUID"`
-+
-+	// Target identifies the PVC target captured in this binding.
-+	Target VolumeCaptureTarget `json:"target"`
-+
-+	// Artifact references the cluster-scoped durable data artifact.
-+	Artifact VolumeDataArtifactRef `json:"artifact"`
-+}
-+
-+// +k8s:deepcopy-gen=true
-+// VolumeCaptureRequestSpec defines the desired state of VolumeCaptureRequest
-+type VolumeCaptureRequestSpec struct {
-+	// Mode specifies the capture mode: "Snapshot" or "Detach"
-+	// +kubebuilder:validation:Enum=Snapshot;Detach
-+	// +kubebuilder:validation:Required
-+	Mode string `json:"mode"`
-+
-+	// Targets lists PVC/volume targets to capture in this request (bulk, one VCR per logical snapshot node).
-+	// +listType=map
-+	// +listMapKey=uid
-+	// +optional
-+	Targets []VolumeCaptureTarget `json:"targets,omitempty"`
-+}
-+
-+// +k8s:deepcopy-gen=true
-+// VolumeCaptureRequestStatus defines the observed state of VolumeCaptureRequest
-+type VolumeCaptureRequestStatus struct {
-+	// CompletionTimestamp is the time when the capture request completed
-+	CompletionTimestamp *metav1.Time `json:"completionTimestamp,omitempty"`
-+	// Conditions represent the latest available observations of the resource's state
-+	Conditions []metav1.Condition `json:"conditions,omitempty"`
-+
-+	// DataRefs lists per-target durable data artifacts (for example VolumeSnapshotContent).
-+	// +listType=map
-+	// +listMapKey=targetUID
-+	// +optional
-+	DataRefs []VolumeDataBinding `json:"dataRefs,omitempty"`
-+}
-+
-+// +kubebuilder:object:root=true
-+// +kubebuilder:subresource:status
-+// +kubebuilder:validation:XValidation:rule="self.spec.mode != 'Snapshot' || (has(self.spec.targets) && size(self.spec.targets) > 0)",message="spec.targets must not be empty when mode is Snapshot"
-+// +kubebuilder:printcolumn:name="Age",type="date",JSONPath=".metadata.creationTimestamp"
-+// VolumeCaptureRequest is the Schema for the volumecapturerequests API
-+type VolumeCaptureRequest struct {
-+	metav1.TypeMeta   `json:",inline"`
-+	metav1.ObjectMeta `json:"metadata,omitempty"`
-+
-+	Spec   VolumeCaptureRequestSpec   `json:"spec,omitempty"`
-+	Status VolumeCaptureRequestStatus `json:"status,omitempty"`
-+}
-+
-+// +kubebuilder:object:root=true
-+type VolumeCaptureRequestList struct {
-+	metav1.TypeMeta `json:",inline"`
-+	metav1.ListMeta `json:"metadata,omitempty"`
-+	Items           []VolumeCaptureRequest `json:"items"`
-+}
-diff --git a/vendor/github.com/deckhouse/storage-foundation/api/v1alpha1/volumerestorerequest_types.go b/vendor/github.com/deckhouse/storage-foundation/api/v1alpha1/volumerestorerequest_types.go
-new file mode 100644
-index 000000000..273d707c7
---- /dev/null
-+++ b/vendor/github.com/deckhouse/storage-foundation/api/v1alpha1/volumerestorerequest_types.go
-@@ -0,0 +1,68 @@
-+/*
-+Copyright 2025 Flant JSC
-+
-+Licensed under the Apache License, Version 2.0 (the "License");
-+you may not use this file except in compliance with the License.
-+You may obtain a copy of the License at
-+
-+    http://www.apache.org/licenses/LICENSE-2.0
-+
-+Unless required by applicable law or agreed to in writing, software
-+distributed under the License is distributed on an "AS IS" BASIS,
-+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-+See the License for the specific language governing permissions and
-+limitations under the License.
-+*/
-+
-+package v1alpha1
-+
-+import (
-+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-+)
-+
-+// +k8s:deepcopy-gen=true
-+// VolumeRestoreRequestSpec defines the desired state of VolumeRestoreRequest
-+type VolumeRestoreRequestSpec struct {
-+	// SourceRef references the source data to restore from (VolumeSnapshotContent or PersistentVolume)
-+	SourceRef ObjectReference `json:"sourceRef"`
-+	// ServiceNamespace is the namespace used for intermediate CSI objects (defaults to "d8-storage-foundation")
-+	ServiceNamespace string `json:"serviceNamespace,omitempty"`
-+	// TargetNamespace is the namespace where the restored PVC will be created
-+	TargetNamespace string `json:"targetNamespace"`
-+	// TargetPVCName is the name of the PVC to create
-+	TargetPVCName string `json:"targetPVCName"`
-+	// StorageClassName is the storage class to use for the restored PVC
-+	StorageClassName string `json:"storageClassName,omitempty"`
-+}
-+
-+// +k8s:deepcopy-gen=true
-+// VolumeRestoreRequestStatus defines the observed state of VolumeRestoreRequest
-+type VolumeRestoreRequestStatus struct {
-+	// CompletionTimestamp is the time when the restore request completed
-+	CompletionTimestamp *metav1.Time `json:"completionTimestamp,omitempty"`
-+	// Conditions represent the latest available observations of the resource's state
-+	Conditions []metav1.Condition `json:"conditions,omitempty"`
-+	// TargetPVCRef references the created target PVC
-+	TargetPVCRef *ObjectReference `json:"targetPVCRef,omitempty"`
-+}
-+
-+// +kubebuilder:object:root=true
-+// +kubebuilder:subresource:status
-+// +kubebuilder:printcolumn:name="Age",type="date",JSONPath=".metadata.creationTimestamp"
-+
-+// VolumeRestoreRequest is the Schema for the volumerestorerequests API
-+type VolumeRestoreRequest struct {
-+	metav1.TypeMeta   `json:",inline"`
-+	metav1.ObjectMeta `json:"metadata,omitempty"`
-+	Spec              VolumeRestoreRequestSpec   `json:"spec,omitempty"`
-+	Status            VolumeRestoreRequestStatus `json:"status,omitempty"`
-+}
-+
-+// +kubebuilder:object:root=true
-+
-+// VolumeRestoreRequestList contains a list of VolumeRestoreRequest
-+type VolumeRestoreRequestList struct {
-+	metav1.TypeMeta `json:",inline"`
-+	metav1.ListMeta `json:"metadata,omitempty"`
-+	Items           []VolumeRestoreRequest `json:"items"`
-+}
-diff --git a/vendor/github.com/deckhouse/storage-foundation/api/v1alpha1/zz_generated.deepcopy.go b/vendor/github.com/deckhouse/storage-foundation/api/v1alpha1/zz_generated.deepcopy.go
-new file mode 100644
-index 000000000..58c1cac7e
---- /dev/null
-+++ b/vendor/github.com/deckhouse/storage-foundation/api/v1alpha1/zz_generated.deepcopy.go
-@@ -0,0 +1,304 @@
-+//go:build !ignore_autogenerated
-+
-+/*
-+Copyright 2025 Flant JSC
-+
-+Licensed under the Apache License, Version 2.0 (the "License");
-+you may not use this file except in compliance with the License.
-+You may obtain a copy of the License at
-+
-+    http://www.apache.org/licenses/LICENSE-2.0
-+
-+Unless required by applicable law or agreed to in writing, software
-+distributed under the License is distributed on an "AS IS" BASIS,
-+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-+See the License for the specific language governing permissions and
-+limitations under the License.
-+*/
-+
-+// Code generated by controller-gen. DO NOT EDIT.
-+
-+package v1alpha1
-+
-+import (
-+	"k8s.io/apimachinery/pkg/apis/meta/v1"
-+	"k8s.io/apimachinery/pkg/runtime"
-+)
-+
-+// DeepCopyInto is an autogenerated deepcopy function, copying the receiver, writing into out. in must be non-nil.
-+func (in *ObjectReference) DeepCopyInto(out *ObjectReference) {
-+	*out = *in
-+}
-+
-+// DeepCopy is an autogenerated deepcopy function, copying the receiver, creating a new ObjectReference.
-+func (in *ObjectReference) DeepCopy() *ObjectReference {
-+	if in == nil {
-+		return nil
++// TestReconcile_DriverFilter verifies that the executor ignores VRRs whose
++// StorageClass does not target this CSI driver (or does not exist).
++func TestReconcile_DriverFilter(t *testing.T) {
++	tests := []struct {
++		name          string
++		storageClass  *storagev1.StorageClass
++		scListerError error
++	}{
++		{
++			name: "different driver - should ignore",
++			storageClass: &storagev1.StorageClass{
++				ObjectMeta:  metav1.ObjectMeta{Name: vrrTestStorageClass},
++				Provisioner: "other-driver",
++			},
++		},
++		{
++			name:          "storage class not found - should ignore",
++			scListerError: apierrors.NewNotFound(storagev1.Resource("storageclass"), vrrTestStorageClass),
++		},
 +	}
-+	out := new(ObjectReference)
-+	in.DeepCopyInto(out)
-+	return out
-+}
 +
-+// DeepCopyInto is an autogenerated deepcopy function, copying the receiver, writing into out. in must be non-nil.
-+func (in *VolumeCaptureRequest) DeepCopyInto(out *VolumeCaptureRequest) {
-+	*out = *in
-+	out.TypeMeta = in.TypeMeta
-+	in.ObjectMeta.DeepCopyInto(&out.ObjectMeta)
-+	in.Spec.DeepCopyInto(&out.Spec)
-+	in.Status.DeepCopyInto(&out.Status)
-+}
++	for _, tt := range tests {
++		t.Run(tt.name, func(t *testing.T) {
++			ctrl := gomock.NewController(t)
++			defer ctrl.Finish()
 +
-+// DeepCopy is an autogenerated deepcopy function, copying the receiver, creating a new VolumeCaptureRequest.
-+func (in *VolumeCaptureRequest) DeepCopy() *VolumeCaptureRequest {
-+	if in == nil {
-+		return nil
++			mockCSIClient := &mockControllerClient{
++				createVolumeFunc: func(_ context.Context, _ *csi.CreateVolumeRequest) (*csi.CreateVolumeResponse, error) {
++					t.Error("CSI CreateVolume must not be called for a foreign/unknown StorageClass")
++					return nil, nil
++				},
++			}
++			mockSCLister := NewMockStorageClassLister(ctrl)
++			if tt.scListerError != nil {
++				mockSCLister.errors[vrrTestStorageClass] = tt.scListerError
++			} else if tt.storageClass != nil {
++				mockSCLister.storageClasses[vrrTestStorageClass] = tt.storageClass
++			}
++
++			kubeClient := fakeclientset.NewSimpleClientset()
++			e := newTestExecutor(mockCSIClient, mockSCLister, kubeClient, nil, nil)
++
++			vrr := createTestVRR("test-vrr", "test-ns", "VolumeSnapshotContent", "test-vsc")
++			if err := e.reconcile(context.Background(), vrr); err != nil {
++				t.Fatalf("reconcile returned unexpected error: %v", err)
++			}
++
++			assertNoPVC(t, kubeClient)
++		})
 +	}
-+	out := new(VolumeCaptureRequest)
-+	in.DeepCopyInto(out)
-+	return out
 +}
 +
-+// DeepCopyObject is an autogenerated deepcopy function, copying the receiver, creating a new runtime.Object.
-+func (in *VolumeCaptureRequest) DeepCopyObject() runtime.Object {
-+	if c := in.DeepCopy(); c != nil {
-+		return c
++func TestReconcile_EmptyStorageClassName(t *testing.T) {
++	ctrl := gomock.NewController(t)
++	defer ctrl.Finish()
++
++	mockCSIClient := &mockControllerClient{}
++	mockSCLister := NewMockStorageClassLister(ctrl)
++
++	vrr := createTestVRR("test-vrr", "test-ns", "VolumeSnapshotContent", "test-vsc")
++	vrr.Spec.StorageClassName = ""
++
++	kubeClient := fakeclientset.NewSimpleClientset()
++	eventRecorder := record.NewFakeRecorder(10)
++	e := newTestExecutor(mockCSIClient, mockSCLister, kubeClient, nil, eventRecorder)
++
++	if err := e.reconcile(context.Background(), vrr); err != nil {
++		t.Fatalf("reconcile returned unexpected error: %v", err)
 +	}
-+	return nil
++
++	if !waitForEvent(eventRecorder, "VRRInvalidSpec") {
++		t.Error("Expected event with reason VRRInvalidSpec for empty StorageClassName")
++	}
++	assertNoPVC(t, kubeClient)
 +}
 +
-+// DeepCopyInto is an autogenerated deepcopy function, copying the receiver, writing into out. in must be non-nil.
-+func (in *VolumeCaptureRequestList) DeepCopyInto(out *VolumeCaptureRequestList) {
-+	*out = *in
-+	out.TypeMeta = in.TypeMeta
-+	in.ListMeta.DeepCopyInto(&out.ListMeta)
-+	if in.Items != nil {
-+		in, out := &in.Items, &out.Items
-+		*out = make([]VolumeCaptureRequest, len(*in))
-+		for i := range *in {
-+			(*in)[i].DeepCopyInto(&(*out)[i])
++func TestReconcile_UnsupportedSourceKind(t *testing.T) {
++	ctrl := gomock.NewController(t)
++	defer ctrl.Finish()
++
++	mockCSIClient := &mockControllerClient{}
++	mockSCLister := NewMockStorageClassLister(ctrl)
++	mockSCLister.storageClasses[vrrTestStorageClass] = ourStorageClass()
++
++	vrr := createTestVRR("test-vrr", "test-ns", "SomethingElse", "x")
++
++	kubeClient := fakeclientset.NewSimpleClientset()
++	eventRecorder := record.NewFakeRecorder(10)
++	e := newTestExecutor(mockCSIClient, mockSCLister, kubeClient, nil, eventRecorder)
++
++	// Unsupported source is a permanent condition for the executor; it must not
++	// return an error (no retry) and must leave terminal decision to the controller.
++	if err := e.reconcile(context.Background(), vrr); err != nil {
++		t.Fatalf("reconcile should not return an error for unsupported source kind: %v", err)
++	}
++	if !waitForEvent(eventRecorder, "VRRInvalidSource") {
++		t.Error("Expected event with reason VRRInvalidSource")
++	}
++	assertNoPVC(t, kubeClient)
++}
++
++func TestReconcile_TerminalVRR(t *testing.T) {
++	ctrl := gomock.NewController(t)
++	defer ctrl.Finish()
++
++	mockCSIClient := &mockControllerClient{
++		createVolumeFunc: func(_ context.Context, _ *csi.CreateVolumeRequest) (*csi.CreateVolumeResponse, error) {
++			t.Error("CSI CreateVolume must not be called for a terminal VRR")
++			return nil, nil
++		},
++	}
++	mockSCLister := NewMockStorageClassLister(ctrl)
++	mockSCLister.storageClasses[vrrTestStorageClass] = ourStorageClass()
++
++	vrr := createTestVRR("test-vrr", "test-ns", "VolumeSnapshotContent", "test-vsc")
++	vrr.Status.Conditions = []metav1.Condition{
++		{Type: storagev1alpha1.ConditionTypeReady, Status: metav1.ConditionTrue, Reason: storagev1alpha1.ConditionReasonCompleted},
++	}
++
++	kubeClient := fakeclientset.NewSimpleClientset()
++	e := newTestExecutor(mockCSIClient, mockSCLister, kubeClient, nil, nil)
++
++	if err := e.reconcile(context.Background(), vrr); err != nil {
++		t.Fatalf("reconcile returned unexpected error: %v", err)
++	}
++	assertNoPVC(t, kubeClient)
++}
++
++func TestReconcile_PVCAlreadyExists(t *testing.T) {
++	ctrl := gomock.NewController(t)
++	defer ctrl.Finish()
++
++	mockCSIClient := &mockControllerClient{
++		createVolumeFunc: func(_ context.Context, _ *csi.CreateVolumeRequest) (*csi.CreateVolumeResponse, error) {
++			t.Error("CSI CreateVolume must not be called when target PVC already exists")
++			return nil, nil
++		},
++	}
++	mockSCLister := NewMockStorageClassLister(ctrl)
++	mockSCLister.storageClasses[vrrTestStorageClass] = ourStorageClass()
++
++	vrr := createTestVRR("test-vrr", "test-ns", "VolumeSnapshotContent", "test-vsc")
++	existingPVC := &v1.PersistentVolumeClaim{
++		ObjectMeta: metav1.ObjectMeta{Name: vrrTestTargetPVCName, Namespace: vrrTestTargetNamespace},
++	}
++
++	kubeClient := fakeclientset.NewSimpleClientset(existingPVC)
++	e := newTestExecutor(mockCSIClient, mockSCLister, kubeClient, nil, nil)
++
++	if err := e.reconcile(context.Background(), vrr); err != nil {
++		t.Fatalf("reconcile returned unexpected error: %v", err)
++	}
++}
++
++func TestReconcile_TargetPVCConflict(t *testing.T) {
++	ctrl := gomock.NewController(t)
++	defer ctrl.Finish()
++
++	mockCSIClient := &mockControllerClient{
++		createVolumeFunc: func(_ context.Context, _ *csi.CreateVolumeRequest) (*csi.CreateVolumeResponse, error) {
++			t.Error("CSI CreateVolume must not be called on PVC conflict")
++			return nil, nil
++		},
++	}
++	mockSCLister := NewMockStorageClassLister(ctrl)
++	mockSCLister.storageClasses[vrrTestStorageClass] = ourStorageClass()
++
++	vrr := createTestVRR("test-vrr", "test-ns", "VolumeSnapshotContent", "test-vsc")
++	// Existing PVC bound to a volume different from the one this VRR would produce.
++	existingPVC := &v1.PersistentVolumeClaim{
++		ObjectMeta: metav1.ObjectMeta{Name: vrrTestTargetPVCName, Namespace: vrrTestTargetNamespace},
++		Spec:       v1.PersistentVolumeClaimSpec{VolumeName: "some-other-volume"},
++	}
++
++	kubeClient := fakeclientset.NewSimpleClientset(existingPVC)
++	eventRecorder := record.NewFakeRecorder(10)
++	e := newTestExecutor(mockCSIClient, mockSCLister, kubeClient, nil, eventRecorder)
++
++	if err := e.reconcile(context.Background(), vrr); err != nil {
++		t.Fatalf("reconcile should not return an error on conflict (controller decides terminal): %v", err)
++	}
++	if !waitForEvent(eventRecorder, "VRRTargetPVCConflict") {
++		t.Error("Expected event with reason VRRTargetPVCConflict")
++	}
++}
++
++func TestReconcile_FromVSC_HappyPath(t *testing.T) {
++	ctrl := gomock.NewController(t)
++	defer ctrl.Finish()
++
++	mockCSIClient := &mockControllerClient{}
++	mockSCLister := NewMockStorageClassLister(ctrl)
++	mockSCLister.storageClasses[vrrTestStorageClass] = ourStorageClass()
++
++	vrr := createTestVRR("test-vrr", "test-ns", "VolumeSnapshotContent", "test-vsc")
++	vsc := readyVSC("test-vsc", vrrTestSnapshotHandle)
++
++	kubeClient := fakeclientset.NewSimpleClientset()
++	snapshotClient := snapfake.NewSimpleClientset(vsc)
++
++	mockCSIClient.createVolumeFunc = func(_ context.Context, req *csi.CreateVolumeRequest) (*csi.CreateVolumeResponse, error) {
++		src, ok := req.VolumeContentSource.GetType().(*csi.VolumeContentSource_Snapshot)
++		if !ok {
++			t.Fatalf("VolumeContentSource should be Snapshot type, got %T", req.VolumeContentSource.GetType())
++		}
++		if src.Snapshot.SnapshotId != vrrTestSnapshotHandle {
++			t.Errorf("Expected snapshot handle %s, got %s", vrrTestSnapshotHandle, src.Snapshot.SnapshotId)
++		}
++		return &csi.CreateVolumeResponse{Volume: &csi.Volume{VolumeId: "new-volume-id", CapacityBytes: 1024 * 1024 * 1024}}, nil
++	}
++
++	e := newTestExecutor(mockCSIClient, mockSCLister, kubeClient, snapshotClient, nil)
++	if err := e.reconcile(context.Background(), vrr); err != nil {
++		t.Fatalf("reconcile failed: %v", err)
++	}
++
++	pvName := expectedPVName(t, vrr)
++	assertPVExists(t, kubeClient, pvName)
++	assertPVCBoundTo(t, kubeClient, pvName)
++}
++
++func TestReconcile_EmptyVolumeMode(t *testing.T) {
++	ctrl := gomock.NewController(t)
++	defer ctrl.Finish()
++
++	mockCSIClient := &mockControllerClient{
++		createVolumeFunc: func(_ context.Context, _ *csi.CreateVolumeRequest) (*csi.CreateVolumeResponse, error) {
++			t.Error("CSI CreateVolume must not be called when VolumeMode is empty")
++			return nil, nil
++		},
++	}
++	mockSCLister := NewMockStorageClassLister(ctrl)
++	mockSCLister.storageClasses[vrrTestStorageClass] = ourStorageClass()
++
++	vrr := createTestVRR("test-vrr", "test-ns", "VolumeSnapshotContent", "test-vsc")
++	vrr.Spec.VolumeMode = "" // required; executor must reject
++
++	kubeClient := fakeclientset.NewSimpleClientset()
++	eventRecorder := record.NewFakeRecorder(10)
++	e := newTestExecutor(mockCSIClient, mockSCLister, kubeClient, nil, eventRecorder)
++
++	if err := e.reconcile(context.Background(), vrr); err != nil {
++		t.Fatalf("reconcile should not return an error for empty VolumeMode (controller decides terminal): %v", err)
++	}
++	if !waitForEvent(eventRecorder, "VRRInvalidSpec") {
++		t.Error("Expected event with reason VRRInvalidSpec for empty VolumeMode")
++	}
++	assertNoPVC(t, kubeClient)
++}
++
++// TestReconcile_FromVSC_BlockMode verifies that a Block VRR restores a Block volume:
++// the CSI CreateVolume request carries a Block capability and the resulting PV/PVC
++// have VolumeMode=Block (the regression this whole change fixes).
++func TestReconcile_FromVSC_BlockMode(t *testing.T) {
++	ctrl := gomock.NewController(t)
++	defer ctrl.Finish()
++
++	mockCSIClient := &mockControllerClient{}
++	mockSCLister := NewMockStorageClassLister(ctrl)
++	mockSCLister.storageClasses[vrrTestStorageClass] = ourStorageClass()
++
++	vrr := createTestVRR("test-vrr", "test-ns", "VolumeSnapshotContent", "test-vsc")
++	vrr.Spec.VolumeMode = v1.PersistentVolumeBlock
++	vrr.Spec.AccessModes = []v1.PersistentVolumeAccessMode{v1.ReadWriteMany}
++	vsc := readyVSC("test-vsc", vrrTestSnapshotHandle)
++
++	kubeClient := fakeclientset.NewSimpleClientset()
++	snapshotClient := snapfake.NewSimpleClientset(vsc)
++
++	mockCSIClient.createVolumeFunc = func(_ context.Context, req *csi.CreateVolumeRequest) (*csi.CreateVolumeResponse, error) {
++		if len(req.VolumeCapabilities) != 1 {
++			t.Fatalf("expected exactly 1 volume capability, got %d", len(req.VolumeCapabilities))
++		}
++		if req.VolumeCapabilities[0].GetBlock() == nil {
++			t.Errorf("expected a Block access type in CSI CreateVolume request, got %#v", req.VolumeCapabilities[0].GetAccessType())
++		}
++		if mode := req.VolumeCapabilities[0].GetAccessMode().GetMode(); mode != csi.VolumeCapability_AccessMode_MULTI_NODE_MULTI_WRITER {
++			t.Errorf("expected MULTI_NODE_MULTI_WRITER access mode for RWX, got %v", mode)
++		}
++		return &csi.CreateVolumeResponse{Volume: &csi.Volume{VolumeId: "new-volume-id", CapacityBytes: 1024 * 1024 * 1024}}, nil
++	}
++
++	e := newTestExecutor(mockCSIClient, mockSCLister, kubeClient, snapshotClient, nil)
++	if err := e.reconcile(context.Background(), vrr); err != nil {
++		t.Fatalf("reconcile failed: %v", err)
++	}
++
++	pvName := expectedPVName(t, vrr)
++	pv, err := kubeClient.CoreV1().PersistentVolumes().Get(context.Background(), pvName, metav1.GetOptions{})
++	if err != nil {
++		t.Fatalf("expected PV %s to exist: %v", pvName, err)
++	}
++	if pv.Spec.VolumeMode == nil || *pv.Spec.VolumeMode != v1.PersistentVolumeBlock {
++		t.Errorf("expected PV VolumeMode=Block, got %v", pv.Spec.VolumeMode)
++	}
++	pvc, err := kubeClient.CoreV1().PersistentVolumeClaims(vrrTestTargetNamespace).Get(context.Background(), vrrTestTargetPVCName, metav1.GetOptions{})
++	if err != nil {
++		t.Fatalf("expected target PVC to exist: %v", err)
++	}
++	if pvc.Spec.VolumeMode == nil || *pvc.Spec.VolumeMode != v1.PersistentVolumeBlock {
++		t.Errorf("expected PVC VolumeMode=Block, got %v", pvc.Spec.VolumeMode)
++	}
++}
++
++func TestReconcile_FromVSC_NotFound(t *testing.T) {
++	e, kubeClient := vscErrorExecutor(t, snapfake.NewSimpleClientset()) // empty: VSC missing
++	vrr := createTestVRR("test-vrr", "test-ns", "VolumeSnapshotContent", "non-existent-vsc")
++
++	err := e.reconcile(context.Background(), vrr)
++	if err == nil || !strings.Contains(err.Error(), "not found") {
++		t.Fatalf("Expected retryable 'not found' error, got: %v", err)
++	}
++	assertNoPVC(t, kubeClient)
++}
++
++func TestReconcile_FromVSC_NotReady(t *testing.T) {
++	vsc := &crdv1.VolumeSnapshotContent{
++		ObjectMeta: metav1.ObjectMeta{Name: "test-vsc"},
++		Status:     &crdv1.VolumeSnapshotContentStatus{ReadyToUse: boolPtr(false)},
++	}
++	e, kubeClient := vscErrorExecutor(t, snapfake.NewSimpleClientset(vsc))
++	vrr := createTestVRR("test-vrr", "test-ns", "VolumeSnapshotContent", "test-vsc")
++
++	err := e.reconcile(context.Background(), vrr)
++	if err == nil || !strings.Contains(err.Error(), "not ReadyToUse") {
++		t.Fatalf("Expected retryable 'not ReadyToUse' error, got: %v", err)
++	}
++	assertNoPVC(t, kubeClient)
++}
++
++func TestReconcile_FromVSC_PVAlreadyExists(t *testing.T) {
++	ctrl := gomock.NewController(t)
++	defer ctrl.Finish()
++
++	mockSCLister := NewMockStorageClassLister(ctrl)
++	mockSCLister.storageClasses[vrrTestStorageClass] = ourStorageClass()
++
++	vrr := createTestVRR("test-vrr", "test-ns", "VolumeSnapshotContent", "test-vsc")
++	vsc := readyVSC("test-vsc", vrrTestSnapshotHandle)
++	pvName := expectedPVName(t, vrr)
++	existingPV := csiPV(pvName, "existing-volume-id")
++
++	kubeClient := fakeclientset.NewSimpleClientset(existingPV)
++	snapshotClient := snapfake.NewSimpleClientset(vsc)
++
++	mockCSIClient := &mockControllerClient{
++		createVolumeFunc: func(_ context.Context, _ *csi.CreateVolumeRequest) (*csi.CreateVolumeResponse, error) {
++			t.Error("CSI CreateVolume must not be called when PV already exists")
++			return nil, nil
++		},
++	}
++
++	e := newTestExecutor(mockCSIClient, mockSCLister, kubeClient, snapshotClient, nil)
++	if err := e.reconcile(context.Background(), vrr); err != nil {
++		t.Fatalf("reconcile failed: %v", err)
++	}
++	assertPVCBoundTo(t, kubeClient, pvName)
++}
++
++func TestReconcile_FromPV_HappyPath(t *testing.T) {
++	ctrl := gomock.NewController(t)
++	defer ctrl.Finish()
++
++	mockSCLister := NewMockStorageClassLister(ctrl)
++	mockSCLister.storageClasses[vrrTestStorageClass] = ourStorageClass()
++
++	vrr := createTestVRR("test-vrr", "test-ns", "PersistentVolume", "source-pv")
++	sourcePV := csiPV("source-pv", vrrTestVolumeHandle)
++
++	kubeClient := fakeclientset.NewSimpleClientset(sourcePV)
++
++	mockCSIClient := &mockControllerClient{
++		createVolumeFunc: func(_ context.Context, req *csi.CreateVolumeRequest) (*csi.CreateVolumeResponse, error) {
++			src, ok := req.VolumeContentSource.GetType().(*csi.VolumeContentSource_Volume)
++			if !ok {
++				t.Fatalf("VolumeContentSource should be Volume type, got %T", req.VolumeContentSource.GetType())
++			}
++			if src.Volume.VolumeId != vrrTestVolumeHandle {
++				t.Errorf("Expected volume handle %s, got %s", vrrTestVolumeHandle, src.Volume.VolumeId)
++			}
++			return &csi.CreateVolumeResponse{Volume: &csi.Volume{VolumeId: "new-volume-id", CapacityBytes: 1024 * 1024 * 1024}}, nil
++		},
++	}
++
++	e := newTestExecutor(mockCSIClient, mockSCLister, kubeClient, nil, nil)
++	if err := e.reconcile(context.Background(), vrr); err != nil {
++		t.Fatalf("reconcile failed: %v", err)
++	}
++
++	pvName := expectedPVName(t, vrr)
++	assertPVExists(t, kubeClient, pvName)
++	assertPVCBoundTo(t, kubeClient, pvName)
++}
++
++func TestReconcile_FromPV_ForeignDriver(t *testing.T) {
++	ctrl := gomock.NewController(t)
++	defer ctrl.Finish()
++
++	mockSCLister := NewMockStorageClassLister(ctrl)
++	mockSCLister.storageClasses[vrrTestStorageClass] = ourStorageClass()
++
++	vrr := createTestVRR("test-vrr", "test-ns", "PersistentVolume", "source-pv")
++	sourcePV := &v1.PersistentVolume{
++		ObjectMeta: metav1.ObjectMeta{Name: "source-pv"},
++		Spec: v1.PersistentVolumeSpec{
++			PersistentVolumeSource: v1.PersistentVolumeSource{
++				CSI: &v1.CSIPersistentVolumeSource{Driver: "other-driver", VolumeHandle: vrrTestVolumeHandle},
++			},
++		},
++	}
++
++	kubeClient := fakeclientset.NewSimpleClientset(sourcePV)
++	mockCSIClient := &mockControllerClient{}
++
++	e := newTestExecutor(mockCSIClient, mockSCLister, kubeClient, nil, nil)
++	err := e.reconcile(context.Background(), vrr)
++	if err == nil || !strings.Contains(err.Error(), "different CSI driver") {
++		t.Fatalf("Expected 'different CSI driver' error, got: %v", err)
++	}
++	assertNoPVC(t, kubeClient)
++}
++
++func TestCreatePVCFromVRR_AlreadyExists(t *testing.T) {
++	existingPVC := &v1.PersistentVolumeClaim{
++		ObjectMeta: metav1.ObjectMeta{Name: vrrTestTargetPVCName, Namespace: vrrTestTargetNamespace},
++	}
++	kubeClient := fakeclientset.NewSimpleClientset(existingPVC)
++	e := newTestExecutor(&mockControllerClient{}, nil, kubeClient, nil, nil)
++
++	vrr := createTestVRR("test-vrr", "test-ns", "VolumeSnapshotContent", "test-vsc")
++	pv := simplePV("test-pv")
++
++	if err := e.createPVCFromVRR(context.Background(), vrr, pv); err != nil {
++		t.Fatalf("createPVCFromVRR should be idempotent when PVC already exists: %v", err)
++	}
++}
++
++func TestCreatePVCFromVRR_WithOwnerReference(t *testing.T) {
++	kubeClient := fakeclientset.NewSimpleClientset()
++	e := newTestExecutor(&mockControllerClient{}, nil, kubeClient, nil, nil)
++
++	vrr := createTestVRR("test-vrr", "test-ns", "VolumeSnapshotContent", "test-vsc")
++	vrr.Annotations = map[string]string{
++		objectKeeperRefAnnotation: "deckhouse.io/v1alpha1|ObjectKeeper|test-ok|test-uid",
++	}
++	pv := simplePV("test-pv")
++
++	if err := e.createPVCFromVRR(context.Background(), vrr, pv); err != nil {
++		t.Fatalf("createPVCFromVRR failed: %v", err)
++	}
++
++	pvc, err := kubeClient.CoreV1().PersistentVolumeClaims(vrrTestTargetNamespace).Get(context.Background(), vrrTestTargetPVCName, metav1.GetOptions{})
++	if err != nil {
++		t.Fatalf("Failed to get PVC: %v", err)
++	}
++	if len(pvc.OwnerReferences) != 1 || pvc.OwnerReferences[0].Name != "test-ok" {
++		t.Errorf("Expected single ObjectKeeper owner reference 'test-ok', got %v", pvc.OwnerReferences)
++	}
++}
++
++func TestParseObjectKeeperRef(t *testing.T) {
++	ref, err := parseObjectKeeperRef("deckhouse.io/v1alpha1|ObjectKeeper|ret-pvc|uid-1")
++	if err != nil {
++		t.Fatalf("unexpected error: %v", err)
++	}
++	if ref.Kind != "ObjectKeeper" || ref.Name != "ret-pvc" || string(ref.UID) != "uid-1" {
++		t.Errorf("unexpected owner reference: %+v", ref)
++	}
++	if ref.Controller == nil || !*ref.Controller {
++		t.Error("owner reference should be a controller reference")
++	}
++
++	for _, bad := range []string{"", "a|b|c", "a|b|c|d|e", "|b|c|d", "a||c|d"} {
++		if _, err := parseObjectKeeperRef(bad); err == nil {
++			t.Errorf("expected error for malformed ref %q", bad)
 +		}
 +	}
 +}
 +
-+// DeepCopy is an autogenerated deepcopy function, copying the receiver, creating a new VolumeCaptureRequestList.
-+func (in *VolumeCaptureRequestList) DeepCopy() *VolumeCaptureRequestList {
-+	if in == nil {
-+		return nil
++func TestIsTerminalVRR(t *testing.T) {
++	if isTerminalVRR(nil) {
++		t.Error("nil conditions should not be terminal")
 +	}
-+	out := new(VolumeCaptureRequestList)
-+	in.DeepCopyInto(out)
-+	return out
-+}
-+
-+// DeepCopyObject is an autogenerated deepcopy function, copying the receiver, creating a new runtime.Object.
-+func (in *VolumeCaptureRequestList) DeepCopyObject() runtime.Object {
-+	if c := in.DeepCopy(); c != nil {
-+		return c
++	cond := []metav1.Condition{{Type: storagev1alpha1.ConditionTypeReady, Status: metav1.ConditionUnknown}}
++	if isTerminalVRR(cond) {
++		t.Error("Ready=Unknown should not be terminal")
 +	}
-+	return nil
-+}
-+
-+// DeepCopyInto is an autogenerated deepcopy function, copying the receiver, writing into out. in must be non-nil.
-+func (in *VolumeCaptureRequestSpec) DeepCopyInto(out *VolumeCaptureRequestSpec) {
-+	*out = *in
-+	if in.Targets != nil {
-+		in, out := &in.Targets, &out.Targets
-+		*out = make([]VolumeCaptureTarget, len(*in))
-+		copy(*out, *in)
-+	}
-+}
-+
-+// DeepCopy is an autogenerated deepcopy function, copying the receiver, creating a new VolumeCaptureRequestSpec.
-+func (in *VolumeCaptureRequestSpec) DeepCopy() *VolumeCaptureRequestSpec {
-+	if in == nil {
-+		return nil
-+	}
-+	out := new(VolumeCaptureRequestSpec)
-+	in.DeepCopyInto(out)
-+	return out
-+}
-+
-+// DeepCopyInto is an autogenerated deepcopy function, copying the receiver, writing into out. in must be non-nil.
-+func (in *VolumeCaptureRequestStatus) DeepCopyInto(out *VolumeCaptureRequestStatus) {
-+	*out = *in
-+	if in.CompletionTimestamp != nil {
-+		in, out := &in.CompletionTimestamp, &out.CompletionTimestamp
-+		*out = (*in).DeepCopy()
-+	}
-+	if in.Conditions != nil {
-+		in, out := &in.Conditions, &out.Conditions
-+		*out = make([]v1.Condition, len(*in))
-+		for i := range *in {
-+			(*in)[i].DeepCopyInto(&(*out)[i])
-+		}
-+	}
-+	if in.DataRefs != nil {
-+		in, out := &in.DataRefs, &out.DataRefs
-+		*out = make([]VolumeDataBinding, len(*in))
-+		copy(*out, *in)
-+	}
-+}
-+
-+// DeepCopy is an autogenerated deepcopy function, copying the receiver, creating a new VolumeCaptureRequestStatus.
-+func (in *VolumeCaptureRequestStatus) DeepCopy() *VolumeCaptureRequestStatus {
-+	if in == nil {
-+		return nil
-+	}
-+	out := new(VolumeCaptureRequestStatus)
-+	in.DeepCopyInto(out)
-+	return out
-+}
-+
-+// DeepCopyInto is an autogenerated deepcopy function, copying the receiver, writing into out. in must be non-nil.
-+func (in *VolumeCaptureTarget) DeepCopyInto(out *VolumeCaptureTarget) {
-+	*out = *in
-+}
-+
-+// DeepCopy is an autogenerated deepcopy function, copying the receiver, creating a new VolumeCaptureTarget.
-+func (in *VolumeCaptureTarget) DeepCopy() *VolumeCaptureTarget {
-+	if in == nil {
-+		return nil
-+	}
-+	out := new(VolumeCaptureTarget)
-+	in.DeepCopyInto(out)
-+	return out
-+}
-+
-+// DeepCopyInto is an autogenerated deepcopy function, copying the receiver, writing into out. in must be non-nil.
-+func (in *VolumeDataArtifactRef) DeepCopyInto(out *VolumeDataArtifactRef) {
-+	*out = *in
-+}
-+
-+// DeepCopy is an autogenerated deepcopy function, copying the receiver, creating a new VolumeDataArtifactRef.
-+func (in *VolumeDataArtifactRef) DeepCopy() *VolumeDataArtifactRef {
-+	if in == nil {
-+		return nil
-+	}
-+	out := new(VolumeDataArtifactRef)
-+	in.DeepCopyInto(out)
-+	return out
-+}
-+
-+// DeepCopyInto is an autogenerated deepcopy function, copying the receiver, writing into out. in must be non-nil.
-+func (in *VolumeDataBinding) DeepCopyInto(out *VolumeDataBinding) {
-+	*out = *in
-+	out.Target = in.Target
-+	out.Artifact = in.Artifact
-+}
-+
-+// DeepCopy is an autogenerated deepcopy function, copying the receiver, creating a new VolumeDataBinding.
-+func (in *VolumeDataBinding) DeepCopy() *VolumeDataBinding {
-+	if in == nil {
-+		return nil
-+	}
-+	out := new(VolumeDataBinding)
-+	in.DeepCopyInto(out)
-+	return out
-+}
-+
-+// DeepCopyInto is an autogenerated deepcopy function, copying the receiver, writing into out. in must be non-nil.
-+func (in *VolumeRestoreRequest) DeepCopyInto(out *VolumeRestoreRequest) {
-+	*out = *in
-+	out.TypeMeta = in.TypeMeta
-+	in.ObjectMeta.DeepCopyInto(&out.ObjectMeta)
-+	out.Spec = in.Spec
-+	in.Status.DeepCopyInto(&out.Status)
-+}
-+
-+// DeepCopy is an autogenerated deepcopy function, copying the receiver, creating a new VolumeRestoreRequest.
-+func (in *VolumeRestoreRequest) DeepCopy() *VolumeRestoreRequest {
-+	if in == nil {
-+		return nil
-+	}
-+	out := new(VolumeRestoreRequest)
-+	in.DeepCopyInto(out)
-+	return out
-+}
-+
-+// DeepCopyObject is an autogenerated deepcopy function, copying the receiver, creating a new runtime.Object.
-+func (in *VolumeRestoreRequest) DeepCopyObject() runtime.Object {
-+	if c := in.DeepCopy(); c != nil {
-+		return c
-+	}
-+	return nil
-+}
-+
-+// DeepCopyInto is an autogenerated deepcopy function, copying the receiver, writing into out. in must be non-nil.
-+func (in *VolumeRestoreRequestList) DeepCopyInto(out *VolumeRestoreRequestList) {
-+	*out = *in
-+	out.TypeMeta = in.TypeMeta
-+	in.ListMeta.DeepCopyInto(&out.ListMeta)
-+	if in.Items != nil {
-+		in, out := &in.Items, &out.Items
-+		*out = make([]VolumeRestoreRequest, len(*in))
-+		for i := range *in {
-+			(*in)[i].DeepCopyInto(&(*out)[i])
++	for _, s := range []metav1.ConditionStatus{metav1.ConditionTrue, metav1.ConditionFalse} {
++		cond := []metav1.Condition{{Type: storagev1alpha1.ConditionTypeReady, Status: s}}
++		if !isTerminalVRR(cond) {
++			t.Errorf("Ready=%s should be terminal", s)
 +		}
 +	}
 +}
 +
-+// DeepCopy is an autogenerated deepcopy function, copying the receiver, creating a new VolumeRestoreRequestList.
-+func (in *VolumeRestoreRequestList) DeepCopy() *VolumeRestoreRequestList {
-+	if in == nil {
-+		return nil
++func TestSyncHandler_NotFoundIsNoop(t *testing.T) {
++	e := newTestExecutor(&mockControllerClient{}, nil, nil, nil, nil)
++	if err := e.syncHandler(context.Background(), "test-ns/missing"); err != nil {
++		t.Fatalf("syncHandler for a missing key should be a no-op, got: %v", err)
 +	}
-+	out := new(VolumeRestoreRequestList)
-+	in.DeepCopyInto(out)
-+	return out
 +}
 +
-+// DeepCopyObject is an autogenerated deepcopy function, copying the receiver, creating a new runtime.Object.
-+func (in *VolumeRestoreRequestList) DeepCopyObject() runtime.Object {
-+	if c := in.DeepCopy(); c != nil {
-+		return c
++func TestCreatePVFromCSIResponse_MULTI_NODE_READER_ONLY(t *testing.T) {
++	volume := &csi.Volume{VolumeId: "test-volume-id", CapacityBytes: 1024 * 1024 * 1024}
++	sc := ourStorageClass()
++	volumeCaps := []*csi.VolumeCapability{
++		{
++			AccessType: getAccessTypeMount("ext4", nil),
++			AccessMode: &csi.VolumeCapability_AccessMode{Mode: csi.VolumeCapability_AccessMode_MULTI_NODE_READER_ONLY},
++		},
 +	}
-+	return nil
++
++	pv, err := createPVFromCSIResponse(volume, sc, "test-pv", vrrTestDriverName, vrrTestIdentity, volumeCaps, "ext4",
++		[]v1.PersistentVolumeAccessMode{v1.ReadOnlyMany})
++	if err != nil {
++		t.Fatalf("createPVFromCSIResponse failed: %v", err)
++	}
++	if !pv.Spec.PersistentVolumeSource.CSI.ReadOnly {
++		t.Error("PV should be marked ReadOnly for ReadOnlyMany")
++	}
++	if len(pv.Spec.AccessModes) != 1 || pv.Spec.AccessModes[0] != v1.ReadOnlyMany {
++		t.Errorf("Expected AccessModes [ReadOnlyMany], got %v", pv.Spec.AccessModes)
++	}
 +}
 +
-+// DeepCopyInto is an autogenerated deepcopy function, copying the receiver, writing into out. in must be non-nil.
-+func (in *VolumeRestoreRequestSpec) DeepCopyInto(out *VolumeRestoreRequestSpec) {
-+	*out = *in
-+	out.SourceRef = in.SourceRef
++// TestCreatePVFromCSIResponse_RequestedAccessModes verifies the PV records the
++// requested access modes verbatim (no lossy reverse-map from the CSI access mode):
++// ReadWriteOncePod must not collapse to ReadWriteOnce, and a multi-mode list is kept.
++func TestCreatePVFromCSIResponse_RequestedAccessModes(t *testing.T) {
++	volume := &csi.Volume{VolumeId: "test-volume-id", CapacityBytes: 1024 * 1024 * 1024}
++	sc := ourStorageClass()
++	// CSI access mode is SINGLE_NODE_WRITER (what RWOP maps to), but the requested
++	// PV access mode must remain ReadWriteOncePod.
++	volumeCaps := []*csi.VolumeCapability{
++		{
++			AccessType: getAccessTypeMount("ext4", nil),
++			AccessMode: &csi.VolumeCapability_AccessMode{Mode: csi.VolumeCapability_AccessMode_SINGLE_NODE_WRITER},
++		},
++	}
++
++	pv, err := createPVFromCSIResponse(volume, sc, "test-pv", vrrTestDriverName, vrrTestIdentity, volumeCaps, "ext4",
++		[]v1.PersistentVolumeAccessMode{v1.ReadWriteOncePod})
++	if err != nil {
++		t.Fatalf("createPVFromCSIResponse failed: %v", err)
++	}
++	if len(pv.Spec.AccessModes) != 1 || pv.Spec.AccessModes[0] != v1.ReadWriteOncePod {
++		t.Errorf("Expected AccessModes [ReadWriteOncePod] (no collapse), got %v", pv.Spec.AccessModes)
++	}
++	if pv.Spec.PersistentVolumeSource.CSI.ReadOnly {
++		t.Error("PV should not be ReadOnly for ReadWriteOncePod")
++	}
++
++	// Empty requested modes default to ReadWriteOnce.
++	pvDefault, err := createPVFromCSIResponse(volume, sc, "test-pv2", vrrTestDriverName, vrrTestIdentity, volumeCaps, "ext4", nil)
++	if err != nil {
++		t.Fatalf("createPVFromCSIResponse failed: %v", err)
++	}
++	if len(pvDefault.Spec.AccessModes) != 1 || pvDefault.Spec.AccessModes[0] != v1.ReadWriteOnce {
++		t.Errorf("Expected default AccessModes [ReadWriteOnce], got %v", pvDefault.Spec.AccessModes)
++	}
 +}
 +
-+// DeepCopy is an autogenerated deepcopy function, copying the receiver, creating a new VolumeRestoreRequestSpec.
-+func (in *VolumeRestoreRequestSpec) DeepCopy() *VolumeRestoreRequestSpec {
-+	if in == nil {
-+		return nil
++func TestCreatePVFromCSIResponse_AccessibleTopology(t *testing.T) {
++	volume := &csi.Volume{
++		VolumeId:      "test-volume-id",
++		CapacityBytes: 1024 * 1024 * 1024,
++		AccessibleTopology: []*csi.Topology{
++			{Segments: map[string]string{"topology.kubernetes.io/zone": "us-west-1a"}},
++		},
 +	}
-+	out := new(VolumeRestoreRequestSpec)
-+	in.DeepCopyInto(out)
-+	return out
++	sc := ourStorageClass()
++	volumeCaps := []*csi.VolumeCapability{
++		{
++			AccessType: getAccessTypeMount("ext4", nil),
++			AccessMode: &csi.VolumeCapability_AccessMode{Mode: csi.VolumeCapability_AccessMode_SINGLE_NODE_WRITER},
++		},
++	}
++
++	pv, err := createPVFromCSIResponse(volume, sc, "test-pv", vrrTestDriverName, vrrTestIdentity, volumeCaps, "ext4", nil)
++	if err != nil {
++		t.Fatalf("createPVFromCSIResponse failed: %v", err)
++	}
++	if pv.Spec.NodeAffinity == nil || pv.Spec.NodeAffinity.Required == nil || len(pv.Spec.NodeAffinity.Required.NodeSelectorTerms) == 0 {
++		t.Error("PV should have NodeAffinity set from AccessibleTopology")
++	}
 +}
 +
-+// DeepCopyInto is an autogenerated deepcopy function, copying the receiver, writing into out. in must be non-nil.
-+func (in *VolumeRestoreRequestStatus) DeepCopyInto(out *VolumeRestoreRequestStatus) {
-+	*out = *in
-+	if in.CompletionTimestamp != nil {
-+		in, out := &in.CompletionTimestamp, &out.CompletionTimestamp
-+		*out = (*in).DeepCopy()
++// TestGetVolumeCapabilitiesFromVRR covers the Filesystem branch (mount access type,
++// explicit fsType, fsType fallback to the executor default, StorageClass mount
++// options), the default ReadWriteOnce access mode, and the Block branch with RWX.
++func TestGetVolumeCapabilitiesFromVRR(t *testing.T) {
++	scWithMount := &storagev1.StorageClass{
++		ObjectMeta:   metav1.ObjectMeta{Name: vrrTestStorageClass},
++		Provisioner:  vrrTestDriverName,
++		MountOptions: []string{"noatime", "nodiratime"},
 +	}
-+	if in.Conditions != nil {
-+		in, out := &in.Conditions, &out.Conditions
-+		*out = make([]v1.Condition, len(*in))
-+		for i := range *in {
-+			(*in)[i].DeepCopyInto(&(*out)[i])
++
++	tests := []struct {
++		name           string
++		volumeMode     v1.PersistentVolumeMode
++		fsType         string
++		accessModes    []v1.PersistentVolumeAccessMode
++		sc             *storagev1.StorageClass
++		wantBlock      bool
++		wantFSType     string
++		wantMountFlags []string
++		wantAccessMode csi.VolumeCapability_AccessMode_Mode
++	}{
++		{
++			name:           "filesystem: default RWO, fsType fallback, SC mount options",
++			volumeMode:     v1.PersistentVolumeFilesystem,
++			sc:             scWithMount,
++			wantBlock:      false,
++			wantFSType:     vrrTestDefaultFSType,
++			wantMountFlags: []string{"noatime", "nodiratime"},
++			wantAccessMode: csi.VolumeCapability_AccessMode_SINGLE_NODE_WRITER,
++		},
++		{
++			name:           "filesystem: explicit fsType, no SC mount options",
++			volumeMode:     v1.PersistentVolumeFilesystem,
++			fsType:         "xfs",
++			sc:             ourStorageClass(),
++			wantBlock:      false,
++			wantFSType:     "xfs",
++			wantMountFlags: nil,
++			wantAccessMode: csi.VolumeCapability_AccessMode_SINGLE_NODE_WRITER,
++		},
++		{
++			name:           "block: RWX maps to MULTI_NODE_MULTI_WRITER",
++			volumeMode:     v1.PersistentVolumeBlock,
++			accessModes:    []v1.PersistentVolumeAccessMode{v1.ReadWriteMany},
++			sc:             ourStorageClass(),
++			wantBlock:      true,
++			wantAccessMode: csi.VolumeCapability_AccessMode_MULTI_NODE_MULTI_WRITER,
++		},
++	}
++
++	for _, tt := range tests {
++		t.Run(tt.name, func(t *testing.T) {
++			e := newTestExecutor(&mockControllerClient{}, nil, nil, nil, nil)
++			vrr := createTestVRR("test-vrr", "test-ns", "VolumeSnapshotContent", "test-vsc")
++			vrr.Spec.VolumeMode = tt.volumeMode
++			vrr.Spec.FsType = tt.fsType
++			vrr.Spec.AccessModes = tt.accessModes
++
++			caps, err := e.getVolumeCapabilitiesFromVRR(vrr, tt.sc)
++			if err != nil {
++				t.Fatalf("getVolumeCapabilitiesFromVRR failed: %v", err)
++			}
++			if len(caps) != 1 {
++				t.Fatalf("expected 1 capability, got %d", len(caps))
++			}
++			capability := caps[0]
++			if mode := capability.GetAccessMode().GetMode(); mode != tt.wantAccessMode {
++				t.Errorf("access mode = %v, want %v", mode, tt.wantAccessMode)
++			}
++			if tt.wantBlock {
++				if capability.GetBlock() == nil {
++					t.Errorf("expected Block access type, got %#v", capability.GetAccessType())
++				}
++				return
++			}
++			mount := capability.GetMount()
++			if mount == nil {
++				t.Fatalf("expected Mount access type, got %#v", capability.GetAccessType())
++			}
++			if mount.FsType != tt.wantFSType {
++				t.Errorf("fsType = %q, want %q", mount.FsType, tt.wantFSType)
++			}
++			if !equalStringSlices(mount.MountFlags, tt.wantMountFlags) {
++				t.Errorf("mountFlags = %v, want %v", mount.MountFlags, tt.wantMountFlags)
++			}
++		})
++	}
++}
++
++// TestReconcile_InvalidAccessModes verifies an invalid access mode fails closed
++// (warning event, no PVC, no retryable error) symmetrically with VolumeMode.
++func TestReconcile_InvalidAccessModes(t *testing.T) {
++	ctrl := gomock.NewController(t)
++	defer ctrl.Finish()
++
++	mockCSIClient := &mockControllerClient{
++		createVolumeFunc: func(_ context.Context, _ *csi.CreateVolumeRequest) (*csi.CreateVolumeResponse, error) {
++			t.Error("CSI CreateVolume must not be called for invalid accessModes")
++			return nil, nil
++		},
++	}
++	mockSCLister := NewMockStorageClassLister(ctrl)
++	mockSCLister.storageClasses[vrrTestStorageClass] = ourStorageClass()
++
++	vrr := createTestVRR("test-vrr", "test-ns", "VolumeSnapshotContent", "test-vsc")
++	vrr.Spec.AccessModes = []v1.PersistentVolumeAccessMode{"BogusMode"}
++
++	kubeClient := fakeclientset.NewSimpleClientset()
++	eventRecorder := record.NewFakeRecorder(10)
++	e := newTestExecutor(mockCSIClient, mockSCLister, kubeClient, nil, eventRecorder)
++
++	if err := e.reconcile(context.Background(), vrr); err != nil {
++		t.Fatalf("reconcile should not return an error for invalid accessModes: %v", err)
++	}
++	if !waitForEvent(eventRecorder, "VRRInvalidSpec") {
++		t.Error("Expected event with reason VRRInvalidSpec for invalid accessModes")
++	}
++	assertNoPVC(t, kubeClient)
++}
++
++func TestValidateVRRAccessModes(t *testing.T) {
++	valid := [][]v1.PersistentVolumeAccessMode{
++		nil,
++		{v1.ReadWriteOnce},
++		{v1.ReadOnlyMany},
++		{v1.ReadWriteMany},
++		{v1.ReadWriteOncePod},
++		{v1.ReadWriteOnce, v1.ReadOnlyMany},
++	}
++	for _, modes := range valid {
++		if err := validateVRRAccessModes(modes); err != nil {
++			t.Errorf("validateVRRAccessModes(%v) = %v, want nil", modes, err)
 +		}
 +	}
-+	if in.TargetPVCRef != nil {
-+		in, out := &in.TargetPVCRef, &out.TargetPVCRef
-+		*out = new(ObjectReference)
-+		**out = **in
++	invalid := [][]v1.PersistentVolumeAccessMode{
++		{"BogusMode"},
++		{v1.ReadWriteOnce, "BogusMode"},
++	}
++	for _, modes := range invalid {
++		if err := validateVRRAccessModes(modes); err == nil {
++			t.Errorf("validateVRRAccessModes(%v) = nil, want error", modes)
++		}
 +	}
 +}
 +
-+// DeepCopy is an autogenerated deepcopy function, copying the receiver, creating a new VolumeRestoreRequestStatus.
-+func (in *VolumeRestoreRequestStatus) DeepCopy() *VolumeRestoreRequestStatus {
-+	if in == nil {
-+		return nil
++// Helpers
++
++func equalStringSlices(a, b []string) bool {
++	if len(a) != len(b) {
++		return false
 +	}
-+	out := new(VolumeRestoreRequestStatus)
-+	in.DeepCopyInto(out)
-+	return out
++	for i := range a {
++		if a[i] != b[i] {
++			return false
++		}
++	}
++	return true
 +}
-diff --git a/vendor/modules.txt b/vendor/modules.txt
-index df5a1976b..5bf13a810 100644
---- a/vendor/modules.txt
-+++ b/vendor/modules.txt
-@@ -31,6 +31,9 @@ github.com/cespare/xxhash/v2
- # github.com/container-storage-interface/spec v1.12.0
- ## explicit; go 1.23.0
- github.com/container-storage-interface/spec/lib/go/csi
-+# github.com/deckhouse/storage-foundation/api v0.0.0
-+## explicit; go 1.24.0
-+github.com/deckhouse/storage-foundation/api/v1alpha1
- # github.com/coreos/go-semver v0.3.1
- ## explicit; go 1.8
- github.com/coreos/go-semver/semver
++
++func newTestExecutor(csiClient csi.ControllerClient, scLister storagelistersv1.StorageClassLister, kubeClient kubernetes.Interface, snapshotClient snapclientset.Interface, eventRecorder record.EventRecorder) *VRRExecutor {
++	if kubeClient == nil {
++		kubeClient = fakeclientset.NewSimpleClientset()
++	}
++	if snapshotClient == nil {
++		snapshotClient = snapfake.NewSimpleClientset()
++	}
++	if eventRecorder == nil {
++		eventRecorder = record.NewFakeRecorder(10)
++	}
++	return &VRRExecutor{
++		kubeClient:             kubeClient,
++		csiClient:              csiClient,
++		snapshotClient:         snapshotClient,
++		driverName:             vrrTestDriverName,
++		identity:               vrrTestIdentity,
++		timeout:                vrrTestTimeout,
++		volumeNamePrefix:       vrrTestVolumePrefix,
++		volumeNameUUIDLength:   -1,
++		defaultFSType:          vrrTestDefaultFSType,
++		scLister:               scLister,
++		eventRecorder:          eventRecorder,
++		pluginCapabilities:     rpc.PluginCapabilitySet{},
++		controllerCapabilities: rpc.ControllerCapabilitySet{},
++		vrrIndexer:             cache.NewIndexer(cache.MetaNamespaceKeyFunc, cache.Indexers{}),
++	}
++}
++
++// vscErrorExecutor builds an executor for VSC error-path tests (our SC present, VSC source).
++func vscErrorExecutor(t *testing.T, snapshotClient snapclientset.Interface) (*VRRExecutor, kubernetes.Interface) {
++	t.Helper()
++	ctrl := gomock.NewController(t)
++	mockSCLister := NewMockStorageClassLister(ctrl)
++	mockSCLister.storageClasses[vrrTestStorageClass] = ourStorageClass()
++	kubeClient := fakeclientset.NewSimpleClientset()
++	return newTestExecutor(&mockControllerClient{}, mockSCLister, kubeClient, snapshotClient, record.NewFakeRecorder(10)), kubeClient
++}
++
++func ourStorageClass() *storagev1.StorageClass {
++	return &storagev1.StorageClass{
++		ObjectMeta:  metav1.ObjectMeta{Name: vrrTestStorageClass},
++		Provisioner: vrrTestDriverName,
++		Parameters:  map[string]string{},
++	}
++}
++
++func readyVSC(name, handle string) *crdv1.VolumeSnapshotContent {
++	return &crdv1.VolumeSnapshotContent{
++		ObjectMeta: metav1.ObjectMeta{Name: name},
++		Spec:       crdv1.VolumeSnapshotContentSpec{Driver: vrrTestDriverName},
++		Status: &crdv1.VolumeSnapshotContentStatus{
++			ReadyToUse:     boolPtr(true),
++			SnapshotHandle: stringPtr(handle),
++			RestoreSize:    int64Ptr(1024 * 1024 * 1024),
++		},
++	}
++}
++
++func csiPV(name, handle string) *v1.PersistentVolume {
++	return &v1.PersistentVolume{
++		ObjectMeta: metav1.ObjectMeta{Name: name},
++		Spec: v1.PersistentVolumeSpec{
++			AccessModes:      []v1.PersistentVolumeAccessMode{v1.ReadWriteOnce},
++			Capacity:         v1.ResourceList{v1.ResourceStorage: resource.MustParse("1Gi")},
++			StorageClassName: vrrTestStorageClass,
++			PersistentVolumeSource: v1.PersistentVolumeSource{
++				CSI: &v1.CSIPersistentVolumeSource{Driver: vrrTestDriverName, VolumeHandle: handle, FSType: "ext4"},
++			},
++		},
++	}
++}
++
++func simplePV(name string) *v1.PersistentVolume {
++	return &v1.PersistentVolume{
++		ObjectMeta: metav1.ObjectMeta{Name: name},
++		Spec: v1.PersistentVolumeSpec{
++			AccessModes: []v1.PersistentVolumeAccessMode{v1.ReadWriteOnce},
++			Capacity:    v1.ResourceList{v1.ResourceStorage: resource.MustParse("1Gi")},
++		},
++	}
++}
++
++func expectedPVName(t *testing.T, vrr *storagev1alpha1.VolumeRestoreRequest) string {
++	t.Helper()
++	name, err := makeVolumeName(vrrTestVolumePrefix, string(vrr.UID), -1)
++	if err != nil {
++		t.Fatalf("failed to compute expected PV name: %v", err)
++	}
++	return name
++}
++
++func assertPVExists(t *testing.T, kubeClient kubernetes.Interface, pvName string) {
++	t.Helper()
++	if _, err := kubeClient.CoreV1().PersistentVolumes().Get(context.Background(), pvName, metav1.GetOptions{}); err != nil {
++		t.Fatalf("expected PV %s to exist: %v", pvName, err)
++	}
++}
++
++func assertPVCBoundTo(t *testing.T, kubeClient kubernetes.Interface, pvName string) {
++	t.Helper()
++	pvc, err := kubeClient.CoreV1().PersistentVolumeClaims(vrrTestTargetNamespace).Get(context.Background(), vrrTestTargetPVCName, metav1.GetOptions{})
++	if err != nil {
++		t.Fatalf("expected target PVC to exist: %v", err)
++	}
++	if pvc.Spec.VolumeName != pvName {
++		t.Errorf("expected PVC bound to %s, got %s", pvName, pvc.Spec.VolumeName)
++	}
++	// PV.StorageClassName MUST equal PVC.StorageClassName, otherwise the
++	// persistentvolume-controller refuses to bind them (VolumeMismatch).
++	pv, err := kubeClient.CoreV1().PersistentVolumes().Get(context.Background(), pvName, metav1.GetOptions{})
++	if err != nil {
++		t.Fatalf("expected PV %s to exist: %v", pvName, err)
++	}
++	wantSC := ""
++	if pvc.Spec.StorageClassName != nil {
++		wantSC = *pvc.Spec.StorageClassName
++	}
++	if pv.Spec.StorageClassName != wantSC {
++		t.Errorf("PV/PVC StorageClassName mismatch: PV=%q PVC=%q (would fail to bind)", pv.Spec.StorageClassName, wantSC)
++	}
++}
++
++func assertNoPVC(t *testing.T, kubeClient kubernetes.Interface) {
++	t.Helper()
++	pvcs, err := kubeClient.CoreV1().PersistentVolumeClaims(vrrTestTargetNamespace).List(context.Background(), metav1.ListOptions{})
++	if err != nil {
++		t.Fatalf("failed to list PVCs: %v", err)
++	}
++	if len(pvcs.Items) > 0 {
++		t.Errorf("expected no PVCs to be created, got %d", len(pvcs.Items))
++	}
++}
++
++func waitForEvent(recorder *record.FakeRecorder, reason string) bool {
++	for {
++		select {
++		case event := <-recorder.Events:
++			if strings.Contains(event, reason) {
++				return true
++			}
++		default:
++			return false
++		}
++	}
++}
++
++func createTestVRR(name, namespace, sourceKind, sourceName string) *storagev1alpha1.VolumeRestoreRequest {
++	return &storagev1alpha1.VolumeRestoreRequest{
++		ObjectMeta: metav1.ObjectMeta{
++			Name:      name,
++			Namespace: namespace,
++			UID:       types.UID("test-uid-" + name),
++		},
++		Spec: storagev1alpha1.VolumeRestoreRequestSpec{
++			SourceRef:        storagev1alpha1.ObjectReference{Kind: sourceKind, Name: sourceName},
++			TargetNamespace:  vrrTestTargetNamespace,
++			TargetPVCName:    vrrTestTargetPVCName,
++			StorageClassName: vrrTestStorageClass,
++			VolumeMode:       v1.PersistentVolumeFilesystem,
++		},
++	}
++}
++
++func boolPtr(b bool) *bool { return &b }
++
++func stringPtr(s string) *string { return &s }
++
++func int64Ptr(i int64) *int64 { return &i }
++
++// mockControllerClient is a minimal csi.ControllerClient stub for tests.
++type mockControllerClient struct {
++	createVolumeFunc func(ctx context.Context, req *csi.CreateVolumeRequest) (*csi.CreateVolumeResponse, error)
++}
++
++func (m *mockControllerClient) CreateVolume(ctx context.Context, req *csi.CreateVolumeRequest, opts ...grpc.CallOption) (*csi.CreateVolumeResponse, error) {
++	if m.createVolumeFunc != nil {
++		return m.createVolumeFunc(ctx, req)
++	}
++	return nil, nil
++}
++
++func (m *mockControllerClient) DeleteVolume(ctx context.Context, req *csi.DeleteVolumeRequest, opts ...grpc.CallOption) (*csi.DeleteVolumeResponse, error) {
++	return nil, nil
++}
++
++func (m *mockControllerClient) ControllerPublishVolume(ctx context.Context, req *csi.ControllerPublishVolumeRequest, opts ...grpc.CallOption) (*csi.ControllerPublishVolumeResponse, error) {
++	return nil, nil
++}
++
++func (m *mockControllerClient) ControllerUnpublishVolume(ctx context.Context, req *csi.ControllerUnpublishVolumeRequest, opts ...grpc.CallOption) (*csi.ControllerUnpublishVolumeResponse, error) {
++	return nil, nil
++}
++
++func (m *mockControllerClient) ValidateVolumeCapabilities(ctx context.Context, req *csi.ValidateVolumeCapabilitiesRequest, opts ...grpc.CallOption) (*csi.ValidateVolumeCapabilitiesResponse, error) {
++	return nil, nil
++}
++
++func (m *mockControllerClient) ListVolumes(ctx context.Context, req *csi.ListVolumesRequest, opts ...grpc.CallOption) (*csi.ListVolumesResponse, error) {
++	return nil, nil
++}
++
++func (m *mockControllerClient) GetCapacity(ctx context.Context, req *csi.GetCapacityRequest, opts ...grpc.CallOption) (*csi.GetCapacityResponse, error) {
++	return nil, nil
++}
++
++func (m *mockControllerClient) ControllerGetCapabilities(ctx context.Context, req *csi.ControllerGetCapabilitiesRequest, opts ...grpc.CallOption) (*csi.ControllerGetCapabilitiesResponse, error) {
++	return nil, nil
++}
++
++func (m *mockControllerClient) CreateSnapshot(ctx context.Context, req *csi.CreateSnapshotRequest, opts ...grpc.CallOption) (*csi.CreateSnapshotResponse, error) {
++	return nil, nil
++}
++
++func (m *mockControllerClient) DeleteSnapshot(ctx context.Context, req *csi.DeleteSnapshotRequest, opts ...grpc.CallOption) (*csi.DeleteSnapshotResponse, error) {
++	return nil, nil
++}
++
++func (m *mockControllerClient) ListSnapshots(ctx context.Context, req *csi.ListSnapshotsRequest, opts ...grpc.CallOption) (*csi.ListSnapshotsResponse, error) {
++	return nil, nil
++}
++
++func (m *mockControllerClient) ControllerExpandVolume(ctx context.Context, req *csi.ControllerExpandVolumeRequest, opts ...grpc.CallOption) (*csi.ControllerExpandVolumeResponse, error) {
++	return nil, nil
++}
++
++func (m *mockControllerClient) ControllerModifyVolume(ctx context.Context, req *csi.ControllerModifyVolumeRequest, opts ...grpc.CallOption) (*csi.ControllerModifyVolumeResponse, error) {
++	return nil, nil
++}
++
++func (m *mockControllerClient) GetSnapshot(ctx context.Context, req *csi.GetSnapshotRequest, opts ...grpc.CallOption) (*csi.GetSnapshotResponse, error) {
++	return nil, nil
++}
++
++func (m *mockControllerClient) ControllerGetVolume(ctx context.Context, req *csi.ControllerGetVolumeRequest, opts ...grpc.CallOption) (*csi.ControllerGetVolumeResponse, error) {
++	return nil, nil
++}
++
++type mockStorageClassLister struct {
++	storageClasses map[string]*storagev1.StorageClass
++	errors         map[string]error
++}
++
++func NewMockStorageClassLister(_ *gomock.Controller) *mockStorageClassLister {
++	return &mockStorageClassLister{
++		storageClasses: make(map[string]*storagev1.StorageClass),
++		errors:         make(map[string]error),
++	}
++}
++
++func (m *mockStorageClassLister) Get(name string) (*storagev1.StorageClass, error) {
++	if err, ok := m.errors[name]; ok {
++		return nil, err
++	}
++	sc, ok := m.storageClasses[name]
++	if !ok {
++		return nil, apierrors.NewNotFound(storagev1.Resource("storageclass"), name)
++	}
++	return sc, nil
++}
++
++func (m *mockStorageClassLister) List(_ labels.Selector) ([]*storagev1.StorageClass, error) {
++	result := make([]*storagev1.StorageClass, 0, len(m.storageClasses))
++	for _, sc := range m.storageClasses {
++		result = append(result, sc)
++	}
++	return result, nil
++}

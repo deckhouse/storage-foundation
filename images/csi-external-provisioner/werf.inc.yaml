@@ -1,5 +1,4 @@
 # Based on https://github.com/kubernetes-csi/external-provisioner/blob/master/Dockerfile
-# rebuild bump: 2026-06-23 (re-clone fork branch d8-63742164-vrr to pick up 52947f9b0: VRR executor builds VolumeCapabilities from spec / Block mode)
 {{- range $key, $rawVer := index $.k8sVersions $.ImageName }}
   {{- $version := toString $key }}
   {{- $src_version := toString $rawVer }}

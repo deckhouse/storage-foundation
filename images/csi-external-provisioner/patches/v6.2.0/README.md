@@ -1,45 +1,64 @@
 # Patches
 
-Applied to `kubernetes-csi/external-provisioner` v6.2.0 (k8s 1.34
-track) during build of the `csi-provisioner` binary.
+Applied to `kubernetes-csi/external-provisioner` v6.2.0 (both the k8s
+1.20 and 1.34 tracks) during build of the `csi-provisioner` binary.
 
 ## Delivery model (current)
 
-The k8s 1.34 `csi-external-provisioner` build no longer uses these
-patches. `oss.yaml` now points that entry at the Deckhouse fork branch:
+Both `csi-external-provisioner` entries in `oss.yaml` point at the
+upstream tag `v6.2.0`, and these patches are applied on top:
 
 ```
 id: csi-external-provisioner
 versions:
-  - condition: { k8s: ["1.20"] }   # upstream tag, no VRR
-    version: v5.3.0
-  - condition: { k8s: ["1.34"] }   # fork branch = v6.2.0 + VRR executor
-    version: d8-63742164-vrr
+  - condition: { k8s: ["1.20"] }
+    version: v6.2.0
+  - condition: { k8s: ["1.34"] }
+    version: v6.2.0
 ```
 
-`werf.inc.yaml` clones `version` directly from `SOURCE_REPO`
-(`.../kubernetes-csi/external-provisioner.git`), so the 1.34 image is
-built from branch `d8-63742164-vrr`. The branch already carries the
-CVE-fix dependency bumps from `001-fix-cve.patch` (grpc >= v1.80.0,
-otel/sdk/metric/trace v1.43.0), so dropping the patch does not regress
-CVEs.
+`werf.inc.yaml` clones the tag from `SOURCE_REPO`
+(`.../kubernetes-csi/external-provisioner.git`) and, because a patch dir
+whose path contains the `version` string exists (`patches/v6.2.0/`),
+applies every `*.patch` there: `001-fix-cve.patch` then
+`002-vrr-executor.patch`.
 
-Patches under `patches/v6.2.0/` are **NOT applied** for this version:
-`werf.inc.yaml` only applies a patch dir whose path contains the
-`version` string, and no path contains `d8-63742164-vrr`. They are kept
-as a reference / generated diff (see `002-vrr-executor.patch` below).
+Why patches and not a direct fork-branch clone: werf caches the
+`src-artifact` stage by the digest of its shell instructions. A
+`git clone --branch <branch>` of a moving branch is **not**
+content-addressed, so once the stage is cached werf never re-clones (a
+bumped branch HEAD is invisible to the digest). The patch dir is mounted
+via `git: add: patches/<version>` with `stageDependencies: install:
+'**/*'`, so editing any patch file reliably busts the cache. This is the
+same pattern `csi-external-snapshotter` uses.
 
-API dependency (RESOLVED): the branch imports
-`github.com/deckhouse/storage-foundation/api`. This is now a published
-module tag `api/v0.1.0` (on this repo's `63742164` commit `bc90a730`),
-and `external-provisioner/go.mod` pins `...api v0.1.0`. The temporary
-vendor-only `v0.0.0` bootstrap is gone. The standard pipeline
-(`rm -rf vendor && go mod download && go mod vendor`) resolves the module
-normally, so `werf.inc.yaml` is **unchanged** (no `-mod=vendor` special
-case) and there is no shadow API.
+Source of truth for the executor remains the Deckhouse fork branch
+`d8-63742164-vrr`; `002-vrr-executor.patch` is the diff of that branch
+against `v6.2.0` (excluding `vendor/`). To regenerate after a branch
+change:
+
+```
+git -C <external-provisioner-fork> diff v6.2.0 d8-63742164-vrr \
+    -- . ':(exclude)vendor' > 002-vrr-executor.patch
+```
+
+API dependency: the executor imports
+`github.com/deckhouse/storage-foundation/api`. The extended VRR API
+(`volumeMode`/`fsType`/`accessModes`, commit `b97b1e1`) is **not yet**
+released as a module tag (`api/v0.1.0` predates it), so `002` pins the
+module via a Go **pseudo-version**
+(`v0.0.0-20260614235316-b97b1e188226`) that resolves to that commit on
+the module proxy. The standard pipeline
+(`rm -rf vendor && go mod download && go mod vendor`) resolves it
+normally — no `-mod=vendor` special case, no shadow API. The patch also
+bumps the `go` directive to `1.25.10` (required by the `api` module).
+
+FOLLOW-UP: publish a real `api/vX.Y.Z` tag at the extended-API commit and
+replace the pseudo-version in `002` with the tag (one `go.mod`/`go.sum`
+line change).
 
 Note: the `api` module is a Go submodule (`module .../api` in `api/`), so
-its version tag is subdirectory-prefixed (`api/v0.1.0`); the plain
+its version tag is subdirectory-prefixed (`api/vX.Y.Z`); the plain
 `v0.1.x` tags are Deckhouse module-release tags, unrelated to it.
 
 ## 001-fix-cve.patch
@@ -81,33 +100,47 @@ storage-foundation VRR controller, which observes the bound target PVC
 and sets `Ready`. No `volumerestorerequests/status` RBAC is required for
 the provisioner ServiceAccount.
 
-Touches: `cmd/csi-provisioner/csi-provisioner.go` (wiring),
-`pkg/controller/vrr_handler.go` (executor), and vendors
+Touches: `cmd/csi-provisioner/csi-provisioner.go` (wiring; executor
+workers are started only after the main informer factory cache — which
+backs the StorageClass lister the executor reads — has synced, so a
+freshly-started worker never sees an existing StorageClass as NotFound),
+`pkg/controller/vrr_handler.go` (+`_test.go`, executor), `go.mod` /
+`go.sum` (api pin + `go` directive bump), and `deploy/kubernetes/rbac.yaml`
+(reference RBAC). It imports
 `github.com/deckhouse/storage-foundation/api/v1alpha1` (VRR/VCR API
-types) with a matching `go.mod` / `vendor/modules.txt` entry.
+types) but does **not** vendor it — the dependency is resolved from the
+module proxy (see below).
 
 Source of truth for the executor code is the development branch
 `d8-63742164-vrr` in the `external-provisioner` fork; this patch is the
-diff of that work against upstream v6.2.0. Verified with
-`go build -mod=vendor ./...` and `go test -mod=vendor ./pkg/controller/...`
-on a clean v6.2.0 checkout with the patch applied.
+diff of that branch against upstream v6.2.0 (excluding `vendor/`).
+Verified end-to-end on a clean `v6.2.0` checkout with `001` + `002`
+applied: `rm -rf vendor && go mod download && go mod vendor &&
+go build ./cmd/csi-provisioner` (CGO_ENABLED=0, linux/amd64) succeeds.
 
-### API dependency — RESOLVED via published module tag
+### API dependency — pinned via Go pseudo-version
 
-Historically this started as a temporary vendor-only `v0.0.0` bootstrap.
-It is now resolved the clean way: `storage-foundation/api` is published
-as the Go submodule tag `api/v0.1.0` (commit `bc90a730` on `63742164`),
-and `external-provisioner/go.mod` pins `...api v0.1.0` with a real
-`go.sum` entry. The vendored copy matches the tag byte-for-byte.
+The executor needs the **extended** VRR API
+(`spec.volumeMode`/`fsType`/`accessModes`, storage-foundation commit
+`b97b1e1`). That extension is **not** in the published `api/v0.1.0` tag
+(commit `bc90a730`, which predates it), so pinning `api v0.1.0` would not
+compile.
 
-Consequences:
-- `werf.inc.yaml` is **unchanged**: the standard
-  `rm -rf vendor && go mod download && go mod vendor` resolves the module
-  over the network; no `-mod=vendor` special case for this image.
-- No shadow API; the SSOT remains `storage-foundation/api`.
+Instead `002` pins the module via a Go **pseudo-version**:
 
-FOLLOW-UP: when the `api` module changes, bump the `api/vX.Y.Z` tag and
-the `external-provisioner` pin together.
+```
+require github.com/deckhouse/storage-foundation/api v0.0.0-20260614235316-b97b1e188226
+```
+
+which the module proxy resolves to commit `b97b1e1`. The standard
+pipeline (`rm -rf vendor && go mod download && go mod vendor`) fetches it
+over the network — no `-mod=vendor` special case, no shadow API. The
+patch also bumps the `go` directive to `1.25.10` because the `api`
+module requires it.
+
+FOLLOW-UP: publish a real `api/vX.Y.Z` tag at (or after) `b97b1e1` and
+replace the pseudo-version in `002` with that tag (one `go.mod` line plus
+matching `go.sum` lines).
 
 ### RBAC for the provisioner ServiceAccount
 
