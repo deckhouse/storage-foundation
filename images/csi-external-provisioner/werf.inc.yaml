@@ -40,7 +40,15 @@ secrets:
 shell:
   install:
   - cd /src
+  # DEBUG (temporary): confirm which ref/commit/go.mod werf actually clones.
+  - 'echo "=== external-provisioner src_version: {{ $src_version }} ==="'
   - git clone --depth 1 --branch {{ $src_version }} $(cat /run/secrets/SOURCE_REPO)/kubernetes-csi/external-provisioner.git .
+  - echo "=== cloned HEAD ==="
+  - git rev-parse HEAD
+  - echo "=== cloned  branch ==="
+  - git branch --show-current || true
+  - echo "=== cloned go.mod ==="
+  - grep -nE '^(go|toolchain) ' go.mod
   {{- if $patch }}
   - git apply /patches/*.patch --verbose
   {{- end }}
@@ -70,6 +78,9 @@ shell:
     {{- end }}
     - export GO_VERSION=${GOLANG_VERSION} CGO_ENABLED=0 GOOS=linux GOARCH=amd64
     - cd /src
+    # DEBUG (temporary): show the go.mod that actually reached the build stage.
+    - echo "=== /src go.mod before download ==="
+    - grep -nE '^(go|toolchain) ' go.mod
     - GOPROXY=$(cat /run/secrets/GOPROXY) go mod download
     - go mod vendor
     - make build

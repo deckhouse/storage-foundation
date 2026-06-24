@@ -234,7 +234,7 @@ spec:
 
                   - `Retain` — VolumeSnapshotContent и его физический снимок в нижележащей системе хранения сохраняются.
                   - `Delete` — VolumeSnapshotContent и его физический снимок в нижележащей системе хранения удаляются.
-                  
+
                   Для динамически созданных снимков автоматически заполняется
                   CSI snapshotter sidecar значением поля `DeletionPolicy`, определенным в соответствующем
                   VolumeSnapshotClass.

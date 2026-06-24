@@ -40,6 +40,11 @@ rules:
   - apiGroups: ["snapshot.storage.k8s.io"]
     resources: ["volumesnapshots/status"]
     verbs: ["update", "patch"]
+  # Secrets access for CSI snapshot operations when VolumeSnapshotClass uses
+  # csi.storage.k8s.io/snapshotter-secret-* annotations.
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["get"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role

@@ -57,6 +57,13 @@ spec:
                       его представление в Kubernetes.
                       
                       Для намерения восстановления backup controller может один раз установить это поле из пустого после успешного restore.
+                  dataImportName:
+                    description: |-
+                      Имя объекта DataImport (state-snapshotter.deckhouse.io) в том же неймспейсе,
+                      который производит артефакт данных для этого снимка при импорте.
+                      
+                      Если задано, штатный snapshot-controller НЕ обрабатывает этот VolumeSnapshot.
+                      Расширение Deckhouse.
               volumeSnapshotClassName:
                 description: |-
                   Имя VolumeSnapshotClass, запрошенного VolumeSnapshot.
@@ -78,6 +85,13 @@ spec:
               Перед использованием необходимо проверить успешность привязки между объектами VolumeSnapshot и
               VolumeSnapshotContent, убедившись, что оба объекта указывают друг на друга.
             properties:
+              boundSnapshotContentName:
+                description: |-
+                  Имя кластерного объекта SnapshotContent (storage.deckhouse.io) state-snapshotter,
+                  который обеспечивает этот VolumeSnapshot как логический узел в дереве снимка.
+                  
+                  Записывается общим контроллером state-snapshotter в дополнение к boundVolumeSnapshotContentName.
+                  Расширение Deckhouse.
               boundVolumeSnapshotContentName:
                 description: |-
                   Имя объекта VolumeSnapshotContent, к которому привязан этот объект VolumeSnapshot.
@@ -203,6 +217,13 @@ spec:
                       его представление в Kubernetes.
                       
                       Для намерения восстановления backup controller может один раз установить это поле из пустого после успешного restore.
+                  dataImportName:
+                    description: |-
+                      Имя объекта DataImport (state-snapshotter.deckhouse.io) в том же неймспейсе,
+                      который производит артефакт данных для этого снимка при импорте.
+                      
+                      Если задано, штатный snapshot-controller НЕ обрабатывает этот VolumeSnapshot.
+                      Расширение Deckhouse.
               volumeSnapshotClassName:
                 description: |-
                   Имя VolumeSnapshotClass, запрошенного VolumeSnapshot.
@@ -225,6 +246,13 @@ spec:
               Перед использованием необходимо проверить успешность привязки между объектами VolumeSnapshot и
               VolumeSnapshotContent, убедившись, что оба объекта указывают друг на друга.
             properties:
+              boundSnapshotContentName:
+                description: |-
+                  Имя кластерного объекта SnapshotContent (storage.deckhouse.io) state-snapshotter,
+                  который обеспечивает этот VolumeSnapshot как логический узел в дереве снимка.
+                  
+                  Записывается общим контроллером state-snapshotter в дополнение к boundVolumeSnapshotContentName.
+                  Расширение Deckhouse.
               boundVolumeSnapshotContentName:
                 description: |-
                   Имя объекта VolumeSnapshotContent, к которому привязан этот объект VolumeSnapshot.

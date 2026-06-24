@@ -28,29 +28,9 @@ const (
 	SourceKindPersistentVolume      = "PersistentVolume"
 )
 
-// Error reason constants
-const (
-	ErrorReasonInternalError = "InternalError"
-	ErrorReasonNotFound      = "NotFound"
-	ErrorReasonRBACDenied    = "RBACDenied"
-	ErrorReasonInvalidMode   = "InvalidMode"
-	ErrorReasonInvalidSource = "InvalidSource"
-	ErrorReasonPVBound       = "PVBound"
-	ErrorReasonIncompatible  = "Incompatible" // For WFFC and cross-SC restore
-)
-
-// Condition type constants
-const (
-	ConditionTypeReady = "Ready"
-)
-
-// Condition reason constants
-const (
-	ConditionReasonCompleted    = "Completed"
-	ConditionReasonInvalidMode  = "InvalidMode"
-	ConditionReasonIncompatible = "Incompatible" // For WFFC and cross-SC restore
-	ConditionReasonInvalidTTL   = "InvalidTTL"   // For invalid TTL annotation format
-)
+// Condition type and reason constants are defined in api/v1alpha1/conditions.go
+// Import them from: github.com/deckhouse/storage-foundation/api/v1alpha1
+// Use storagev1alpha1.ConditionTypeReady and storagev1alpha1.ConditionReason* instead of local constants
 
 // Label key constants
 const (
@@ -75,11 +55,13 @@ const (
 
 // Name prefix constants
 const (
-	NamePrefixVCRCSIVS   = "vcr-csi-vs-"
-	NamePrefixRetainer   = "ret-"
-	NamePrefixRetainerPV = "ret-pv-"
-	NamePrefixVRRTempVS  = "vrr-temp-vs-"
-	NamePrefixTempVRR    = "temp-vrr-"
+	NamePrefixVCRCSIVS    = "vcr-csi-vs-"
+	NamePrefixRetainer    = "ret-"
+	NamePrefixRetainerVCR = "retainer-vcr-"
+	NamePrefixRetainerPV  = "ret-pv-"
+	NamePrefixRetainerPVC = "ret-pvc-"
+	NamePrefixVRRTempVS   = "vrr-temp-vs-"
+	NamePrefixTempVRR     = "temp-vrr-"
 )
 
 // API constants
@@ -89,6 +71,7 @@ const (
 	APIGroupDeckhouse        = "deckhouse.io/v1alpha1"
 	KindObjectKeeper         = "ObjectKeeper"
 	KindVolumeCaptureRequest = "VolumeCaptureRequest"
+	KindVolumeRestoreRequest = "VolumeRestoreRequest"
 	KindVolumeSnapshot       = "VolumeSnapshot"
 )
 
@@ -106,9 +89,4 @@ const (
 	DefaultVolumeRequestTTL = "10m" // Default TTL for VolumeCaptureRequest and VolumeRestoreRequest
 	// DefaultRetentionSnapshotTTL and DefaultRetentionDetachTTL are defined in config package
 	// They are used as fallback if config is not available
-)
-
-// Service namespace constant
-const (
-	ServiceNamespace = "d8-storage-foundation" // Default service namespace for temporary VolumeSnapshot objects
 )
