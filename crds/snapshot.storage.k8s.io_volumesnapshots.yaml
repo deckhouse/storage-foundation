@@ -91,7 +91,7 @@ spec:
                 description: |-
                   source specifies where a snapshot will be created from.
                   May be empty for restore intent (backup controller sets volumeSnapshotContentName after restore).
-                  Otherwise exactly one of persistentVolumeClaimName, volumeSnapshotContentName or dataImportName must be set.
+                  Otherwise exactly one of persistentVolumeClaimName, volumeSnapshotContentName or import must be set.
                   Immutable after creation (except one-shot set of volumeSnapshotContentName from empty).
                 properties:
                   persistentVolumeClaimName:
@@ -116,28 +116,27 @@ spec:
                     # Immutable except one-shot set from empty (restore controller sets after successful restore)
                     - message: volumeSnapshotContentName is immutable once set
                       rule: size(oldSelf) == 0 || self == oldSelf
-                  dataImportName:
+                  import:
                     description: |-
-                      dataImportName specifies the name of a DataImport (state-snapshotter.deckhouse.io)
-                      in the same namespace that produces the data artifact for this snapshot during import.
-                      When set, the upstream snapshot-controller does NOT reconcile this VolumeSnapshot; the
-                      state-snapshotter common controller binds it (sets status). Immutable. Deckhouse extension.
-                    type: string
-                    x-kubernetes-validations:
-                    - message: dataImportName is immutable
-                      rule: self == oldSelf
+                      import, when present, marks this VolumeSnapshot as an import target: its data artifact is
+                      produced by a DataImport (state-snapshotter.deckhouse.io) in the same namespace, resolved
+                      via reverse-lookup (DataImport.spec.targetRef), not named here. It is an empty marker
+                      object whose mere presence selects import mode. When set, the upstream snapshot-controller
+                      does NOT reconcile this VolumeSnapshot; the state-snapshotter common controller binds it
+                      (sets status). Deckhouse extension.
+                    type: object
                 type: object
                 x-kubernetes-validations:
                 - message: persistentVolumeClaimName is required once set
                   rule: '!has(oldSelf.persistentVolumeClaimName) || has(self.persistentVolumeClaimName)'
                 - message: volumeSnapshotContentName is required once set
                   rule: '!has(oldSelf.volumeSnapshotContentName) || has(self.volumeSnapshotContentName)'
-                - message: dataImportName is required once set
-                  rule: '!has(oldSelf.dataImportName) || has(self.dataImportName)'
-                # Allow empty source (restore intent) or at most one of persistentVolumeClaimName, volumeSnapshotContentName, dataImportName
-                - message: source must be empty (restore intent) or exactly one of persistentVolumeClaimName, volumeSnapshotContentName and dataImportName must be set
+                - message: import is immutable once set
+                  rule: '!has(oldSelf.import) || has(self.import)'
+                # Allow empty source (restore intent) or at most one of persistentVolumeClaimName, volumeSnapshotContentName, import
+                - message: source must be empty (restore intent) or exactly one of persistentVolumeClaimName, volumeSnapshotContentName and import must be set
                   rule: >-
-                    [has(self.persistentVolumeClaimName), has(self.volumeSnapshotContentName), has(self.dataImportName)].filter(x, x).size() <= 1
+                    [has(self.persistentVolumeClaimName), has(self.volumeSnapshotContentName), has(self.import)].filter(x, x).size() <= 1
               volumeSnapshotClassName:
                 description: |-
                   Name of the VolumeSnapshotClass requested by the VolumeSnapshot.
@@ -241,9 +240,30 @@ spec:
                   If not specified, the size is unknown.
                 pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
                 x-kubernetes-int-or-string: true
+              size:
+                description: |-
+                  size mirrors the real volume size (e.g. "10Gi"). Written by the state-snapshotter
+                  common controller (from DataImport.spec.size on import, or the bound content on
+                  capture). Deckhouse extension.
+                type: string
+              storageClassName:
+                description: |-
+                  storageClassName mirrors the source volume StorageClass for d8 export/consumption.
+                  For import VolumeSnapshots it is taken from DataImport.spec.storageClassName; for
+                  capture it mirrors the bound content's storage class. Written by the
+                  state-snapshotter common controller. Deckhouse extension.
+                type: string
               volumeGroupSnapshotName:
                 description: |-
                   Name of the VolumeGroupSnapshot of which this VolumeSnapshot is a part.
+                type: string
+              volumeMode:
+                description: |-
+                  volumeMode mirrors the source volume mode (Filesystem or Block). Written by the
+                  state-snapshotter common controller. Deckhouse extension.
+                enum:
+                - Block
+                - Filesystem
                 type: string
             type: object
         required:
@@ -318,7 +338,7 @@ spec:
                 description: |-
                   source specifies where a snapshot will be created from.
                   May be empty for restore intent (backup controller sets volumeSnapshotContentName after restore).
-                  Otherwise exactly one of persistentVolumeClaimName, volumeSnapshotContentName or dataImportName must be set.
+                  Otherwise exactly one of persistentVolumeClaimName, volumeSnapshotContentName or import must be set.
                   Immutable after creation (except one-shot set of volumeSnapshotContentName from empty).
                 properties:
                   persistentVolumeClaimName:
@@ -336,13 +356,14 @@ spec:
                       Specified if the snapshot already exists and only needs a representation in Kubernetes.
                       For restore intent, backup controller may set this once from empty after successful restore (one-shot update).
                     type: string
-                  dataImportName:
+                  import:
                     description: |-
-                      dataImportName specifies the name of a DataImport (state-snapshotter.deckhouse.io)
-                      in the same namespace that produces the data artifact for this snapshot during import.
-                      When set, the upstream snapshot-controller does NOT reconcile this VolumeSnapshot.
-                      Deckhouse extension.
-                    type: string
+                      import, when present, marks this VolumeSnapshot as an import target: its data artifact is
+                      produced by a DataImport (state-snapshotter.deckhouse.io) in the same namespace, resolved
+                      via reverse-lookup (DataImport.spec.targetRef), not named here. It is an empty marker
+                      object whose mere presence selects import mode. When set, the upstream snapshot-controller
+                      does NOT reconcile this VolumeSnapshot. Deckhouse extension.
+                    type: object
                 type: object
               volumeSnapshotClassName:
                 description: |-
@@ -443,9 +464,30 @@ spec:
                   If not specified, the size is unknown.
                 pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
                 x-kubernetes-int-or-string: true
+              size:
+                description: |-
+                  size mirrors the real volume size (e.g. "10Gi"). Written by the state-snapshotter
+                  common controller (from DataImport.spec.size on import, or the bound content on
+                  capture). Deckhouse extension.
+                type: string
+              storageClassName:
+                description: |-
+                  storageClassName mirrors the source volume StorageClass for d8 export/consumption.
+                  For import VolumeSnapshots it is taken from DataImport.spec.storageClassName; for
+                  capture it mirrors the bound content's storage class. Written by the
+                  state-snapshotter common controller. Deckhouse extension.
+                type: string
               volumeGroupSnapshotName:
                 description: |-
                   Name of the VolumeGroupSnapshot of which this VolumeSnapshot is a part.
+                type: string
+              volumeMode:
+                description: |-
+                  volumeMode mirrors the source volume mode (Filesystem or Block). Written by the
+                  state-snapshotter common controller. Deckhouse extension.
+                enum:
+                - Block
+                - Filesystem
                 type: string
             type: object
         required:

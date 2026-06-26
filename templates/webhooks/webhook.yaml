@@ -18,8 +18,8 @@ webhooks:
     # The mutator only defaults spec.volumeSnapshotClassName from the source PVC's StorageClass, so it is
     # meaningful only for PVC-source VolumeSnapshots. Restrict invocation to them: the mutator decodes the
     # object into the upstream typed VolumeSnapshot (which lacks Deckhouse extension fields such as
-    # spec.source.dataImportName), and kubewebhook computes the patch as a diff against that re-serialized
-    # typed object — so firing on a non-PVC-source VS (import-mode dataImportName, or pre-provisioned
+    # spec.source.import), and kubewebhook computes the patch as a diff against that re-serialized
+    # typed object — so firing on a non-PVC-source VS (import-mode spec.source.import marker, or pre-provisioned
     # volumeSnapshotContentName) would silently strip those extension fields. Scoping to PVC source both
     # matches the mutator's only purpose and prevents that data loss.
     matchConditions:
