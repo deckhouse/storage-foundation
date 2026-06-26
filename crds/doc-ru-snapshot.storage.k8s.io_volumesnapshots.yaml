@@ -35,7 +35,7 @@ spec:
                   Указывает источник создания снимка.
                   
                   Может быть пустым для намерения восстановления (backup controller проставляет volumeSnapshotContentName после restore).
-                  Иначе должен быть указан ровно один из persistentVolumeClaimName или volumeSnapshotContentName.
+                  Иначе должен быть указан ровно один из persistentVolumeClaimName, volumeSnapshotContentName или import.
                   
                   Неизменяемо после создания (кроме одноразовой установки volumeSnapshotContentName из пустого).
                 properties:
@@ -57,10 +57,10 @@ spec:
                       его представление в Kubernetes.
                       
                       Для намерения восстановления backup controller может один раз установить это поле из пустого после успешного restore.
-                  dataImportName:
+                  import:
                     description: |-
-                      Имя объекта DataImport (state-snapshotter.deckhouse.io) в том же неймспейсе,
-                      который производит артефакт данных для этого снимка при импорте.
+                      Пустой объект-маркер: его наличие помечает этот VolumeSnapshot как цель импорта. Артефакт данных
+                      производит объект DataImport (state-snapshotter.deckhouse.io) в том же неймспейсе, определяемый обратным поиском (DataImport.spec.targetRef).
                       
                       Если задано, штатный snapshot-controller НЕ обрабатывает этот VolumeSnapshot.
                       Расширение Deckhouse.
@@ -157,9 +157,23 @@ spec:
                   быть меньше `restoreSize`, если он указан, иначе восстановление завершится ошибкой.
                   
                   Если не указано, размер неизвестен.
+              size:
+                description: |-
+                  Отражает реальный размер тома (например, "10Gi"). Записывается общим контроллером
+                  state-snapshotter (из DataImport.spec.size при импорте или из привязанного content при захвате).
+                  Расширение Deckhouse.
+              storageClassName:
+                description: |-
+                  Отражает StorageClass исходного тома для экспорта/потребления в d8. Для импортных
+                  VolumeSnapshot берется из DataImport.spec.storageClassName, при захвате — из привязанного content.
+                  Записывается общим контроллером state-snapshotter. Расширение Deckhouse.
               volumeGroupSnapshotName:
                 description: |-
                   Имя VolumeGroupSnapshot, частью которого является этот VolumeSnapshot.
+              volumeMode:
+                description: |-
+                  Отражает режим тома источника (Filesystem или Block). Записывается общим контроллером
+                  state-snapshotter. Расширение Deckhouse.
   - name: v1beta1
     schema:
       openAPIV3Schema:
@@ -195,7 +209,7 @@ spec:
                   Указывает источник создания снимка.
                   
                   Может быть пустым для намерения восстановления (backup controller проставляет volumeSnapshotContentName после restore).
-                  Иначе должен быть указан ровно один из persistentVolumeClaimName или volumeSnapshotContentName.
+                  Иначе должен быть указан ровно один из persistentVolumeClaimName, volumeSnapshotContentName или import.
                   
                   Неизменяемо после создания (кроме одноразовой установки volumeSnapshotContentName из пустого).
                 properties:
@@ -217,10 +231,10 @@ spec:
                       его представление в Kubernetes.
                       
                       Для намерения восстановления backup controller может один раз установить это поле из пустого после успешного restore.
-                  dataImportName:
+                  import:
                     description: |-
-                      Имя объекта DataImport (state-snapshotter.deckhouse.io) в том же неймспейсе,
-                      который производит артефакт данных для этого снимка при импорте.
+                      Пустой объект-маркер: его наличие помечает этот VolumeSnapshot как цель импорта. Артефакт данных
+                      производит объект DataImport (state-snapshotter.deckhouse.io) в том же неймспейсе, определяемый обратным поиском (DataImport.spec.targetRef).
                       
                       Если задано, штатный snapshot-controller НЕ обрабатывает этот VolumeSnapshot.
                       Расширение Deckhouse.
@@ -318,6 +332,20 @@ spec:
                   быть меньше `restoreSize`, если он указан, иначе восстановление завершится ошибкой.
                   
                   Если не указано, размер неизвестен.
+              size:
+                description: |-
+                  Отражает реальный размер тома (например, "10Gi"). Записывается общим контроллером
+                  state-snapshotter (из DataImport.spec.size при импорте или из привязанного content при захвате).
+                  Расширение Deckhouse.
+              storageClassName:
+                description: |-
+                  Отражает StorageClass исходного тома для экспорта/потребления в d8. Для импортных
+                  VolumeSnapshot берется из DataImport.spec.storageClassName, при захвате — из привязанного content.
+                  Записывается общим контроллером state-snapshotter. Расширение Deckhouse.
               volumeGroupSnapshotName:
                 description: |-
                   Имя VolumeGroupSnapshot, частью которого является этот VolumeSnapshot.
+              volumeMode:
+                description: |-
+                  Отражает режим тома источника (Filesystem или Block). Записывается общим контроллером
+                  state-snapshotter. Расширение Deckhouse.

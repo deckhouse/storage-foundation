@@ -1,5 +1,5 @@
 diff --git a/client/apis/volumesnapshot/v1/types.go b/client/apis/volumesnapshot/v1/types.go
-index 36f60dc95..b6f9232b0 100644
+index 36f60dc..e865972 100644
 --- a/client/apis/volumesnapshot/v1/types.go
 +++ b/client/apis/volumesnapshot/v1/types.go
 @@ -96,13 +96,19 @@ type VolumeSnapshotSpec struct {
@@ -9,39 +9,47 @@ index 36f60dc95..b6f9232b0 100644
 -// dynamically taken upon creation or if a pre-existing VolumeSnapshotContent
 -// object should be used.
 +// dynamically taken upon creation, bound to a pre-existing VolumeSnapshotContent
-+// object, or imported from a DataImport (Deckhouse state-snapshotter extension).
++// object, or imported via an import marker (Deckhouse state-snapshotter extension).
  // Exactly one of its members must be set.
  // Members in VolumeSnapshotSource are immutable.
 +//
-+// Deckhouse fork: dataImportName is added as a third mutually-exclusive source so the
++// Deckhouse fork: import is added as a third mutually-exclusive source so the
 +// state-snapshotter import flow can create a VolumeSnapshot whose data artifact is produced
 +// by a DataImport. The upstream snapshot-controller SKIPS such VolumeSnapshots (it does not
 +// reconcile them); the state-snapshotter common controller owns binding/status for them.
  // +kubebuilder:validation:XValidation:rule="!has(oldSelf.persistentVolumeClaimName) || has(self.persistentVolumeClaimName)", message="persistentVolumeClaimName is required once set"
  // +kubebuilder:validation:XValidation:rule="!has(oldSelf.volumeSnapshotContentName) || has(self.volumeSnapshotContentName)", message="volumeSnapshotContentName is required once set"
 -// +kubebuilder:validation:XValidation:rule="(has(self.volumeSnapshotContentName) && !has(self.persistentVolumeClaimName)) || (!has(self.volumeSnapshotContentName) && has(self.persistentVolumeClaimName))", message="exactly one of volumeSnapshotContentName and persistentVolumeClaimName must be set"
-+// +kubebuilder:validation:XValidation:rule="!has(oldSelf.dataImportName) || has(self.dataImportName)", message="dataImportName is required once set"
-+// +kubebuilder:validation:XValidation:rule="[has(self.persistentVolumeClaimName), has(self.volumeSnapshotContentName), has(self.dataImportName)].filter(x, x).size() <= 1", message="source must be empty (restore intent) or exactly one of persistentVolumeClaimName, volumeSnapshotContentName and dataImportName must be set"
++// +kubebuilder:validation:XValidation:rule="!has(oldSelf.import) || has(self.import)", message="import is immutable once set"
++// +kubebuilder:validation:XValidation:rule="[has(self.persistentVolumeClaimName), has(self.volumeSnapshotContentName), has(self.import)].filter(x, x).size() <= 1", message="source must be empty (restore intent) or exactly one of persistentVolumeClaimName, volumeSnapshotContentName and import must be set"
  type VolumeSnapshotSource struct {
  	// persistentVolumeClaimName specifies the name of the PersistentVolumeClaim
  	// object representing the volume from which a snapshot should be created.
-@@ -122,6 +128,15 @@ type VolumeSnapshotSource struct {
+@@ -122,8 +128,23 @@ type VolumeSnapshotSource struct {
  	// +optional
  	// +kubebuilder:validation:XValidation:rule="self == oldSelf",message="volumeSnapshotContentName is immutable"
  	VolumeSnapshotContentName *string `json:"volumeSnapshotContentName,omitempty" protobuf:"bytes,2,opt,name=volumeSnapshotContentName"`
 +
-+	// dataImportName specifies the name of a DataImport (state-snapshotter.deckhouse.io) in the
-+	// same namespace that produces the data artifact for this snapshot during import.
-+	// When set, the upstream snapshot-controller does NOT reconcile this VolumeSnapshot; the
-+	// state-snapshotter common controller binds it (sets status). This field is immutable.
++	// import, when present, marks this VolumeSnapshot as an import target: its data artifact is
++	// produced by a DataImport (state-snapshotter.deckhouse.io) in the same namespace, resolved via
++	// reverse-lookup (DataImport.spec.targetRef), not named here. It is an empty marker object whose
++	// mere presence selects import mode. When set, the upstream snapshot-controller does NOT reconcile
++	// this VolumeSnapshot; the state-snapshotter common controller binds it (sets status).
 +	// Deckhouse fork extension.
 +	// +optional
-+	// +kubebuilder:validation:XValidation:rule="self == oldSelf",message="dataImportName is immutable"
-+	DataImportName *string `json:"dataImportName,omitempty" protobuf:"bytes,3,opt,name=dataImportName"`
++	Import *VolumeSnapshotImportSource `json:"import,omitempty" protobuf:"bytes,3,opt,name=import"`
  }
  
++// VolumeSnapshotImportSource is an empty marker selecting import mode for a VolumeSnapshot
++// (spec.source.import: {}). Its mere presence means the data artifact is produced by a DataImport
++// (state-snapshotter.deckhouse.io) and the upstream snapshot-controller does NOT reconcile it.
++// Deckhouse fork extension.
++type VolumeSnapshotImportSource struct{}
++
  // VolumeSnapshotStatus is the status of the VolumeSnapshot
-@@ -194,6 +209,15 @@ type VolumeSnapshotStatus struct {
+ // Note that CreationTime, RestoreSize, ReadyToUse, and Error are in both
+ // VolumeSnapshotStatus and VolumeSnapshotContentStatus. Fields in VolumeSnapshotStatus
+@@ -194,6 +215,33 @@ type VolumeSnapshotStatus struct {
  	// VolumeSnapshot is a part of.
  	// +optional
  	VolumeGroupSnapshotName *string `json:"volumeGroupSnapshotName,omitempty" protobuf:"bytes,6,opt,name=volumeGroupSnapshotName"`
@@ -54,26 +62,44 @@ index 36f60dc95..b6f9232b0 100644
 +	// but never sets it. Deckhouse fork extension.
 +	// +optional
 +	BoundSnapshotContentName *string `json:"boundSnapshotContentName,omitempty" protobuf:"bytes,7,opt,name=boundSnapshotContentName"`
++
++	// storageClassName mirrors the source volume StorageClass for d8 export/consumption. For import
++	// VolumeSnapshots it is taken from DataImport.spec.storageClassName; for capture it mirrors the
++	// bound content's storage class. Written by the state-snapshotter common controller.
++	// Deckhouse fork extension.
++	// +optional
++	StorageClassName *string `json:"storageClassName,omitempty" protobuf:"bytes,8,opt,name=storageClassName"`
++
++	// size mirrors the real volume size (e.g. "10Gi"). Written by the state-snapshotter common
++	// controller (from DataImport.spec.size on import, or the bound content on capture).
++	// Deckhouse fork extension.
++	// +optional
++	Size *string `json:"size,omitempty" protobuf:"bytes,9,opt,name=size"`
++
++	// volumeMode mirrors the source volume mode (Filesystem or Block). Written by the
++	// state-snapshotter common controller. Deckhouse fork extension.
++	// +optional
++	VolumeMode *string `json:"volumeMode,omitempty" protobuf:"bytes,10,opt,name=volumeMode"`
  }
  
  // +genclient
 diff --git a/client/apis/volumesnapshot/v1/zz_generated.deepcopy.go b/client/apis/volumesnapshot/v1/zz_generated.deepcopy.go
-index a590aef06..154ca8bb0 100644
+index a590aef..82aeaa3 100644
 --- a/client/apis/volumesnapshot/v1/zz_generated.deepcopy.go
 +++ b/client/apis/volumesnapshot/v1/zz_generated.deepcopy.go
 @@ -360,6 +360,11 @@ func (in *VolumeSnapshotSource) DeepCopyInto(out *VolumeSnapshotSource) {
  		*out = new(string)
  		**out = **in
  	}
-+	if in.DataImportName != nil {
-+		in, out := &in.DataImportName, &out.DataImportName
-+		*out = new(string)
++	if in.Import != nil {
++		in, out := &in.Import, &out.Import
++		*out = new(VolumeSnapshotImportSource)
 +		**out = **in
 +	}
  	return
  }
  
-@@ -427,6 +432,11 @@ func (in *VolumeSnapshotStatus) DeepCopyInto(out *VolumeSnapshotStatus) {
+@@ -427,6 +432,26 @@ func (in *VolumeSnapshotStatus) DeepCopyInto(out *VolumeSnapshotStatus) {
  		*out = new(string)
  		**out = **in
  	}
@@ -82,23 +108,38 @@ index a590aef06..154ca8bb0 100644
 +		*out = new(string)
 +		**out = **in
 +	}
++	if in.StorageClassName != nil {
++		in, out := &in.StorageClassName, &out.StorageClassName
++		*out = new(string)
++		**out = **in
++	}
++	if in.Size != nil {
++		in, out := &in.Size, &out.Size
++		*out = new(string)
++		**out = **in
++	}
++	if in.VolumeMode != nil {
++		in, out := &in.VolumeMode, &out.VolumeMode
++		*out = new(string)
++		**out = **in
++	}
  	return
  }
  
 diff --git a/pkg/common-controller/snapshot_controller.go b/pkg/common-controller/snapshot_controller.go
-index a1457eb01..3343375af 100644
+index 8c1ba60..510f39f 100644
 --- a/pkg/common-controller/snapshot_controller.go
 +++ b/pkg/common-controller/snapshot_controller.go
-@@ -190,6 +190,15 @@ func (ctrl *csiSnapshotCommonController) syncContent(content *crdv1.VolumeSnapsh
+@@ -176,6 +176,15 @@ func (ctrl *csiSnapshotCommonController) syncContent(content *crdv1.VolumeSnapsh
  func (ctrl *csiSnapshotCommonController) syncSnapshot(ctx context.Context, snapshot *crdv1.VolumeSnapshot) error {
  	klog.V(5).Infof("synchronizing VolumeSnapshot[%s]: %s", utils.SnapshotKey(snapshot), utils.GetSnapshotStatusForLogging(snapshot))
  
-+	// Deckhouse fork: VolumeSnapshots whose source is a DataImport are owned by the state-snapshotter
-+	// common controller (import flow). The snapshot-controller MUST NOT reconcile them: it would not
-+	// understand the dataImportName source, would fail source validation, and would fight the common
-+	// controller over status. Skip entirely (no finalizers, no status writes).
-+	if snapshot.Spec.Source.DataImportName != nil {
-+		klog.V(5).Infof("syncSnapshot[%s]: skipping VolumeSnapshot with DataImport source (owned by state-snapshotter)", utils.SnapshotKey(snapshot))
++	// Deckhouse fork: VolumeSnapshots that carry the import marker (spec.source.import) are owned by
++	// the state-snapshotter common controller (import flow). The snapshot-controller MUST NOT reconcile
++	// them: it would not understand the import source, would fail source validation, and would fight the
++	// common controller over status. Skip entirely (no finalizers, no status writes).
++	if snapshot.Spec.Source.Import != nil {
++		klog.V(5).Infof("syncSnapshot[%s]: skipping VolumeSnapshot with import-marker source (owned by state-snapshotter)", utils.SnapshotKey(snapshot))
 +		return nil
 +	}
 +
@@ -106,25 +147,25 @@ index a1457eb01..3343375af 100644
  
  	// Check if we should remove finalizer on PVC and remove it if we can.
 diff --git a/pkg/common-controller/snapshot_controller_base.go b/pkg/common-controller/snapshot_controller_base.go
-index fcd65b3ae..43bb0564a 100644
+index a489b92..4adcd23 100644
 --- a/pkg/common-controller/snapshot_controller_base.go
 +++ b/pkg/common-controller/snapshot_controller_base.go
 @@ -386,6 +386,13 @@ func (ctrl *csiSnapshotCommonController) syncSnapshotByKey(key string) error {
  	}
  	snapshot, err := ctrl.snapshotLister.VolumeSnapshots(namespace).Get(name)
  	if err == nil {
-+		// Deckhouse fork: VolumeSnapshots whose source is a DataImport are owned by the state-snapshotter
-+		// common controller. Skip them before snapshot-class resolution (which would fail with no PVC source)
-+		// and before any reconcile/finalizer handling.
-+		if snapshot.Spec.Source.DataImportName != nil {
-+			klog.V(5).Infof("syncSnapshotByKey[%s]: skipping VolumeSnapshot with DataImport source (owned by state-snapshotter)", key)
++		// Deckhouse fork: VolumeSnapshots that carry the import marker (spec.source.import) are owned by
++		// the state-snapshotter common controller. Skip them before snapshot-class resolution (which would
++		// fail with no PVC source) and before any reconcile/finalizer handling.
++		if snapshot.Spec.Source.Import != nil {
++			klog.V(5).Infof("syncSnapshotByKey[%s]: skipping VolumeSnapshot with import-marker source (owned by state-snapshotter)", key)
 +			return nil
 +		}
  		// The volume snapshot still exists in informer cache, the event must have
  		// been add/update/sync
  		newSnapshot, err := ctrl.checkAndUpdateSnapshotClass(snapshot)
 diff --git a/vendor/github.com/kubernetes-csi/external-snapshotter/client/v8/apis/volumesnapshot/v1/types.go b/vendor/github.com/kubernetes-csi/external-snapshotter/client/v8/apis/volumesnapshot/v1/types.go
-index 36f60dc95..b6f9232b0 100644
+index 36f60dc..e865972 100644
 --- a/vendor/github.com/kubernetes-csi/external-snapshotter/client/v8/apis/volumesnapshot/v1/types.go
 +++ b/vendor/github.com/kubernetes-csi/external-snapshotter/client/v8/apis/volumesnapshot/v1/types.go
 @@ -96,13 +96,19 @@ type VolumeSnapshotSpec struct {
@@ -134,39 +175,47 @@ index 36f60dc95..b6f9232b0 100644
 -// dynamically taken upon creation or if a pre-existing VolumeSnapshotContent
 -// object should be used.
 +// dynamically taken upon creation, bound to a pre-existing VolumeSnapshotContent
-+// object, or imported from a DataImport (Deckhouse state-snapshotter extension).
++// object, or imported via an import marker (Deckhouse state-snapshotter extension).
  // Exactly one of its members must be set.
  // Members in VolumeSnapshotSource are immutable.
 +//
-+// Deckhouse fork: dataImportName is added as a third mutually-exclusive source so the
++// Deckhouse fork: import is added as a third mutually-exclusive source so the
 +// state-snapshotter import flow can create a VolumeSnapshot whose data artifact is produced
 +// by a DataImport. The upstream snapshot-controller SKIPS such VolumeSnapshots (it does not
 +// reconcile them); the state-snapshotter common controller owns binding/status for them.
  // +kubebuilder:validation:XValidation:rule="!has(oldSelf.persistentVolumeClaimName) || has(self.persistentVolumeClaimName)", message="persistentVolumeClaimName is required once set"
  // +kubebuilder:validation:XValidation:rule="!has(oldSelf.volumeSnapshotContentName) || has(self.volumeSnapshotContentName)", message="volumeSnapshotContentName is required once set"
 -// +kubebuilder:validation:XValidation:rule="(has(self.volumeSnapshotContentName) && !has(self.persistentVolumeClaimName)) || (!has(self.volumeSnapshotContentName) && has(self.persistentVolumeClaimName))", message="exactly one of volumeSnapshotContentName and persistentVolumeClaimName must be set"
-+// +kubebuilder:validation:XValidation:rule="!has(oldSelf.dataImportName) || has(self.dataImportName)", message="dataImportName is required once set"
-+// +kubebuilder:validation:XValidation:rule="[has(self.persistentVolumeClaimName), has(self.volumeSnapshotContentName), has(self.dataImportName)].filter(x, x).size() <= 1", message="source must be empty (restore intent) or exactly one of persistentVolumeClaimName, volumeSnapshotContentName and dataImportName must be set"
++// +kubebuilder:validation:XValidation:rule="!has(oldSelf.import) || has(self.import)", message="import is immutable once set"
++// +kubebuilder:validation:XValidation:rule="[has(self.persistentVolumeClaimName), has(self.volumeSnapshotContentName), has(self.import)].filter(x, x).size() <= 1", message="source must be empty (restore intent) or exactly one of persistentVolumeClaimName, volumeSnapshotContentName and import must be set"
  type VolumeSnapshotSource struct {
  	// persistentVolumeClaimName specifies the name of the PersistentVolumeClaim
  	// object representing the volume from which a snapshot should be created.
-@@ -122,6 +128,15 @@ type VolumeSnapshotSource struct {
+@@ -122,8 +128,23 @@ type VolumeSnapshotSource struct {
  	// +optional
  	// +kubebuilder:validation:XValidation:rule="self == oldSelf",message="volumeSnapshotContentName is immutable"
  	VolumeSnapshotContentName *string `json:"volumeSnapshotContentName,omitempty" protobuf:"bytes,2,opt,name=volumeSnapshotContentName"`
 +
-+	// dataImportName specifies the name of a DataImport (state-snapshotter.deckhouse.io) in the
-+	// same namespace that produces the data artifact for this snapshot during import.
-+	// When set, the upstream snapshot-controller does NOT reconcile this VolumeSnapshot; the
-+	// state-snapshotter common controller binds it (sets status). This field is immutable.
++	// import, when present, marks this VolumeSnapshot as an import target: its data artifact is
++	// produced by a DataImport (state-snapshotter.deckhouse.io) in the same namespace, resolved via
++	// reverse-lookup (DataImport.spec.targetRef), not named here. It is an empty marker object whose
++	// mere presence selects import mode. When set, the upstream snapshot-controller does NOT reconcile
++	// this VolumeSnapshot; the state-snapshotter common controller binds it (sets status).
 +	// Deckhouse fork extension.
 +	// +optional
-+	// +kubebuilder:validation:XValidation:rule="self == oldSelf",message="dataImportName is immutable"
-+	DataImportName *string `json:"dataImportName,omitempty" protobuf:"bytes,3,opt,name=dataImportName"`
++	Import *VolumeSnapshotImportSource `json:"import,omitempty" protobuf:"bytes,3,opt,name=import"`
  }
  
++// VolumeSnapshotImportSource is an empty marker selecting import mode for a VolumeSnapshot
++// (spec.source.import: {}). Its mere presence means the data artifact is produced by a DataImport
++// (state-snapshotter.deckhouse.io) and the upstream snapshot-controller does NOT reconcile it.
++// Deckhouse fork extension.
++type VolumeSnapshotImportSource struct{}
++
  // VolumeSnapshotStatus is the status of the VolumeSnapshot
-@@ -194,6 +209,15 @@ type VolumeSnapshotStatus struct {
+ // Note that CreationTime, RestoreSize, ReadyToUse, and Error are in both
+ // VolumeSnapshotStatus and VolumeSnapshotContentStatus. Fields in VolumeSnapshotStatus
+@@ -194,6 +215,33 @@ type VolumeSnapshotStatus struct {
  	// VolumeSnapshot is a part of.
  	// +optional
  	VolumeGroupSnapshotName *string `json:"volumeGroupSnapshotName,omitempty" protobuf:"bytes,6,opt,name=volumeGroupSnapshotName"`
@@ -179,31 +228,64 @@ index 36f60dc95..b6f9232b0 100644
 +	// but never sets it. Deckhouse fork extension.
 +	// +optional
 +	BoundSnapshotContentName *string `json:"boundSnapshotContentName,omitempty" protobuf:"bytes,7,opt,name=boundSnapshotContentName"`
++
++	// storageClassName mirrors the source volume StorageClass for d8 export/consumption. For import
++	// VolumeSnapshots it is taken from DataImport.spec.storageClassName; for capture it mirrors the
++	// bound content's storage class. Written by the state-snapshotter common controller.
++	// Deckhouse fork extension.
++	// +optional
++	StorageClassName *string `json:"storageClassName,omitempty" protobuf:"bytes,8,opt,name=storageClassName"`
++
++	// size mirrors the real volume size (e.g. "10Gi"). Written by the state-snapshotter common
++	// controller (from DataImport.spec.size on import, or the bound content on capture).
++	// Deckhouse fork extension.
++	// +optional
++	Size *string `json:"size,omitempty" protobuf:"bytes,9,opt,name=size"`
++
++	// volumeMode mirrors the source volume mode (Filesystem or Block). Written by the
++	// state-snapshotter common controller. Deckhouse fork extension.
++	// +optional
++	VolumeMode *string `json:"volumeMode,omitempty" protobuf:"bytes,10,opt,name=volumeMode"`
  }
  
  // +genclient
 diff --git a/vendor/github.com/kubernetes-csi/external-snapshotter/client/v8/apis/volumesnapshot/v1/zz_generated.deepcopy.go b/vendor/github.com/kubernetes-csi/external-snapshotter/client/v8/apis/volumesnapshot/v1/zz_generated.deepcopy.go
-index a590aef06..154ca8bb0 100644
+index a590aef..82aeaa3 100644
 --- a/vendor/github.com/kubernetes-csi/external-snapshotter/client/v8/apis/volumesnapshot/v1/zz_generated.deepcopy.go
 +++ b/vendor/github.com/kubernetes-csi/external-snapshotter/client/v8/apis/volumesnapshot/v1/zz_generated.deepcopy.go
 @@ -360,6 +360,11 @@ func (in *VolumeSnapshotSource) DeepCopyInto(out *VolumeSnapshotSource) {
  		*out = new(string)
  		**out = **in
  	}
-+	if in.DataImportName != nil {
-+		in, out := &in.DataImportName, &out.DataImportName
-+		*out = new(string)
++	if in.Import != nil {
++		in, out := &in.Import, &out.Import
++		*out = new(VolumeSnapshotImportSource)
 +		**out = **in
 +	}
  	return
  }
  
-@@ -427,6 +432,11 @@ func (in *VolumeSnapshotStatus) DeepCopyInto(out *VolumeSnapshotStatus) {
+@@ -427,6 +432,26 @@ func (in *VolumeSnapshotStatus) DeepCopyInto(out *VolumeSnapshotStatus) {
  		*out = new(string)
  		**out = **in
  	}
 +	if in.BoundSnapshotContentName != nil {
 +		in, out := &in.BoundSnapshotContentName, &out.BoundSnapshotContentName
++		*out = new(string)
++		**out = **in
++	}
++	if in.StorageClassName != nil {
++		in, out := &in.StorageClassName, &out.StorageClassName
++		*out = new(string)
++		**out = **in
++	}
++	if in.Size != nil {
++		in, out := &in.Size, &out.Size
++		*out = new(string)
++		**out = **in
++	}
++	if in.VolumeMode != nil {
++		in, out := &in.VolumeMode, &out.VolumeMode
 +		*out = new(string)
 +		**out = **in
 +	}

@@ -16,17 +16,22 @@ using an absolute path.
 Deckhouse fork of the CSI `VolumeSnapshot` API for the state-snapshotter
 import flow. Must keep applying to the build branch `d8-63742164-vsc-only`.
 
-- Adds `spec.source.dataImportName` (third mutually-exclusive source) and
-  extends the CEL one-of to allow an empty source (restore intent) or exactly
-  one of `persistentVolumeClaimName` / `volumeSnapshotContentName` /
-  `dataImportName`; `dataImportName` is immutable.
+- Adds `spec.source.import` (an empty marker object, third mutually-exclusive
+  source) and extends the CEL one-of to allow an empty source (restore intent)
+  or exactly one of `persistentVolumeClaimName` / `volumeSnapshotContentName` /
+  `import`; once present, `import` cannot be removed. The marker carries no
+  DataImport name — the owning `DataImport` is resolved by reverse-lookup
+  (`DataImport.spec.targetRef`), mirroring the unified `spec.source.import: {}`
+  marker used by every state-snapshotter snapshot kind.
 - Adds `status.boundSnapshotContentName` (points at the cluster-scoped
   state-snapshotter `SnapshotContent`, alongside legacy
-  `boundVolumeSnapshotContentName`). Forking the Go type + deepcopy is enough:
+  `boundVolumeSnapshotContentName`) plus `status.storageClassName`,
+  `status.size` and `status.volumeMode` — mirrored volume metadata for d8
+  export/consumption. Forking the Go types + deepcopy is enough:
   `updateSnapshotStatus` does read -> `DeepCopy()` -> `UpdateStatus`, so the
-  field is preserved without controller logic changes.
+  fields are preserved without controller logic changes.
 - Behavioral skip: `syncSnapshot` and `syncSnapshotByKey` (before snapshot-class
-  resolution) skip any `VolumeSnapshot` whose `spec.source.dataImportName` is set
+  resolution) skip any `VolumeSnapshot` whose `spec.source.import` is set
   — those objects are owned/bound by the state-snapshotter common controller.
 
 The patch edits both `./client/...` (the authoritative copy via `go.mod`
