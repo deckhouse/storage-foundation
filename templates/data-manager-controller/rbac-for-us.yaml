@@ -1,0 +1,306 @@
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: data-manager-controller
+  namespace: d8-{{ .Chart.Name }}
+  {{- include "helm_lib_module_labels" (list . (dict "app" "data-manager-controller")) | nindent 2 }}
+
+---
+kind: Role
+apiVersion: rbac.authorization.k8s.io/v1
+metadata:
+  name: data-manager-controller
+  namespace: d8-{{ .Chart.Name }}
+  {{- include "helm_lib_module_labels" (list . (dict "app" "data-manager-controller")) | nindent 2 }}
+rules:
+  - apiGroups:
+      - coordination.k8s.io
+    resources:
+      - leases
+    verbs:
+      - get
+      - watch
+      - list
+      - delete
+      - update
+      - create
+  - apiGroups:
+      - ""
+    resources:
+      - persistentvolumeclaims
+      - pods
+      - configmaps
+      - services
+      - secrets
+    verbs:
+      - get
+      - list
+      - watch
+      - update
+      - create
+      - delete
+      - patch
+  - apiGroups:
+      - apps
+    resources:
+      - deployments
+    verbs:
+      - get
+      - list
+      - watch
+      - create
+      - delete
+      - update
+      - patch
+  - apiGroups:
+      - networking.k8s.io
+    resources:
+      - ingresses
+    verbs:
+      - get
+      - list
+      - watch
+      - create
+      - delete
+      - update
+      - patch
+---
+kind: ClusterRole
+apiVersion: rbac.authorization.k8s.io/v1
+metadata:
+  name: d8:{{ .Chart.Name }}:data-manager-controller
+  {{- include "helm_lib_module_labels" (list . (dict "app" "data-manager-controller")) | nindent 2 }}
+rules:
+  - apiGroups:
+      - storage.deckhouse.io
+    resources:
+      - dataexports
+      - dataexports/status
+      - dataimports
+      - dataimports/status
+    verbs:
+      - create
+      - delete
+      - list
+      - get
+      - watch
+      - update
+  # DataImport produces durable data artifacts by creating VolumeCaptureRequests (storage-foundation);
+  # DataExport (C6) restores a snapshot's durable artifact into the export PVC via VolumeRestoreRequest.
+  - apiGroups:
+      - storage.deckhouse.io
+    resources:
+      - volumecapturerequests
+      - volumerestorerequests
+    verbs:
+      - create
+      - delete
+      - list
+      - get
+      - watch
+      - update
+  # DataExport (C6) resolves the snapshot leaf's bound SnapshotContent (cluster-scoped) to read the
+  # trusted data artifact reference (status.dataRef) for the VolumeRestoreRequest source. Read-only.
+  - apiGroups:
+      - storage.deckhouse.io
+    resources:
+      - snapshotcontents
+    verbs:
+      - get
+      - list
+      - watch
+  # DataImport anchors the produced artifact to the import's lifetime via its own ObjectKeeper
+  # (FollowObject -> DataImport), added as a non-controller owner alongside storage-foundation's VCR
+  # retainer (which is only anchored to the short-lived VCR).
+  - apiGroups:
+      - deckhouse.io
+    resources:
+      - objectkeepers
+    verbs:
+      - create
+      - get
+      - list
+      - watch
+      - update
+      - patch
+  - apiGroups:
+      - ""
+    resources:
+      - events
+    verbs:
+      - create
+      - list
+      - patch
+  - apiGroups:
+      - storage.k8s.io
+    resources:
+      - storageclasses
+      - volumeattachments
+    verbs:
+      - list
+      - get
+      - watch
+  - apiGroups:
+      - ""
+    resources:
+      - persistentvolumes
+      - persistentvolumeclaims
+      - pods
+      - configmaps
+    verbs:
+      - get
+      - list
+      - watch
+      - create
+      - update
+      - patch
+      - delete
+  - apiGroups:
+      - virtualization.deckhouse.io
+    resources:
+      - virtualdisks
+      - virtualdisksnapshots
+    verbs:
+      - get
+      - list
+      - watch
+  - apiGroups:
+      - ""
+    resources:
+      - services
+    verbs:
+      - get
+      - list
+      - watch
+      - update
+      - patch
+      - delete
+  - apiGroups:
+      - apps
+    resources:
+      - deployments
+    verbs:
+      - list
+      - watch
+      - create
+  - apiGroups:
+      - batch
+    resources:
+      - jobs
+    verbs:
+      - get
+      - list
+      - watch
+      - create
+      - delete
+  - apiGroups:
+      - networking.k8s.io
+    resources:
+      - ingresses
+    verbs:
+      - get
+      - list
+      - watch
+      - create
+      - delete
+      - update
+      - patch
+  - apiGroups:
+      - snapshot.storage.k8s.io
+    resources:
+      - volumesnapshots
+      - volumesnapshotcontents
+    verbs:
+      - get
+      - list
+      - watch
+      - create
+      - delete
+      - update
+      - patch
+  # DataImport auto-detects snapshot capability by resolving the StorageClass's VolumeSnapshotClass
+  # (via the storage.deckhouse.io/volumesnapshotclass annotation) before producing a VolumeSnapshotContent.
+  - apiGroups:
+      - snapshot.storage.k8s.io
+    resources:
+      - volumesnapshotclasses
+    verbs:
+      - get
+      - list
+      - watch
+  - apiGroups:
+      - apiextensions.k8s.io
+    resources:
+      - customresourcedefinitions
+    verbs:
+      - get
+      - list
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: data-manager-controller
+  namespace: d8-{{ .Chart.Name }}
+  {{- include "helm_lib_module_labels" (list . (dict "app" "data-manager-controller")) | nindent 2 }}
+subjects:
+  - kind: ServiceAccount
+    name: data-manager-controller
+    namespace: d8-{{ .Chart.Name }}
+roleRef:
+  kind: Role
+  name: data-manager-controller
+  apiGroup: rbac.authorization.k8s.io
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: d8:{{ .Chart.Name }}:data-manager-controller
+  {{- include "helm_lib_module_labels" (list . (dict "app" "data-manager-controller")) | nindent 2 }}
+subjects:
+  - kind: ServiceAccount
+    name: data-manager-controller
+    namespace: d8-{{ .Chart.Name }}
+roleRef:
+  kind: ClusterRole
+  name: d8:{{ .Chart.Name }}:data-manager-controller
+  apiGroup: rbac.authorization.k8s.io
+---
+kind: Role
+apiVersion: rbac.authorization.k8s.io/v1
+metadata:
+  name: {{ .Chart.Name }}:data-manager-controller
+  namespace: d8-user-authn
+  {{- include "helm_lib_module_labels" (list . (dict "app" "data-manager-controller")) | nindent 2 }}
+rules:
+  - apiGroups:
+      - ""
+    resources:
+      - secrets
+    verbs:
+      - get
+      - list
+      - watch
+  - apiGroups:
+      - networking.k8s.io
+    resources:
+      - ingresses
+    verbs:
+      - get
+      - list
+      - watch
+---
+kind: RoleBinding
+apiVersion: rbac.authorization.k8s.io/v1
+metadata:
+  name: {{ .Chart.Name }}:data-manager-controller
+  namespace: d8-user-authn
+  {{- include "helm_lib_module_labels" (list . (dict "app" "data-manager-controller")) | nindent 2 }}
+subjects:
+  - kind: ServiceAccount
+    name: data-manager-controller
+    namespace: d8-{{ .Chart.Name }}
+roleRef:
+  kind: Role
+  name: {{ .Chart.Name }}:data-manager-controller
+  apiGroup: rbac.authorization.k8s.io
