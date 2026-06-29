@@ -26,6 +26,7 @@ import (
 	"github.com/sirupsen/logrus"
 	kwhlogrus "github.com/slok/kubewebhook/v2/pkg/log/logrus"
 
+	dev1alpha1 "github.com/deckhouse/storage-foundation/api/v1alpha1"
 	"github.com/deckhouse/storage-foundation/images/webhooks/handlers"
 )
 
@@ -59,6 +60,7 @@ func initFlags() (config, error) {
 const (
 	port                    = ":8443"
 	volumeSnapshotMutatorID = "volumeSnapshotMutation"
+	dataExportValidatorID   = "dataExportValidation"
 )
 
 func main() {
@@ -78,8 +80,15 @@ func main() {
 		os.Exit(1)
 	}
 
+	dataExportValidatingWebHookHandler, err := handlers.NewValidatingWebhookHandler(handlers.DataExportValidateFunc(), dataExportValidatorID, &dev1alpha1.DataExport{}, logger)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error creating dataExportValidatingWebHookHandler: %s", err)
+		os.Exit(1)
+	}
+
 	mux := http.NewServeMux()
 	mux.Handle("/volume-snapshot-mutate", volumeSnapshotMutatingWebHookHandler)
+	mux.Handle("/dataexport-validate", dataExportValidatingWebHookHandler)
 	mux.HandleFunc("/healthz", httpHandlerHealthz)
 
 	logger.Infof("Listening on %s", port)

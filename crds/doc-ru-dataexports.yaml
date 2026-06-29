@@ -1,0 +1,80 @@
+spec:
+  versions:
+    - name: v1alpha1
+      schema:
+        openAPIV3Schema:
+          description: |
+            Ресурс для экспорта файлов и блоков PV.
+          properties:
+            spec:
+              properties:
+                ttl:
+                  description: |
+                    Время жизни после последнего запроса пользователя.
+                publish:
+                  description: |
+                    Включение внешнего доступа к экспортер-поду за пределами кластера.
+                publicIngress:
+                  description: |
+                    Тип публичного доступа к экспортеру.
+                targetRef:
+                  description: |
+                    GroupKind-ссылка на целевой ресурс для экспорта (namespace неявный — тот же, что
+                    у DataExport).
+                  properties:
+                    group:
+                      description: |
+                        API-группа целевого ресурса ("" или отсутствует для core-группы, например
+                        для PersistentVolumeClaim).
+                    kind:
+                      description: |
+                        Kind целевого объекта (например, PersistentVolumeClaim, VirtualDisk,
+                        VolumeSnapshot, VirtualDiskSnapshot).
+                    name:
+                      description: |
+                        Имя целевого ресурса для экспорта.
+            status:
+              type: object
+              description: |
+                Информация о статусе ресурса DataExport.
+              properties:
+                url:
+                  description: |
+                    Внутренний URL экспортер-пода (например, https://X.X.X.X:8085).
+                ca:
+                  description: |
+                    CA-сертификат в кодировке Base64 для TLS-подключения к экспортер-поду.
+                publicURL:
+                  description: |
+                    Публичный URL для внешнего доступа (например, https://data-exporter.<public-domain>/<namespace>/<имя-DataExport>).
+                accessTimestamp:
+                  description: |
+                    Временная метка последнего доступа к экспортированным данным.
+                volumeMode:
+                  description: |
+                    Режим тома экспортированных данных.
+                conditions:
+                  type: array
+                  description: |
+                    Массив условий, описывающих текущее состояние ресурса DataExport.
+                  items:
+                    type: object
+                    properties:
+                      type:
+                        description: |
+                          Тип условия.
+                      status:
+                        description: |
+                          Статус условия.
+                      reason:
+                        description: |
+                          Причина текущего статуса условия.
+                      message:
+                        description: |
+                          Сообщение, описывающее условие.
+                      lastTransitionTime:
+                        description: |
+                          Время последнего перехода условия из одного статуса в другой.
+                      observedGeneration:
+                        description: |
+                          Наблюдаемое поколение ресурса при последнем обновлении условия.

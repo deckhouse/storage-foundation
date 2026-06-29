@@ -1,0 +1,68 @@
+---
+image: {{ .ModuleNamePrefix }}{{ .ImageName }}-src-artifact
+from: {{ index $.Images "builder/src" }}
+final: false
+
+git:
+  - add: {{ .ModuleDir }}/api
+    to: /src/api
+    stageDependencies:
+      install:
+        - '**/*'
+  - add: {{ .ModuleDir }}/common
+    to: /src/common
+    stageDependencies:
+      install:
+        - '**/*'
+  - add: {{ .ModuleDir }}/images/{{ $.ImageName }}
+    to: /src/images/{{ $.ImageName }}
+    stageDependencies:
+      install:
+        - '**/*'
+    excludePaths:
+      - werf.inc.yaml
+
+shell:
+  install:
+    - rm -rf /src/.git
+
+---
+image: {{ .ModuleNamePrefix }}{{ .ImageName }}-golang-artifact
+from: {{ index $.Images (eq .SVACE_ENABLED "false" | ternary "builder/golang" "builder/alpine-svace") }}
+final: false
+
+import:
+  - image: {{ .ModuleNamePrefix }}{{ .ImageName }}-src-artifact
+    add: /src
+    to: /src
+    before: setup
+
+mount:
+{{ include "mount points for golang builds" . }}
+
+secrets:
+- id: GOPROXY
+  value: {{ .GOPROXY }}
+
+shell:
+  setup:
+    - cd /src/images/{{ $.ImageName }}
+    - GOPROXY=$(cat /run/secrets/GOPROXY) go mod download
+    - export GOOS=linux GOARCH=amd64 CGO_ENABLED=0
+    - |
+      {{- include "image-build.build" (set $ "BuildCommand" (printf `go build -ldflags="-s -w" -o /%s ./cmd` $.ImageName)) | nindent 6 }}
+    - chmod +x /{{ $.ImageName }}
+
+---
+image: {{ .ModuleNamePrefix }}{{ .ImageName }}
+from: {{ index $.Images "builder/distroless" }}
+
+import:
+  - image: {{ .ModuleNamePrefix }}{{ .ImageName }}-golang-artifact
+    add: /{{ $.ImageName }}
+    to: /{{ $.ImageName }}
+    before: setup
+
+imageSpec:
+  config:
+    entrypoint: ["/{{ $.ImageName }}"]

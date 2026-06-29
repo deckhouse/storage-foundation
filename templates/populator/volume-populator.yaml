@@ -1,0 +1,14 @@
+---
+# Registers DataImport as a recognized volume-populator data source. external-provisioner and the
+# volume-data-source-validator read this cluster-scoped object to allow PVCs whose spec.dataSourceRef
+# points at DataImport.storage.deckhouse.io to be provisioned via the populator (instead of being
+# rejected as an unrecognized data source). Must match the GroupKind registered by the populator
+# (see images/populator/cmd/main.go).
+apiVersion: populator.storage.k8s.io/v1beta1
+kind: VolumePopulator
+metadata:
+  name: dataimport
+  {{- include "helm_lib_module_labels" (list . (dict "app" "populator")) | nindent 2 }}
+sourceKind:
+  group: storage.deckhouse.io
+  kind: DataImport

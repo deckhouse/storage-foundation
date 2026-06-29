@@ -87,3 +87,11 @@
   license: Apache License 2.0
   id: snapshot-controller
   version: d8-63742164-vsc-only
+
+- name: volume-data-source-validator
+  link: https://github.com/kubernetes-csi/volume-data-source-validator
+  description: CSI volume-data-source-validator controller used by the data import flow. Built by cloning the upstream repository at a pinned commit and applying patches under images/data-source-validator/patches/ (health/readiness probes).
+  logo: https://avatars.githubusercontent.com/u/52698954?s=200&v=4
+  license: Apache License 2.0
+  id: data-source-validator
+  version: 3b807a2775747d819e8342b4ddaeac911c3c7ee2

@@ -1,0 +1,66 @@
+{{- $upstreamCommit := "3b807a2775747d819e8342b4ddaeac911c3c7ee2" }}
+---
+image: {{ .ModuleNamePrefix }}{{ .ImageName }}-src-artifact
+from: {{ index $.Images "builder/src" }}
+final: false
+
+git:
+  - add: {{ .ModuleDir }}/images/{{ $.ImageName }}/patches
+    to: /patches
+    stageDependencies:
+      install:
+        - '**/*'
+
+secrets:
+- id: SOURCE_REPO
+  value: {{ .SOURCE_REPO }}
+
+shell:
+  install:
+    - cd /src
+    - git clone $(cat /run/secrets/SOURCE_REPO)/kubernetes-csi/volume-data-source-validator.git .
+    - git checkout {{ $upstreamCommit }}
+    - for patchfile in /patches/*.patch ; do echo -n "Apply ${patchfile} ... "; git apply "${patchfile}" --verbose; done
+    - rm -rf /patches
+    - rm -rf .git
+
+---
+image: {{ .ModuleNamePrefix }}{{ .ImageName }}-golang-artifact
+from: {{ index $.Images (eq .SVACE_ENABLED "false" | ternary "builder/golang" "builder/alpine-svace") }}
+final: false
+
+import:
+  - image: {{ .ModuleNamePrefix }}{{ .ImageName }}-src-artifact
+    add: /src
+    to: /src
+    before: setup
+
+mount:
+{{ include "mount points for golang builds" . }}
+
+secrets:
+- id: GOPROXY
+  value: {{ .GOPROXY }}
+
+shell:
+  setup:
+    - cd /src/cmd/volume-data-source-validator
+    - GOPROXY=$(cat /run/secrets/GOPROXY) go mod download
+    - export GOOS=linux GOARCH=amd64 CGO_ENABLED=0
+    - |
+      {{- include "image-build.build" (set $ "BuildCommand" (printf `go build -ldflags="-s -w" -o /%s` $.ImageName)) | nindent 6 }}
+    - chmod +x /{{ $.ImageName }}
+
+---
+image: {{ .ModuleNamePrefix }}{{ .ImageName }}
+from: {{ index $.Images "builder/distroless" }}
+
+import:
+  - image: {{ .ModuleNamePrefix }}{{ .ImageName }}-golang-artifact
+    add: /{{ $.ImageName }}
+    to: /{{ $.ImageName }}
+    before: setup
+
+imageSpec:
+  config:
+    entrypoint: ["/{{ $.ImageName }}"]

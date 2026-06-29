@@ -32,7 +32,13 @@ echo "Generating deepcopy code for storage.deckhouse.io/v1alpha1 ..."
 ${CONTROLLER_GEN} object:headerFile="${HEADER}" paths=./api/v1alpha1
 
 echo "Generating CRDs for storage.deckhouse.io/v1alpha1 ..."
-${CONTROLLER_GEN} crd:crdVersions=v1 output:crd:dir=./crds paths=./api/v1alpha1
+${CONTROLLER_GEN} crd:crdVersions=v1 output:crd:dir=./crds/internal paths=./api/v1alpha1
+
+# DataExport/DataImport CRDs are hand-curated in ./crds (they carry a non-standard `download`
+# subresource and CEL immutability rules that controller-gen markers cannot express). Drop the
+# auto-generated duplicates so the bundle does not ship two CRDs with the same metadata.name.
+rm -f ./crds/internal/storage.deckhouse.io_dataexports.yaml \
+      ./crds/internal/storage.deckhouse.io_dataimports.yaml
 
 echo "Done."
 
