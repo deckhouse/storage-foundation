@@ -744,7 +744,7 @@ func (r *DataImportReconciler) ensurePublish(ctx context.Context) error {
 		publish.IngressCfg{
 			IngressName:      types.NamespacedName{Namespace: r.Config.ControllerNamespace, Name: r.names.IngressResourceName},
 			ServiceName:      types.NamespacedName{Namespace: r.Config.ControllerNamespace, Name: r.names.HeadlessServiceName},
-			OriginIngress:    types.NamespacedName{Namespace: common.OriginIngressNamespace, Name: common.OriginIngressName},
+			OriginIngress:    types.NamespacedName{Namespace: r.Config.OriginIngressNamespace, Name: common.OriginIngressName},
 			TargetSecretName: common.IngressSecretName,
 			Path:             fmt.Sprintf("/%s/%s/%s", r.dataImport.Namespace, r.names.TargetKindShort, r.names.TargetName),
 			CorsAllowMethods: "PUT, POST, HEAD, OPTIONS",

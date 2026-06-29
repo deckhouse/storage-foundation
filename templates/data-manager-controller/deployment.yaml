@@ -3,6 +3,12 @@ cpu: 10m
 memory: 25Mi
 {{- end }}
 
+{{- $dhVersionIsDev := or (hasPrefix "dev" .Values.global.deckhouseVersion) (hasSuffix "dev" .Values.global.deckhouseVersion) }}
+{{- $originIngressNamespace := "d8-user-authn" }}
+{{- if or $dhVersionIsDev (semverCompare ">=1.77" .Values.global.deckhouseVersion) }}
+{{- $originIngressNamespace = "kube-system" }}
+{{- end }}
+
 {{- if (.Values.global.enabledModules | has "vertical-pod-autoscaler-crd") }}
 ---
 apiVersion: autoscaling.k8s.io/v1
@@ -108,6 +114,8 @@ spec:
               valueFrom:
                 fieldRef:
                   fieldPath: metadata.namespace
+            - name: ORIGIN_INGRESS_NAMESPACE
+              value: {{ $originIngressNamespace | quote }}
             - name: HA_MODE
               value: {{ include "helm_lib_is_ha_to_value" (list . "true" "false") | quote }}
             - name: ingressClassName

@@ -530,7 +530,7 @@ func (r *DataexportReconciler) makePublishConfigs(dataExport *dev1alpha1.DataExp
 	ingressCfg := publish.IngressCfg{
 		IngressName:      types.NamespacedName{Namespace: r.Config.ControllerNamespace, Name: generatedNames.IngressResourceName},
 		ServiceName:      types.NamespacedName{Namespace: r.Config.ControllerNamespace, Name: generatedNames.HeadlessServiceName},
-		OriginIngress:    types.NamespacedName{Namespace: OriginIngressNamespace, Name: OriginIngressName},
+		OriginIngress:    types.NamespacedName{Namespace: r.Config.OriginIngressNamespace, Name: OriginIngressName},
 		TargetSecretName: IngressSecretName,
 		Path:             fmt.Sprintf("/%s/%s/%s", dataExport.Namespace, generatedNames.TargetKindShort, generatedNames.TargetName),
 		CorsAllowMethods: "GET, HEAD, OPTIONS",

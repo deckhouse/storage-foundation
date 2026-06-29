@@ -21,6 +21,7 @@ import (
 	"os"
 	"time"
 
+	"github.com/deckhouse/storage-foundation/common"
 	"github.com/deckhouse/storage-foundation/common/logger"
 )
 
@@ -34,6 +35,7 @@ const (
 	DefaultRequeueStorageClassInterval   = 10
 	HAModeEnvName                        = "HA_MODE"
 	LeaderElectionID                     = "storage-foundation.storage.deckhouse.io"
+	OriginIngressNamespaceEnv            = "ORIGIN_INGRESS_NAMESPACE"
 )
 
 type Options struct {
@@ -41,6 +43,7 @@ type Options struct {
 	RequeueStorageClassInterval time.Duration
 	HealthProbeBindAddress      string
 	ControllerNamespace         string
+	OriginIngressNamespace      string
 	LeaderElection              bool
 	LeaderElectionID            string
 }
@@ -71,6 +74,11 @@ func NewConfig() *Options {
 			log.Printf("Got namespace from filesystem: %s", string(namespace))
 			opts.ControllerNamespace = string(namespace)
 		}
+	}
+
+	opts.OriginIngressNamespace = os.Getenv(OriginIngressNamespaceEnv)
+	if opts.OriginIngressNamespace == "" {
+		opts.OriginIngressNamespace = common.OriginIngressNamespace
 	}
 
 	opts.RequeueStorageClassInterval = DefaultRequeueStorageClassInterval
