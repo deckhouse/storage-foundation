@@ -43,6 +43,7 @@ type snapshotTargetError struct {
 	reason  string
 	message string
 	vscName string
+	vscUID  string
 }
 
 type snapshotTargetResult struct {
@@ -68,7 +69,7 @@ func snapshotVSCName(vcrUID types.UID, targetUID string) string {
 	return fmt.Sprintf("snapshot-%s-%s", string(vcrUID), targetUIDHash(targetUID))
 }
 
-func volumeSnapshotBinding(target storagev1alpha1.VolumeCaptureTarget, vscName string) storagev1alpha1.VolumeDataBinding {
+func volumeSnapshotBinding(target storagev1alpha1.VolumeCaptureTarget, vscName, vscUID string) storagev1alpha1.VolumeDataBinding {
 	return storagev1alpha1.VolumeDataBinding{
 		TargetUID: target.UID,
 		Target:    target,
@@ -76,6 +77,8 @@ func volumeSnapshotBinding(target storagev1alpha1.VolumeCaptureTarget, vscName s
 			APIVersion: "snapshot.storage.k8s.io/v1",
 			Kind:       "VolumeSnapshotContent",
 			Name:       vscName,
+			// UID is best-effort: empty when the artifact is referenced before its object is known.
+			UID: vscUID,
 		},
 	}
 }
@@ -290,6 +293,7 @@ func (r *VolumeCaptureRequestController) processSnapshotTarget(
 			target: target, reason: storagev1alpha1.ConditionReasonSnapshotCreationFailed,
 			message: fmt.Sprintf("CSI snapshot creation failed: %s", errorDetails),
 			vscName: csiVSCName,
+			vscUID:  string(csiVSC.UID),
 		}}, ctrl.Result{}, nil
 	}
 
@@ -298,7 +302,7 @@ func (r *VolumeCaptureRequestController) processSnapshotTarget(
 		return snapshotTargetResult{pending: true}, ctrl.Result{RequeueAfter: 5 * time.Second}, nil
 	}
 
-	binding := volumeSnapshotBinding(target, csiVSCName)
+	binding := volumeSnapshotBinding(target, csiVSCName, string(csiVSC.UID))
 	return snapshotTargetResult{
 		ready:   true,
 		binding: &binding,
@@ -309,10 +313,10 @@ func (r *VolumeCaptureRequestController) markFailedSnapshotForTarget(
 	ctx context.Context,
 	vcr *storagev1alpha1.VolumeCaptureRequest,
 	target storagev1alpha1.VolumeCaptureTarget,
-	vscName, reason, message string,
+	vscName, vscUID, reason, message string,
 ) (ctrl.Result, error) {
 	if vscName != "" {
-		binding := volumeSnapshotBinding(target, vscName)
+		binding := volumeSnapshotBinding(target, vscName, vscUID)
 		vcr.Status.DataRef = &binding
 	}
 	if err := r.finalizeVCR(ctx, vcr, metav1.ConditionFalse, reason, message); err != nil {

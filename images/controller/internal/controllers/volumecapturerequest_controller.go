@@ -189,7 +189,7 @@ func (r *VolumeCaptureRequestController) processSnapshotMode(ctx context.Context
 
 	if tr.terminal != nil {
 		l.Error(nil, "Target capture failed", "targetUID", tr.terminal.target.UID, "reason", tr.terminal.reason)
-		return r.markFailedSnapshotForTarget(ctx, vcr, tr.terminal.target, tr.terminal.vscName, tr.terminal.reason, tr.terminal.message)
+		return r.markFailedSnapshotForTarget(ctx, vcr, tr.terminal.target, tr.terminal.vscName, tr.terminal.vscUID, tr.terminal.reason, tr.terminal.message)
 	}
 
 	if tr.ready && tr.binding != nil {
@@ -323,7 +323,7 @@ func (r *VolumeCaptureRequestController) processDetachMode(ctx context.Context, 
 			l.Info("PV already detached but not by VCR", "pv", pv.Name)
 		}
 		// Already detached, update status
-		setPersistentVolumeDataRef(vcr, target, pv.Name)
+		setPersistentVolumeDataRef(vcr, target, pv.Name, string(pv.UID))
 		if err := r.finalizeVCR(ctx, vcr, metav1.ConditionTrue, storagev1alpha1.ConditionReasonCompleted, fmt.Sprintf("PV %s already detached", pv.Name)); err != nil {
 			return ctrl.Result{}, err
 		}
@@ -421,7 +421,7 @@ func (r *VolumeCaptureRequestController) processDetachMode(ctx context.Context, 
 	l.Info("Detached PV from PVC and set ownerRef", "pv", updatedPV.Name)
 
 	// 10. Update VCR status
-	setPersistentVolumeDataRef(vcr, target, updatedPV.Name)
+	setPersistentVolumeDataRef(vcr, target, updatedPV.Name, string(updatedPV.UID))
 	if err := r.finalizeVCR(ctx, vcr, metav1.ConditionTrue, storagev1alpha1.ConditionReasonCompleted, fmt.Sprintf("PV %s detached", updatedPV.Name)); err != nil {
 		return ctrl.Result{}, err
 	}

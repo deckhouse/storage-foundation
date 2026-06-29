@@ -371,6 +371,13 @@ var _ = Describe("VolumeCaptureRequest Controller", func() {
 				// Simulate external-snapshotter setting ReadyToUse=true
 				vsc := &snapshotv1.VolumeSnapshotContent{}
 				Expect(client.Get(ctx, types.NamespacedName{Name: csiVSCName}, vsc)).To(Succeed())
+				// The fake client does not assign a UID on Create; set one so we can assert it propagates
+				// into status.dataRef.artifact.uid (a real apiserver always assigns a UID).
+				if vsc.UID == "" {
+					vsc.UID = types.UID("vsc-uid-happy")
+					Expect(client.Update(ctx, vsc)).To(Succeed())
+					Expect(client.Get(ctx, types.NamespacedName{Name: csiVSCName}, vsc)).To(Succeed())
+				}
 				vsc.Status = &snapshotv1.VolumeSnapshotContentStatus{
 					ReadyToUse: pointer.Bool(true),
 				}
@@ -448,6 +455,7 @@ var _ = Describe("VolumeCaptureRequest Controller", func() {
 				Expect(updatedVCR.Status.DataRef).ToNot(BeNil())
 				Expect(updatedVCR.Status.DataRef.Artifact.Kind).To(Equal("VolumeSnapshotContent"))
 				Expect(updatedVCR.Status.DataRef.Artifact.Name).To(Equal(csiVSCName))
+				Expect(updatedVCR.Status.DataRef.Artifact.UID).To(Equal("vsc-uid-happy"))
 			})
 		})
 
@@ -474,6 +482,7 @@ var _ = Describe("VolumeCaptureRequest Controller", func() {
 				csiVSCName := snapshotVSCName(vcr.UID, targetUID)
 				errorMsg := "provided secret is empty"
 				vsc := newReadyVSC(csiVSCName, false, nil)
+				vsc.UID = types.UID("vsc-uid-error")
 
 				retainerName := objectKeeperNameForVCR(vcr.UID)
 				objectKeeper := &deckhousev1alpha1.ObjectKeeper{
@@ -531,6 +540,7 @@ var _ = Describe("VolumeCaptureRequest Controller", func() {
 				Expect(updatedVCR.Status.DataRef).ToNot(BeNil())
 				Expect(updatedVCR.Status.DataRef.Artifact.Kind).To(Equal("VolumeSnapshotContent"))
 				Expect(updatedVCR.Status.DataRef.Artifact.Name).To(Equal(csiVSCName))
+				Expect(updatedVCR.Status.DataRef.Artifact.UID).To(Equal("vsc-uid-error"))
 
 				// VSC still exists (not deleted)
 				existingVSC := &snapshotv1.VolumeSnapshotContent{}
@@ -670,6 +680,7 @@ var _ = Describe("VolumeCaptureRequest Controller", func() {
 			It("should detach PV and set correct ownership", func() {
 				// Given
 				pv := newCSIPV("test-pv-detach", "test-driver", "test-volume-handle")
+				pv.UID = types.UID("pv-uid-detach")
 				pv.Spec.PersistentVolumeReclaimPolicy = corev1.PersistentVolumeReclaimRetain
 				pv.Spec.ClaimRef = &corev1.ObjectReference{
 					Namespace: "default",
@@ -721,6 +732,7 @@ var _ = Describe("VolumeCaptureRequest Controller", func() {
 				Expect(updatedVCR.Status.DataRef).ToNot(BeNil())
 				Expect(updatedVCR.Status.DataRef.Artifact.Kind).To(Equal("PersistentVolume"))
 				Expect(updatedVCR.Status.DataRef.Artifact.Name).To(Equal("test-pv-detach"))
+				Expect(updatedVCR.Status.DataRef.Artifact.UID).To(Equal("pv-uid-detach"))
 
 				readyCondition := getCondition(updatedVCR.Status.Conditions, storagev1alpha1.ConditionTypeReady)
 				Expect(readyCondition).ToNot(BeNil())

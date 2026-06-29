@@ -30,12 +30,12 @@ func requireCaptureTarget(spec storagev1alpha1.VolumeCaptureRequestSpec) (storag
 	return *spec.Target, nil
 }
 
-func setVolumeSnapshotDataRef(vcr *storagev1alpha1.VolumeCaptureRequest, target storagev1alpha1.VolumeCaptureTarget, vscName string) {
-	binding := volumeSnapshotBinding(target, vscName)
+func setVolumeSnapshotDataRef(vcr *storagev1alpha1.VolumeCaptureRequest, target storagev1alpha1.VolumeCaptureTarget, vscName, vscUID string) {
+	binding := volumeSnapshotBinding(target, vscName, vscUID)
 	vcr.Status.DataRef = &binding
 }
 
-func setPersistentVolumeDataRef(vcr *storagev1alpha1.VolumeCaptureRequest, target storagev1alpha1.VolumeCaptureTarget, pvName string) {
+func setPersistentVolumeDataRef(vcr *storagev1alpha1.VolumeCaptureRequest, target storagev1alpha1.VolumeCaptureTarget, pvName, pvUID string) {
 	vcr.Status.DataRef = &storagev1alpha1.VolumeDataBinding{
 		TargetUID: target.UID,
 		Target:    target,
@@ -43,6 +43,8 @@ func setPersistentVolumeDataRef(vcr *storagev1alpha1.VolumeCaptureRequest, targe
 			APIVersion: "v1",
 			Kind:       "PersistentVolume",
 			Name:       pvName,
+			// UID is best-effort: empty when the PV object is not available.
+			UID: pvUID,
 		},
 	}
 }

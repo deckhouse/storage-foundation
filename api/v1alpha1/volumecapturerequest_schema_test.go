@@ -90,6 +90,7 @@ func TestVolumeCaptureRequestStatus_DataRef_JSONRoundTrip(t *testing.T) {
 					APIVersion: "snapshot.storage.k8s.io/v1",
 					Kind:       "VolumeSnapshotContent",
 					Name:       "snapcontent-a",
+					UID:        "vsc-uid-a",
 				},
 			},
 		},
@@ -110,6 +111,10 @@ func TestVolumeCaptureRequestStatus_DataRef_JSONRoundTrip(t *testing.T) {
 	ref := out.Status.DataRef
 	if ref.TargetUID != "uid-a" || ref.Artifact.Name != "snapcontent-a" {
 		t.Fatalf("dataRef mismatch: %#v", ref)
+	}
+	// Artifact UID round-trips so the durable reference is self-contained, symmetric with target.uid.
+	if ref.Artifact.UID != "vsc-uid-a" {
+		t.Fatalf("status.dataRef.artifact.uid = %q, want %q", ref.Artifact.UID, "vsc-uid-a")
 	}
 	// Namespace is preserved in status.dataRef.target so the binding is self-contained.
 	if ref.Target.Namespace != "demo" {
