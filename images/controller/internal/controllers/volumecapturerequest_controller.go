@@ -162,12 +162,16 @@ func (r *VolumeCaptureRequestController) Reconcile(ctx context.Context, req ctrl
 // - VCR never retries snapshot creation
 func (r *VolumeCaptureRequestController) processSnapshotMode(ctx context.Context, vcr *storagev1alpha1.VolumeCaptureRequest) (ctrl.Result, error) {
 	l := log.FromContext(ctx).WithValues("vcr", fmt.Sprintf("%s/%s", vcr.Namespace, vcr.Name), "mode", "Snapshot")
-	l.Info("Processing VolumeCaptureRequest in Snapshot mode", "targets", len(vcr.Spec.Targets))
+	l.Info("Processing VolumeCaptureRequest in Snapshot mode")
 
-	if err := validateSnapshotTargets(vcr.Spec.Targets); err != nil {
-		l.Error(err, "Invalid spec.targets")
+	target, err := requireCaptureTarget(vcr.Spec)
+	if err != nil {
+		l.Error(err, "Invalid spec.target")
 		return r.markFailed(ctx, vcr, storagev1alpha1.ConditionReasonInternalError, err.Error())
 	}
+	// spec.target carries no namespace; the captured PVC always lives in the VCR namespace.
+	// Re-inject it so the per-target capture path and the status binding both see the namespace.
+	target.Namespace = vcr.Namespace
 
 	retainerName := objectKeeperNameForVCR(vcr.UID)
 	objectKeeper, result, err := r.ensureObjectKeeper(ctx, retainerName, vcr)
@@ -178,64 +182,34 @@ func (r *VolumeCaptureRequestController) processSnapshotMode(ctx context.Context
 		return result, nil
 	}
 
-	var bindingUpdates []storagev1alpha1.VolumeDataBinding
-	var readyCount int
-	var pending bool
-	var requeueAfter time.Duration
-	var firstTerminal *snapshotTargetError
-
-	for _, target := range vcr.Spec.Targets {
-		tr, targetResult, err := r.processSnapshotTarget(ctx, vcr, objectKeeper, retainerName, target)
-		if err != nil {
-			return ctrl.Result{}, err
-		}
-		if targetResult.Requeue || targetResult.RequeueAfter > 0 {
-			pending = true
-			if targetResult.RequeueAfter > requeueAfter {
-				requeueAfter = targetResult.RequeueAfter
-			}
-		}
-		if tr.terminal != nil && firstTerminal == nil {
-			firstTerminal = tr.terminal
-		}
-		if tr.binding != nil {
-			bindingUpdates = append(bindingUpdates, *tr.binding)
-		}
-		if tr.ready {
-			readyCount++
-		}
-		if tr.pending {
-			pending = true
-		}
+	tr, targetResult, err := r.processSnapshotTarget(ctx, vcr, objectKeeper, retainerName, target)
+	if err != nil {
+		return ctrl.Result{}, err
 	}
 
-	total := len(vcr.Spec.Targets)
-	if firstTerminal != nil {
-		l.Error(nil, "Target capture failed", "targetUID", firstTerminal.target.UID, "reason", firstTerminal.reason)
-		return r.markFailedSnapshotForTarget(ctx, vcr, firstTerminal.target, firstTerminal.vscName, firstTerminal.reason, firstTerminal.message)
+	if tr.terminal != nil {
+		l.Error(nil, "Target capture failed", "targetUID", tr.terminal.target.UID, "reason", tr.terminal.reason)
+		return r.markFailedSnapshotForTarget(ctx, vcr, tr.terminal.target, tr.terminal.vscName, tr.terminal.reason, tr.terminal.message)
 	}
 
-	if readyCount == total {
-		vcr.Status.DataRefs = mergeVolumeDataBindings(vcr.Status.DataRefs, bindingUpdates)
-		msg := fmt.Sprintf("all %d targets ready", total)
-		if err := r.finalizeVCR(ctx, vcr, metav1.ConditionTrue, storagev1alpha1.ConditionReasonCompleted, msg); err != nil {
+	if tr.ready && tr.binding != nil {
+		vcr.Status.DataRef = tr.binding
+		if err := r.finalizeVCR(ctx, vcr, metav1.ConditionTrue, storagev1alpha1.ConditionReasonCompleted, "target ready"); err != nil {
 			return ctrl.Result{}, err
 		}
-		l.Info("VolumeCaptureRequest completed", "mode", "Snapshot", "targets", total)
+		l.Info("VolumeCaptureRequest completed", "mode", "Snapshot")
 		return ctrl.Result{}, nil
 	}
 
-	if err := r.patchVCRSnapshotProgress(ctx, vcr, bindingUpdates, readyCount, total); err != nil {
+	// Still capturing: surface progress and requeue.
+	if err := r.patchVCRSnapshotPending(ctx, vcr); err != nil {
 		return ctrl.Result{}, err
 	}
-	if pending {
-		if requeueAfter == 0 {
-			requeueAfter = 5 * time.Second
-		}
-		return ctrl.Result{RequeueAfter: requeueAfter}, nil
+	requeueAfter := targetResult.RequeueAfter
+	if requeueAfter == 0 {
+		requeueAfter = 5 * time.Second
 	}
-
-	return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
+	return ctrl.Result{RequeueAfter: requeueAfter}, nil
 }
 
 // processDetachMode handles Detach mode: detaches PV from PVC
@@ -244,11 +218,13 @@ func (r *VolumeCaptureRequestController) processSnapshotMode(ctx context.Context
 func (r *VolumeCaptureRequestController) processDetachMode(ctx context.Context, vcr *storagev1alpha1.VolumeCaptureRequest) (ctrl.Result, error) {
 	l := log.FromContext(ctx).WithValues("vcr", fmt.Sprintf("%s/%s", vcr.Namespace, vcr.Name), "mode", "Detach")
 
-	// 1. Validate spec (Detach: single target only; bulk Detach out of scope)
-	target, err := detachVolumeCaptureTarget(vcr.Spec)
+	// 1. Validate spec (single target)
+	target, err := requireCaptureTarget(vcr.Spec)
 	if err != nil {
 		return r.markFailed(ctx, vcr, storagev1alpha1.ConditionReasonInternalError, err.Error())
 	}
+	// spec.target carries no namespace; the captured PVC always lives in the VCR namespace.
+	target.Namespace = vcr.Namespace
 
 	// 2. Check RBAC: try to get PVC
 	// NOTE: If PVC is already deleted (from previous reconcile), we need to get PV from annotation or VCR status
@@ -274,7 +250,7 @@ func (r *VolumeCaptureRequestController) processDetachMode(ctx context.Context, 
 			var pvName string
 			if pvNameFromAnnotation != "" {
 				pvName = pvNameFromAnnotation
-			} else if artifact, ok := firstDataArtifactRef(vcr.Status); ok && artifact.Kind == "PersistentVolume" {
+			} else if artifact, ok := dataArtifactRef(vcr.Status); ok && artifact.Kind == "PersistentVolume" {
 				pvName = artifact.Name
 			} else {
 				// Cannot proceed without PV name
@@ -814,40 +790,41 @@ func (r *VolumeCaptureRequestController) scanAndDeleteExpiredVCRs(ctx context.Co
 // cleanupArtifactsForVCR deletes VCR-created artifacts if they have no ownerRef.
 // This is a best-effort cleanup used by the TTL scanner to avoid orphaned artifacts.
 func (r *VolumeCaptureRequestController) cleanupArtifactsForVCR(ctx context.Context, vcr *storagev1alpha1.VolumeCaptureRequest) error {
-	for _, binding := range vcr.Status.DataRefs {
-		artifact := binding.Artifact
-		if artifact.Name == "" {
-			continue
+	if vcr.Status.DataRef == nil {
+		return nil
+	}
+	artifact := vcr.Status.DataRef.Artifact
+	if artifact.Name == "" {
+		return nil
+	}
+	switch artifact.Kind {
+	case "VolumeSnapshotContent":
+		content := &snapshotv1.VolumeSnapshotContent{}
+		if err := r.Client.Get(ctx, client.ObjectKey{Name: artifact.Name}, content); err != nil {
+			if apierrors.IsNotFound(err) {
+				return nil
+			}
+			return err
 		}
-		switch artifact.Kind {
-		case "VolumeSnapshotContent":
-			content := &snapshotv1.VolumeSnapshotContent{}
-			if err := r.Client.Get(ctx, client.ObjectKey{Name: artifact.Name}, content); err != nil {
-				if apierrors.IsNotFound(err) {
-					continue
-				}
-				return err
+		if hasSnapshotContentOwnerRef(content.OwnerReferences) {
+			return nil
+		}
+		if err := r.Client.Delete(ctx, content); err != nil && !apierrors.IsNotFound(err) {
+			return err
+		}
+	case "PersistentVolume":
+		pv := &corev1.PersistentVolume{}
+		if err := r.Client.Get(ctx, client.ObjectKey{Name: artifact.Name}, pv); err != nil {
+			if apierrors.IsNotFound(err) {
+				return nil
 			}
-			if hasSnapshotContentOwnerRef(content.OwnerReferences) {
-				continue
-			}
-			if err := r.Client.Delete(ctx, content); err != nil && !apierrors.IsNotFound(err) {
-				return err
-			}
-		case "PersistentVolume":
-			pv := &corev1.PersistentVolume{}
-			if err := r.Client.Get(ctx, client.ObjectKey{Name: artifact.Name}, pv); err != nil {
-				if apierrors.IsNotFound(err) {
-					continue
-				}
-				return err
-			}
-			if hasSnapshotContentOwnerRef(pv.OwnerReferences) {
-				continue
-			}
-			if err := r.Client.Delete(ctx, pv); err != nil && !apierrors.IsNotFound(err) {
-				return err
-			}
+			return err
+		}
+		if hasSnapshotContentOwnerRef(pv.OwnerReferences) {
+			return nil
+		}
+		if err := r.Client.Delete(ctx, pv); err != nil && !apierrors.IsNotFound(err) {
+			return err
 		}
 	}
 

@@ -27,25 +27,15 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-func TestVolumeCaptureRequestSpec_Targets_JSONRoundTrip(t *testing.T) {
+func TestVolumeCaptureRequestSpec_Target_JSONRoundTrip(t *testing.T) {
 	vcr := VolumeCaptureRequest{
 		Spec: VolumeCaptureRequestSpec{
 			Mode: VolumeCaptureModeSnapshot,
-			Targets: []VolumeCaptureTarget{
-				{
-					UID:        "uid-a",
-					APIVersion: "v1",
-					Kind:       "PersistentVolumeClaim",
-					Namespace:  "demo",
-					Name:       "data-a",
-				},
-				{
-					UID:        "uid-b",
-					APIVersion: "v1",
-					Kind:       "PersistentVolumeClaim",
-					Namespace:  "demo",
-					Name:       "data-b",
-				},
+			Target: &VolumeCaptureTarget{
+				UID:        "uid-a",
+				APIVersion: "v1",
+				Kind:       "PersistentVolumeClaim",
+				Name:       "data-a",
 			},
 		},
 	}
@@ -59,11 +49,11 @@ func TestVolumeCaptureRequestSpec_Targets_JSONRoundTrip(t *testing.T) {
 	if err := json.Unmarshal(data, &out); err != nil {
 		t.Fatalf("unmarshal: %v", err)
 	}
-	if len(out.Spec.Targets) != 2 {
-		t.Fatalf("targets len: got %d want 2", len(out.Spec.Targets))
+	if out.Spec.Target == nil {
+		t.Fatal("spec.target must round-trip")
 	}
-	if out.Spec.Targets[0].UID != "uid-a" || out.Spec.Targets[1].Name != "data-b" {
-		t.Fatalf("targets mismatch: %#v", out.Spec.Targets)
+	if out.Spec.Target.UID != "uid-a" || out.Spec.Target.Name != "data-a" {
+		t.Fatalf("target mismatch: %#v", out.Spec.Target)
 	}
 
 	var raw map[string]interface{}
@@ -71,33 +61,35 @@ func TestVolumeCaptureRequestSpec_Targets_JSONRoundTrip(t *testing.T) {
 		t.Fatalf("unmarshal raw: %v", err)
 	}
 	spec := raw["spec"].(map[string]interface{})
-	if _, ok := spec["persistentVolumeClaimRef"]; ok {
-		t.Fatal("persistentVolumeClaimRef must not appear in JSON")
+	if _, ok := spec["targets"]; ok {
+		t.Fatal("legacy spec.targets[] must not appear in JSON")
 	}
-	targets := spec["targets"].([]interface{})
-	if len(targets) != 2 {
-		t.Fatalf("raw targets len: got %d want 2", len(targets))
+	target, ok := spec["target"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("spec.target must be a single object, got %#v", spec["target"])
+	}
+	// Namespace is omitted from spec.target (the PVC lives in the VCR namespace).
+	if _, ok := target["namespace"]; ok {
+		t.Fatal("spec.target.namespace must not appear in JSON when empty")
 	}
 }
 
-func TestVolumeCaptureRequestStatus_DataRefs_JSONRoundTrip(t *testing.T) {
+func TestVolumeCaptureRequestStatus_DataRef_JSONRoundTrip(t *testing.T) {
 	vcr := VolumeCaptureRequest{
 		Status: VolumeCaptureRequestStatus{
-			DataRefs: []VolumeDataBinding{
-				{
-					TargetUID: "uid-a",
-					Target: VolumeCaptureTarget{
-						UID:        "uid-a",
-						APIVersion: "v1",
-						Kind:       "PersistentVolumeClaim",
-						Namespace:  "demo",
-						Name:       "data-a",
-					},
-					Artifact: VolumeDataArtifactRef{
-						APIVersion: "snapshot.storage.k8s.io/v1",
-						Kind:       "VolumeSnapshotContent",
-						Name:       "snapcontent-a",
-					},
+			DataRef: &VolumeDataBinding{
+				TargetUID: "uid-a",
+				Target: VolumeCaptureTarget{
+					UID:        "uid-a",
+					APIVersion: "v1",
+					Kind:       "PersistentVolumeClaim",
+					Namespace:  "demo",
+					Name:       "data-a",
+				},
+				Artifact: VolumeDataArtifactRef{
+					APIVersion: "snapshot.storage.k8s.io/v1",
+					Kind:       "VolumeSnapshotContent",
+					Name:       "snapcontent-a",
 				},
 			},
 		},
@@ -112,12 +104,16 @@ func TestVolumeCaptureRequestStatus_DataRefs_JSONRoundTrip(t *testing.T) {
 	if err := json.Unmarshal(data, &out); err != nil {
 		t.Fatalf("unmarshal: %v", err)
 	}
-	if len(out.Status.DataRefs) != 1 {
-		t.Fatalf("dataRefs len: got %d want 1", len(out.Status.DataRefs))
+	if out.Status.DataRef == nil {
+		t.Fatal("status.dataRef must round-trip")
 	}
-	ref := out.Status.DataRefs[0]
+	ref := out.Status.DataRef
 	if ref.TargetUID != "uid-a" || ref.Artifact.Name != "snapcontent-a" {
-		t.Fatalf("dataRefs mismatch: %#v", ref)
+		t.Fatalf("dataRef mismatch: %#v", ref)
+	}
+	// Namespace is preserved in status.dataRef.target so the binding is self-contained.
+	if ref.Target.Namespace != "demo" {
+		t.Fatalf("status.dataRef.target.namespace = %q, want %q", ref.Target.Namespace, "demo")
 	}
 	if ref.Artifact.Kind == "VolumeCaptureRequest" {
 		t.Fatal("artifact must not reference an execution request")
@@ -128,28 +124,33 @@ func TestVolumeCaptureRequestStatus_DataRefs_JSONRoundTrip(t *testing.T) {
 		t.Fatalf("unmarshal raw: %v", err)
 	}
 	status := raw["status"].(map[string]interface{})
-	if _, ok := status["dataRef"]; ok {
-		t.Fatal("dataRef must not appear in JSON")
+	if _, ok := status["dataRefs"]; ok {
+		t.Fatal("legacy status.dataRefs[] must not appear in JSON")
+	}
+	if _, ok := status["dataRef"].(map[string]interface{}); !ok {
+		t.Fatalf("status.dataRef must be a single object, got %#v", status["dataRef"])
 	}
 }
 
-func TestVolumeCaptureRequestCRD_MapListSemantics(t *testing.T) {
+func TestVolumeCaptureRequestCRD_SingleTargetSchema(t *testing.T) {
 	crdPath := filepath.Join("..", "..", "crds", "internal", "storage.deckhouse.io_volumecapturerequests.yaml")
 	data, err := os.ReadFile(crdPath)
 	if err != nil {
 		t.Fatalf("read CRD: %v", err)
 	}
 	content := string(data)
-	for _, forbidden := range []string{"persistentVolumeClaimRef:", "dataRef:", "volumeSnapshotClassName:"} {
+	for _, forbidden := range []string{
+		"persistentVolumeClaimRef:",
+		"x-kubernetes-list-type: map",
+		"x-kubernetes-list-map-keys",
+	} {
 		if strings.Contains(content, forbidden) {
-			t.Fatalf("CRD must not contain %q", forbidden)
+			t.Fatalf("CRD must not contain %q (single-target schema)", forbidden)
 		}
 	}
 	for _, required := range []string{
-		"x-kubernetes-list-type: map",
-		"x-kubernetes-list-map-keys",
-		"targets:",
-		"dataRefs:",
+		"target:",
+		"dataRef:",
 		"targetUID:",
 	} {
 		if !strings.Contains(content, required) {
@@ -164,23 +165,27 @@ func TestVolumeCaptureRequestCRD_MapListSemantics(t *testing.T) {
 	versions := doc["spec"].(map[string]interface{})["versions"].([]interface{})
 	schema := versions[0].(map[string]interface{})["schema"].(map[string]interface{})["openAPIV3Schema"].(map[string]interface{})
 	specProps := schema["properties"].(map[string]interface{})["spec"].(map[string]interface{})["properties"].(map[string]interface{})
-	targets := specProps["targets"].(map[string]interface{})
-	if targets["x-kubernetes-list-type"] != "map" {
-		t.Fatalf("spec.targets list-type: %#v", targets["x-kubernetes-list-type"])
+	target, ok := specProps["target"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("spec.target must be an object schema, got %#v", specProps["target"])
 	}
-	mapKeys, ok := targets["x-kubernetes-list-map-keys"].([]interface{})
-	if !ok || len(mapKeys) != 1 || mapKeys[0].(string) != "uid" {
-		t.Fatalf("spec.targets map keys: %#v", targets["x-kubernetes-list-map-keys"])
+	if target["type"] != "object" {
+		t.Fatalf("spec.target type: %#v", target["type"])
+	}
+	if _, ok := specProps["targets"]; ok {
+		t.Fatal("spec.targets[] must not exist in CRD")
 	}
 
 	statusProps := schema["properties"].(map[string]interface{})["status"].(map[string]interface{})["properties"].(map[string]interface{})
-	dataRefs := statusProps["dataRefs"].(map[string]interface{})
-	if dataRefs["x-kubernetes-list-type"] != "map" {
-		t.Fatalf("status.dataRefs list-type: %#v", dataRefs["x-kubernetes-list-type"])
+	dataRef, ok := statusProps["dataRef"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("status.dataRef must be an object schema, got %#v", statusProps["dataRef"])
 	}
-	dataMapKeys := dataRefs["x-kubernetes-list-map-keys"].([]interface{})
-	if len(dataMapKeys) != 1 || dataMapKeys[0].(string) != "targetUID" {
-		t.Fatalf("status.dataRefs map keys: %#v", dataRefs["x-kubernetes-list-map-keys"])
+	if dataRef["type"] != "object" {
+		t.Fatalf("status.dataRef type: %#v", dataRef["type"])
+	}
+	if _, ok := statusProps["dataRefs"]; ok {
+		t.Fatal("status.dataRefs[] must not exist in CRD")
 	}
 }
 
@@ -191,6 +196,3 @@ func TestVolumeCaptureTarget_ZeroValueNotEqualNonZero(t *testing.T) {
 		t.Fatal("expected distinct zero and non-zero targets")
 	}
 }
-
-// Controller validation TODO (PR-F-2): reject duplicate spec.targets[].uid at runtime if apiserver
-// does not enforce map-list keys on create in all code paths.

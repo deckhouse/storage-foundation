@@ -68,31 +68,6 @@ func snapshotVSCName(vcrUID types.UID, targetUID string) string {
 	return fmt.Sprintf("snapshot-%s-%s", string(vcrUID), targetUIDHash(targetUID))
 }
 
-func mergeVolumeDataBindings(existing, updates []storagev1alpha1.VolumeDataBinding) []storagev1alpha1.VolumeDataBinding {
-	out := append([]storagev1alpha1.VolumeDataBinding(nil), existing...)
-	for _, binding := range updates {
-		out = upsertVolumeDataBinding(out, binding)
-	}
-	return out
-}
-
-func validateSnapshotTargets(targets []storagev1alpha1.VolumeCaptureTarget) error {
-	if len(targets) == 0 {
-		return fmt.Errorf("spec.targets must not be empty for Snapshot mode")
-	}
-	seen := make(map[string]struct{}, len(targets))
-	for _, t := range targets {
-		if t.UID == "" {
-			return fmt.Errorf("target uid must not be empty")
-		}
-		if _, dup := seen[t.UID]; dup {
-			return fmt.Errorf("duplicate target uid %q", t.UID)
-		}
-		seen[t.UID] = struct{}{}
-	}
-	return nil
-}
-
 func volumeSnapshotBinding(target storagev1alpha1.VolumeCaptureTarget, vscName string) storagev1alpha1.VolumeDataBinding {
 	return storagev1alpha1.VolumeDataBinding{
 		TargetUID: target.UID,
@@ -105,29 +80,18 @@ func volumeSnapshotBinding(target storagev1alpha1.VolumeCaptureTarget, vscName s
 	}
 }
 
-func upsertVolumeDataBinding(bindings []storagev1alpha1.VolumeDataBinding, binding storagev1alpha1.VolumeDataBinding) []storagev1alpha1.VolumeDataBinding {
-	for i := range bindings {
-		if bindings[i].TargetUID == binding.TargetUID {
-			bindings[i] = binding
-			return bindings
-		}
-	}
-	return append(bindings, binding)
-}
-
-func (r *VolumeCaptureRequestController) patchVCRSnapshotProgress(
+// patchVCRSnapshotPending surfaces a non-terminal "capture in progress" Ready=False/TargetsPending
+// condition while the single target is still being captured. It never sets dataRef (only success does).
+func (r *VolumeCaptureRequestController) patchVCRSnapshotPending(
 	ctx context.Context,
 	vcr *storagev1alpha1.VolumeCaptureRequest,
-	dataRefUpdates []storagev1alpha1.VolumeDataBinding,
-	readyCount, total int,
 ) error {
-	message := fmt.Sprintf("%d of %d targets ready", readyCount, total)
 	now := metav1.Now()
 	pendingCondition := metav1.Condition{
 		Type:               storagev1alpha1.ConditionTypeReady,
 		Status:             metav1.ConditionFalse,
 		Reason:             storagev1alpha1.ConditionReasonTargetsPending,
-		Message:            message,
+		Message:            "target capture in progress",
 		LastTransitionTime: now,
 	}
 
@@ -137,7 +101,6 @@ func (r *VolumeCaptureRequestController) patchVCRSnapshotProgress(
 			return err
 		}
 		base := current.DeepCopy()
-		current.Status.DataRefs = mergeVolumeDataBindings(current.Status.DataRefs, dataRefUpdates)
 		setSingleCondition(&current.Status.Conditions, pendingCondition)
 		current.Status.CompletionTimestamp = nil
 		return r.Status().Patch(ctx, current, client.MergeFrom(base))
@@ -350,7 +313,7 @@ func (r *VolumeCaptureRequestController) markFailedSnapshotForTarget(
 ) (ctrl.Result, error) {
 	if vscName != "" {
 		binding := volumeSnapshotBinding(target, vscName)
-		vcr.Status.DataRefs = upsertVolumeDataBinding(vcr.Status.DataRefs, binding)
+		vcr.Status.DataRef = &binding
 	}
 	if err := r.finalizeVCR(ctx, vcr, metav1.ConditionFalse, reason, message); err != nil {
 		return ctrl.Result{}, err

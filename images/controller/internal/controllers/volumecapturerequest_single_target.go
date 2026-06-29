@@ -22,25 +22,21 @@ import (
 	storagev1alpha1 "github.com/deckhouse/storage-foundation/api/v1alpha1"
 )
 
-// detachVolumeCaptureTarget validates Detach mode still uses exactly one target (bulk Detach out of scope).
-func detachVolumeCaptureTarget(spec storagev1alpha1.VolumeCaptureRequestSpec) (storagev1alpha1.VolumeCaptureTarget, error) {
-	switch len(spec.Targets) {
-	case 0:
-		return storagev1alpha1.VolumeCaptureTarget{}, fmt.Errorf("spec.targets is required")
-	case 1:
-		return spec.Targets[0], nil
-	default:
-		return storagev1alpha1.VolumeCaptureTarget{}, fmt.Errorf("Detach mode supports exactly one target, got %d", len(spec.Targets))
+// requireCaptureTarget returns the single spec.target, erroring when it is absent.
+func requireCaptureTarget(spec storagev1alpha1.VolumeCaptureRequestSpec) (storagev1alpha1.VolumeCaptureTarget, error) {
+	if spec.Target == nil {
+		return storagev1alpha1.VolumeCaptureTarget{}, fmt.Errorf("spec.target is required")
 	}
+	return *spec.Target, nil
 }
 
 func setVolumeSnapshotDataRef(vcr *storagev1alpha1.VolumeCaptureRequest, target storagev1alpha1.VolumeCaptureTarget, vscName string) {
 	binding := volumeSnapshotBinding(target, vscName)
-	vcr.Status.DataRefs = upsertVolumeDataBinding(vcr.Status.DataRefs, binding)
+	vcr.Status.DataRef = &binding
 }
 
 func setPersistentVolumeDataRef(vcr *storagev1alpha1.VolumeCaptureRequest, target storagev1alpha1.VolumeCaptureTarget, pvName string) {
-	vcr.Status.DataRefs = upsertVolumeDataBinding(vcr.Status.DataRefs, storagev1alpha1.VolumeDataBinding{
+	vcr.Status.DataRef = &storagev1alpha1.VolumeDataBinding{
 		TargetUID: target.UID,
 		Target:    target,
 		Artifact: storagev1alpha1.VolumeDataArtifactRef{
@@ -48,12 +44,12 @@ func setPersistentVolumeDataRef(vcr *storagev1alpha1.VolumeCaptureRequest, targe
 			Kind:       "PersistentVolume",
 			Name:       pvName,
 		},
-	})
+	}
 }
 
-func firstDataArtifactRef(status storagev1alpha1.VolumeCaptureRequestStatus) (storagev1alpha1.VolumeDataArtifactRef, bool) {
-	if len(status.DataRefs) == 0 {
+func dataArtifactRef(status storagev1alpha1.VolumeCaptureRequestStatus) (storagev1alpha1.VolumeDataArtifactRef, bool) {
+	if status.DataRef == nil {
 		return storagev1alpha1.VolumeDataArtifactRef{}, false
 	}
-	return status.DataRefs[0].Artifact, true
+	return status.DataRef.Artifact, true
 }

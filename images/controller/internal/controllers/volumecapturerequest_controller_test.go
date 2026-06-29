@@ -162,7 +162,7 @@ var _ = Describe("VolumeCaptureRequest Controller", func() {
 		}
 	}
 
-	newVCR := func(name, namespace string, mode string, targets []storagev1alpha1.VolumeCaptureTarget) *storagev1alpha1.VolumeCaptureRequest {
+	newVCR := func(name, namespace string, mode string, target storagev1alpha1.VolumeCaptureTarget) *storagev1alpha1.VolumeCaptureRequest {
 		return &storagev1alpha1.VolumeCaptureRequest{
 			ObjectMeta: metav1.ObjectMeta{
 				Name:      name,
@@ -170,8 +170,8 @@ var _ = Describe("VolumeCaptureRequest Controller", func() {
 				UID:       types.UID(fmt.Sprintf("vcr-uid-%s", name)),
 			},
 			Spec: storagev1alpha1.VolumeCaptureRequestSpec{
-				Mode:    mode,
-				Targets: targets,
+				Mode:   mode,
+				Target: &target,
 			},
 		}
 	}
@@ -195,24 +195,25 @@ var _ = Describe("VolumeCaptureRequest Controller", func() {
 			ok.UID = types.UID("ok-uid-" + string(vcr.UID))
 			_ = client.Update(ctx, ok)
 		}
-		for _, target := range vcr.Spec.Targets {
-			vscName := snapshotVSCName(vcr.UID, target.UID)
-			vsc := &snapshotv1.VolumeSnapshotContent{}
-			if err := client.Get(ctx, types.NamespacedName{Name: vscName}, vsc); err != nil {
-				continue
-			}
-			needsUpdate := false
-			for i := range vsc.OwnerReferences {
-				if vsc.OwnerReferences[i].Kind == KindObjectKeeper && vsc.OwnerReferences[i].Name == retainerName {
-					if vsc.OwnerReferences[i].UID == "" {
-						vsc.OwnerReferences[i].UID = ok.UID
-						needsUpdate = true
-					}
+		if vcr.Spec.Target == nil {
+			return
+		}
+		vscName := snapshotVSCName(vcr.UID, vcr.Spec.Target.UID)
+		vsc := &snapshotv1.VolumeSnapshotContent{}
+		if err := client.Get(ctx, types.NamespacedName{Name: vscName}, vsc); err != nil {
+			return
+		}
+		needsUpdate := false
+		for i := range vsc.OwnerReferences {
+			if vsc.OwnerReferences[i].Kind == KindObjectKeeper && vsc.OwnerReferences[i].Name == retainerName {
+				if vsc.OwnerReferences[i].UID == "" {
+					vsc.OwnerReferences[i].UID = ok.UID
+					needsUpdate = true
 				}
 			}
-			if needsUpdate {
-				_ = client.Update(ctx, vsc)
-			}
+		}
+		if needsUpdate {
+			_ = client.Update(ctx, vsc)
 		}
 	}
 
@@ -351,9 +352,7 @@ var _ = Describe("VolumeCaptureRequest Controller", func() {
 				pvc := newBoundPVC("test-pvc", "default", "test-sc", "test-pv")
 				Expect(client.Create(ctx, pvc)).To(Succeed())
 
-				vcr := newVCR("test-vcr", "default", ModeSnapshot, []storagev1alpha1.VolumeCaptureTarget{
-					pvcTarget("default", "test-pvc", "uid-test-pvc"),
-				})
+				vcr := newVCR("test-vcr", "default", ModeSnapshot, pvcTarget("default", "test-pvc", "uid-test-pvc"))
 				Expect(client.Create(ctx, vcr)).To(Succeed())
 
 				// When: reconcile until VSC is created (but not terminal yet - waiting for ReadyToUse)
@@ -446,9 +445,9 @@ var _ = Describe("VolumeCaptureRequest Controller", func() {
 				Expect(readyCondition).ToNot(BeNil())
 				Expect(readyCondition.Status).To(Equal(metav1.ConditionTrue))
 
-				Expect(updatedVCR.Status.DataRefs).To(HaveLen(1))
-				Expect(updatedVCR.Status.DataRefs[0].Artifact.Kind).To(Equal("VolumeSnapshotContent"))
-				Expect(updatedVCR.Status.DataRefs[0].Artifact.Name).To(Equal(csiVSCName))
+				Expect(updatedVCR.Status.DataRef).ToNot(BeNil())
+				Expect(updatedVCR.Status.DataRef.Artifact.Kind).To(Equal("VolumeSnapshotContent"))
+				Expect(updatedVCR.Status.DataRef.Artifact.Name).To(Equal(csiVSCName))
 			})
 		})
 
@@ -467,9 +466,7 @@ var _ = Describe("VolumeCaptureRequest Controller", func() {
 				pvc := newBoundPVC("test-pvc", "default", "test-sc", "test-pv")
 				Expect(client.Create(ctx, pvc)).To(Succeed())
 
-				vcr := newVCR("test-vcr-error", "default", ModeSnapshot, []storagev1alpha1.VolumeCaptureTarget{
-					pvcTarget("default", "test-pvc", "uid-test-pvc"),
-				})
+				vcr := newVCR("test-vcr-error", "default", ModeSnapshot, pvcTarget("default", "test-pvc", "uid-test-pvc"))
 				Expect(client.Create(ctx, vcr)).To(Succeed())
 
 				// Create VSC with error (simulating CSI driver failure)
@@ -531,9 +528,9 @@ var _ = Describe("VolumeCaptureRequest Controller", func() {
 				Expect(readyCondition.Reason).To(Equal(storagev1alpha1.ConditionReasonSnapshotCreationFailed))
 				Expect(readyCondition.Message).To(ContainSubstring(errorMsg))
 
-				Expect(updatedVCR.Status.DataRefs).To(HaveLen(1))
-				Expect(updatedVCR.Status.DataRefs[0].Artifact.Kind).To(Equal("VolumeSnapshotContent"))
-				Expect(updatedVCR.Status.DataRefs[0].Artifact.Name).To(Equal(csiVSCName))
+				Expect(updatedVCR.Status.DataRef).ToNot(BeNil())
+				Expect(updatedVCR.Status.DataRef.Artifact.Kind).To(Equal("VolumeSnapshotContent"))
+				Expect(updatedVCR.Status.DataRef.Artifact.Name).To(Equal(csiVSCName))
 
 				// VSC still exists (not deleted)
 				existingVSC := &snapshotv1.VolumeSnapshotContent{}
@@ -567,9 +564,7 @@ var _ = Describe("VolumeCaptureRequest Controller", func() {
 				},
 				Entry("PVC not found",
 					func() *storagev1alpha1.VolumeCaptureRequest {
-						return newVCR("test-vcr", "default", ModeSnapshot, []storagev1alpha1.VolumeCaptureTarget{
-							pvcTarget("default", "non-existent-pvc", "uid-non-existent-pvc"),
-						})
+						return newVCR("test-vcr", "default", ModeSnapshot, pvcTarget("default", "non-existent-pvc", "uid-non-existent-pvc"))
 					},
 					storagev1alpha1.ConditionReasonNotFound,
 				),
@@ -586,9 +581,7 @@ var _ = Describe("VolumeCaptureRequest Controller", func() {
 						}
 						Expect(client.Create(ctx, pvc)).To(Succeed())
 
-						return newVCR("test-vcr", "default", ModeSnapshot, []storagev1alpha1.VolumeCaptureTarget{
-							pvcTarget("default", "test-pvc-unbound", "uid-test-pvc-unbound"),
-						})
+						return newVCR("test-vcr", "default", ModeSnapshot, pvcTarget("default", "test-pvc-unbound", "uid-test-pvc-unbound"))
 					},
 					storagev1alpha1.ConditionReasonInternalError,
 				),
@@ -611,9 +604,7 @@ var _ = Describe("VolumeCaptureRequest Controller", func() {
 						pvc := newBoundPVC("test-pvc-no-csi", "default", "test-sc", "test-pv-no-csi")
 						Expect(client.Create(ctx, pvc)).To(Succeed())
 
-						return newVCR("test-vcr", "default", ModeSnapshot, []storagev1alpha1.VolumeCaptureTarget{
-							pvcTarget("default", "test-pvc-no-csi", "uid-test-pvc-no-csi"),
-						})
+						return newVCR("test-vcr", "default", ModeSnapshot, pvcTarget("default", "test-pvc-no-csi", "uid-test-pvc-no-csi"))
 					},
 					storagev1alpha1.ConditionReasonInternalError,
 				),
@@ -633,9 +624,7 @@ var _ = Describe("VolumeCaptureRequest Controller", func() {
 						pvc := newBoundPVC("test-pvc-no-annotation", "default", "test-sc-no-annotation", "test-pv-no-annotation")
 						Expect(client.Create(ctx, pvc)).To(Succeed())
 
-						return newVCR("test-vcr", "default", ModeSnapshot, []storagev1alpha1.VolumeCaptureTarget{
-							pvcTarget("default", "test-pvc-no-annotation", "uid-test-pvc-no-annotation"),
-						})
+						return newVCR("test-vcr", "default", ModeSnapshot, pvcTarget("default", "test-pvc-no-annotation", "uid-test-pvc-no-annotation"))
 					},
 					storagev1alpha1.ConditionReasonNotFound,
 				),
@@ -650,9 +639,7 @@ var _ = Describe("VolumeCaptureRequest Controller", func() {
 						pvc := newBoundPVC("test-pvc-bad-vsc", "default", "test-sc-bad-vsc", "test-pv-bad-vsc")
 						Expect(client.Create(ctx, pvc)).To(Succeed())
 
-						return newVCR("test-vcr", "default", ModeSnapshot, []storagev1alpha1.VolumeCaptureTarget{
-							pvcTarget("default", "test-pvc-bad-vsc", "uid-test-pvc-bad-vsc"),
-						})
+						return newVCR("test-vcr", "default", ModeSnapshot, pvcTarget("default", "test-pvc-bad-vsc", "uid-test-pvc-bad-vsc"))
 					},
 					storagev1alpha1.ConditionReasonNotFound,
 				),
@@ -670,9 +657,7 @@ var _ = Describe("VolumeCaptureRequest Controller", func() {
 						pvc := newBoundPVC("test-pvc-mismatch", "default", "test-sc-mismatch", "test-pv-mismatch")
 						Expect(client.Create(ctx, pvc)).To(Succeed())
 
-						return newVCR("test-vcr", "default", ModeSnapshot, []storagev1alpha1.VolumeCaptureTarget{
-							pvcTarget("default", "test-pvc-mismatch", "uid-test-pvc-mismatch"),
-						})
+						return newVCR("test-vcr", "default", ModeSnapshot, pvcTarget("default", "test-pvc-mismatch", "uid-test-pvc-mismatch"))
 					},
 					storagev1alpha1.ConditionReasonInternalError,
 				),
@@ -695,9 +680,7 @@ var _ = Describe("VolumeCaptureRequest Controller", func() {
 				pvc := newBoundPVC("test-pvc-detach", "default", "", "test-pv-detach")
 				Expect(client.Create(ctx, pvc)).To(Succeed())
 
-				vcr := newVCR("test-vcr-detach", "default", ModeDetach, []storagev1alpha1.VolumeCaptureTarget{
-					pvcTarget("default", "test-pvc-detach", "uid-test-pvc-detach"),
-				})
+				vcr := newVCR("test-vcr-detach", "default", ModeDetach, pvcTarget("default", "test-pvc-detach", "uid-test-pvc-detach"))
 				Expect(client.Create(ctx, vcr)).To(Succeed())
 
 				// When: reconcile until terminal
@@ -735,9 +718,9 @@ var _ = Describe("VolumeCaptureRequest Controller", func() {
 				// VCR status
 				updatedVCR := &storagev1alpha1.VolumeCaptureRequest{}
 				Expect(client.Get(ctx, types.NamespacedName{Name: vcr.Name, Namespace: vcr.Namespace}, updatedVCR)).To(Succeed())
-				Expect(updatedVCR.Status.DataRefs).To(HaveLen(1))
-				Expect(updatedVCR.Status.DataRefs[0].Artifact.Kind).To(Equal("PersistentVolume"))
-				Expect(updatedVCR.Status.DataRefs[0].Artifact.Name).To(Equal("test-pv-detach"))
+				Expect(updatedVCR.Status.DataRef).ToNot(BeNil())
+				Expect(updatedVCR.Status.DataRef.Artifact.Kind).To(Equal("PersistentVolume"))
+				Expect(updatedVCR.Status.DataRef.Artifact.Name).To(Equal("test-pv-detach"))
 
 				readyCondition := getCondition(updatedVCR.Status.Conditions, storagev1alpha1.ConditionTypeReady)
 				Expect(readyCondition).ToNot(BeNil())
@@ -756,9 +739,7 @@ var _ = Describe("VolumeCaptureRequest Controller", func() {
 				pv.Annotations["storage.deckhouse.io/detached"] = "true"
 				Expect(client.Create(ctx, pv)).To(Succeed())
 
-				vcr := newVCR("test-vcr-idempotent", "default", ModeDetach, []storagev1alpha1.VolumeCaptureTarget{
-					pvcTarget("default", "test-pvc-idempotent", "uid-test-pvc-idempotent"),
-				})
+				vcr := newVCR("test-vcr-idempotent", "default", ModeDetach, pvcTarget("default", "test-pvc-idempotent", "uid-test-pvc-idempotent"))
 				// Set annotation with PV name (controller sets this during first reconcile)
 				if vcr.Annotations == nil {
 					vcr.Annotations = make(map[string]string)
@@ -833,9 +814,7 @@ var _ = Describe("VolumeCaptureRequest Controller", func() {
 			pvc := newBoundPVC("test-pvc", "default", "test-sc", "test-pv")
 			Expect(client.Create(ctx, pvc)).To(Succeed())
 
-			vcr := newVCR("test-vcr", "default", ModeSnapshot, []storagev1alpha1.VolumeCaptureTarget{
-				pvcTarget("default", "test-pvc", "uid-test-pvc"),
-			})
+			vcr := newVCR("test-vcr", "default", ModeSnapshot, pvcTarget("default", "test-pvc", "uid-test-pvc"))
 			Expect(client.Create(ctx, vcr)).To(Succeed())
 
 			// Reconcile until VSC is created
@@ -906,8 +885,12 @@ var _ = Describe("VolumeCaptureRequest Controller", func() {
 				},
 				Spec: storagev1alpha1.VolumeCaptureRequestSpec{
 					Mode: ModeSnapshot,
-					Targets: []storagev1alpha1.VolumeCaptureTarget{
-						pvcTarget("default", "test-pvc", "uid-test-pvc"),
+					Target: &storagev1alpha1.VolumeCaptureTarget{
+						UID:        "uid-test-pvc",
+						APIVersion: "v1",
+						Kind:       "PersistentVolumeClaim",
+						Namespace:  "default",
+						Name:       "test-pvc",
 					},
 				},
 				Status: storagev1alpha1.VolumeCaptureRequestStatus{
@@ -934,67 +917,24 @@ var _ = Describe("VolumeCaptureRequest Controller", func() {
 		})
 	})
 
-	Describe("LEVEL 2: Bulk Snapshot mode (PR-F-2)", func() {
-		setupTwoTargetFixture := func(vcrName string) (*storagev1alpha1.VolumeCaptureRequest, string, string) {
+	Describe("LEVEL 2: Single-target Snapshot mode edge cases", func() {
+		It("should report TargetsPending while the single target VSC is not yet ReadyToUse", func() {
 			storageClass := newStorageClassWithVSC("test-sc", "test-driver", "test-vsc-class")
 			Expect(client.Create(ctx, storageClass)).To(Succeed())
 			vscClass := newVolumeSnapshotClass("test-vsc-class", "test-driver")
 			Expect(client.Create(ctx, vscClass)).To(Succeed())
+			Expect(client.Create(ctx, newCSIPV("test-pv-pending", "test-driver", "handle-pending"))).To(Succeed())
+			Expect(client.Create(ctx, newBoundPVC("pvc-pending", "default", "test-sc", "test-pv-pending"))).To(Succeed())
 
-			Expect(client.Create(ctx, newCSIPV("test-pv-a", "test-driver", "handle-a"))).To(Succeed())
-			Expect(client.Create(ctx, newCSIPV("test-pv-b", "test-driver", "handle-b"))).To(Succeed())
-			Expect(client.Create(ctx, newBoundPVC("pvc-a", "default", "test-sc", "test-pv-a"))).To(Succeed())
-			Expect(client.Create(ctx, newBoundPVC("pvc-b", "default", "test-sc", "test-pv-b"))).To(Succeed())
-
-			targetA := pvcTarget("default", "pvc-a", "uid-pvc-a")
-			targetB := pvcTarget("default", "pvc-b", "uid-pvc-b")
-			vcr := newVCR(vcrName, "default", ModeSnapshot, []storagev1alpha1.VolumeCaptureTarget{targetA, targetB})
+			vcr := newVCR("test-vcr-pending", "default", ModeSnapshot, pvcTarget("default", "pvc-pending", "uid-pvc-pending"))
 			Expect(client.Create(ctx, vcr)).To(Succeed())
-			return vcr, snapshotVSCName(vcr.UID, targetA.UID), snapshotVSCName(vcr.UID, targetB.UID)
-		}
 
-		It("should capture two PVC targets into two VSCs and reach Ready=True", func() {
-			vcr, vscA, vscB := setupTwoTargetFixture("test-vcr-bulk-2")
-			for i := 0; i < 8; i++ {
-				ensureSnapshotObjectKeeperUID(vcr.UID)
-				_, err := ctrl.Reconcile(ctx, reconcile.Request{NamespacedName: types.NamespacedName{Name: vcr.Name, Namespace: vcr.Namespace}})
-				Expect(err).ToNot(HaveOccurred())
-			}
-			for _, name := range []string{vscA, vscB} {
-				vsc := &snapshotv1.VolumeSnapshotContent{}
-				Expect(client.Get(ctx, types.NamespacedName{Name: name}, vsc)).To(Succeed())
-				vsc.Status = &snapshotv1.VolumeSnapshotContentStatus{ReadyToUse: pointer.Bool(true)}
-				Expect(client.Status().Update(ctx, vsc)).To(Succeed())
-			}
-			Expect(reconcileUntilTerminal(vcr, 10)).To(Succeed())
-
-			updated := &storagev1alpha1.VolumeCaptureRequest{}
-			Expect(client.Get(ctx, types.NamespacedName{Name: vcr.Name, Namespace: vcr.Namespace}, updated)).To(Succeed())
-			ready := getCondition(updated.Status.Conditions, storagev1alpha1.ConditionTypeReady)
-			Expect(ready).ToNot(BeNil())
-			Expect(ready.Status).To(Equal(metav1.ConditionTrue))
-			Expect(ready.Reason).To(Equal(storagev1alpha1.ConditionReasonCompleted))
-			Expect(updated.Status.DataRefs).To(HaveLen(2))
-
-			ok := &deckhousev1alpha1.ObjectKeeper{}
-			Expect(client.Get(ctx, types.NamespacedName{Name: objectKeeperNameForVCR(vcr.UID)}, ok)).To(Succeed())
-		})
-
-		It("should report TargetsPending when one target is ready and one is pending", func() {
-			vcr, vscA, _ := setupTwoTargetFixture("test-vcr-bulk-pending")
+			// Reconcile several times: the VSC is created but external-snapshotter never sets ReadyToUse.
 			for i := 0; i < 5; i++ {
 				ensureSnapshotObjectKeeperUID(vcr.UID)
 				_, err := ctrl.Reconcile(ctx, reconcile.Request{NamespacedName: types.NamespacedName{Name: vcr.Name, Namespace: vcr.Namespace}})
 				Expect(err).ToNot(HaveOccurred())
 			}
-			vsc := &snapshotv1.VolumeSnapshotContent{}
-			Expect(client.Get(ctx, types.NamespacedName{Name: vscA}, vsc)).To(Succeed())
-			vsc.Status = &snapshotv1.VolumeSnapshotContentStatus{ReadyToUse: pointer.Bool(true)}
-			Expect(client.Status().Update(ctx, vsc)).To(Succeed())
-
-			ensureSnapshotObjectKeeperUID(vcr.UID)
-			_, err := ctrl.Reconcile(ctx, reconcile.Request{NamespacedName: types.NamespacedName{Name: vcr.Name, Namespace: vcr.Namespace}})
-			Expect(err).ToNot(HaveOccurred())
 
 			updated := &storagev1alpha1.VolumeCaptureRequest{}
 			Expect(client.Get(ctx, types.NamespacedName{Name: vcr.Name, Namespace: vcr.Namespace}, updated)).To(Succeed())
@@ -1002,23 +942,8 @@ var _ = Describe("VolumeCaptureRequest Controller", func() {
 			Expect(ready).ToNot(BeNil())
 			Expect(ready.Status).To(Equal(metav1.ConditionFalse))
 			Expect(ready.Reason).To(Equal(storagev1alpha1.ConditionReasonTargetsPending))
-			Expect(updated.Status.DataRefs).To(HaveLen(1))
-		})
-
-		It("should fail the whole VCR when one target VSC has a terminal CSI error", func() {
-			vcr, vscA, vscB := setupTwoTargetFixture("test-vcr-bulk-fail")
-			errMsg := "snapshot failed"
-			for _, name := range []string{vscA, vscB} {
-				vsc := newReadyVSC(name, false, &errMsg)
-				Expect(client.Create(ctx, vsc)).To(Succeed())
-			}
-
-			Expect(reconcileUntilTerminal(vcr, 10)).To(Succeed())
-			updated := &storagev1alpha1.VolumeCaptureRequest{}
-			Expect(client.Get(ctx, types.NamespacedName{Name: vcr.Name, Namespace: vcr.Namespace}, updated)).To(Succeed())
-			ready := getCondition(updated.Status.Conditions, storagev1alpha1.ConditionTypeReady)
-			Expect(ready.Status).To(Equal(metav1.ConditionFalse))
-			Expect(ready.Reason).To(Equal(storagev1alpha1.ConditionReasonSnapshotCreationFailed))
+			// dataRef is only set on success.
+			Expect(updated.Status.DataRef).To(BeNil())
 		})
 
 		It("should requeue without creating VSC when ObjectKeeper UID is empty", func() {
@@ -1030,9 +955,7 @@ var _ = Describe("VolumeCaptureRequest Controller", func() {
 			Expect(client.Create(ctx, newBoundPVC("pvc-guard", "default", "test-sc", "test-pv-guard"))).To(Succeed())
 
 			targetUID := "uid-pvc-guard"
-			vcr := newVCR("test-vcr-ok-uid-guard", "default", ModeSnapshot, []storagev1alpha1.VolumeCaptureTarget{
-				pvcTarget("default", "pvc-guard", targetUID),
-			})
+			vcr := newVCR("test-vcr-ok-uid-guard", "default", ModeSnapshot, pvcTarget("default", "pvc-guard", targetUID))
 			Expect(client.Create(ctx, vcr)).To(Succeed())
 
 			retainerName := objectKeeperNameForVCR(vcr.UID)
@@ -1060,9 +983,19 @@ var _ = Describe("VolumeCaptureRequest Controller", func() {
 			Expect(apierrors.IsNotFound(err)).To(BeTrue())
 		})
 
-		It("should be idempotent across repeated reconciles", func() {
-			vcr, vscA, vscB := setupTwoTargetFixture("test-vcr-bulk-idempotent")
-			for i := 0; i < 3; i++ {
+		It("should be idempotent across repeated reconciles (single VSC)", func() {
+			storageClass := newStorageClassWithVSC("test-sc", "test-driver", "test-vsc-class")
+			Expect(client.Create(ctx, storageClass)).To(Succeed())
+			vscClass := newVolumeSnapshotClass("test-vsc-class", "test-driver")
+			Expect(client.Create(ctx, vscClass)).To(Succeed())
+			Expect(client.Create(ctx, newCSIPV("test-pv-idem", "test-driver", "handle-idem"))).To(Succeed())
+			Expect(client.Create(ctx, newBoundPVC("pvc-idem", "default", "test-sc", "test-pv-idem"))).To(Succeed())
+
+			vcr := newVCR("test-vcr-idem-single", "default", ModeSnapshot, pvcTarget("default", "pvc-idem", "uid-pvc-idem"))
+			Expect(client.Create(ctx, vcr)).To(Succeed())
+
+			vscName := snapshotVSCName(vcr.UID, "uid-pvc-idem")
+			for i := 0; i < 4; i++ {
 				ensureSnapshotObjectKeeperUID(vcr.UID)
 				_, err := ctrl.Reconcile(ctx, reconcile.Request{NamespacedName: types.NamespacedName{Name: vcr.Name, Namespace: vcr.Namespace}})
 				Expect(err).ToNot(HaveOccurred())
@@ -1073,9 +1006,8 @@ var _ = Describe("VolumeCaptureRequest Controller", func() {
 			for _, item := range vscList.Items {
 				names[item.Name] = struct{}{}
 			}
-			Expect(names).To(HaveKey(vscA))
-			Expect(names).To(HaveKey(vscB))
-			Expect(len(names)).To(Equal(2))
+			Expect(names).To(HaveKey(vscName))
+			Expect(len(names)).To(Equal(1))
 		})
 	})
 })
