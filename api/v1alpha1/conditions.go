@@ -40,6 +40,8 @@ const (
 	ConditionReasonRBACDenied = "RBACDenied"
 	// ConditionReasonInvalidSource indicates invalid source specified
 	ConditionReasonInvalidSource = "InvalidSource"
+	// ConditionReasonUnsupportedTargetKind indicates the restore target kind is not supported (only PersistentVolumeClaim for now)
+	ConditionReasonUnsupportedTargetKind = "UnsupportedTargetKind"
 	// ConditionReasonPVBound indicates PV is bound and cannot be detached
 	ConditionReasonPVBound = "PVBound"
 	// ConditionReasonSnapshotCreationFailed indicates CSI snapshot creation failed

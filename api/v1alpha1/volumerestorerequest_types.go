@@ -26,10 +26,13 @@ import (
 type VolumeRestoreRequestSpec struct {
 	// SourceRef references the source data to restore from (VolumeSnapshotContent or PersistentVolume)
 	SourceRef ObjectReference `json:"sourceRef"`
-	// TargetNamespace is the namespace where the restored PVC will be created
-	TargetNamespace string `json:"targetNamespace"`
-	// TargetPVCName is the name of the PVC to create
-	TargetPVCName string `json:"targetPVCName"`
+	// TargetRef identifies the object to restore into. Only kind=PersistentVolumeClaim is supported for
+	// now (an empty kind is treated as PersistentVolumeClaim); kind reserves space for future cluster-scoped
+	// targets such as PersistentVolume. Namespace is intentionally not set in spec: restore is never
+	// cross-namespace, so the target always lives in the VRR namespace (the controller uses
+	// metadata.namespace). Name is required.
+	// +kubebuilder:validation:Required
+	TargetRef ObjectReference `json:"targetRef"`
 	// StorageClassName is the storage class to use for the restored PVC
 	// +optional
 	StorageClassName string `json:"storageClassName,omitempty"`
@@ -57,8 +60,9 @@ type VolumeRestoreRequestStatus struct {
 	CompletionTimestamp *metav1.Time `json:"completionTimestamp,omitempty"`
 	// Conditions represent the latest available observations of the resource's state
 	Conditions []metav1.Condition `json:"conditions,omitempty"`
-	// TargetPVCRef references the created target PVC
-	TargetPVCRef *ObjectReference `json:"targetPVCRef,omitempty"`
+	// TargetRef references the created restore target (currently always a PersistentVolumeClaim).
+	// Unlike spec.targetRef, the namespace is populated here so the status is self-contained.
+	TargetRef *ObjectReference `json:"targetRef,omitempty"`
 }
 
 // +kubebuilder:object:root=true

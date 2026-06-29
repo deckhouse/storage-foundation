@@ -275,9 +275,14 @@ func (r *DataexportReconciler) ensureVolumeRestoreRequest(ctx context.Context, d
 			"kind": art.ArtifactKind,
 			"name": art.ArtifactName,
 		},
-		"targetNamespace": r.Config.ControllerNamespace,
-		"targetPVCName":   generatedNames.ExportPVCName,
-		"volumeMode":      art.VolumeMode,
+		// targetRef carries only kind+name: restore is never cross-namespace, so the foundation VRR
+		// controller derives the target namespace from metadata.namespace (set to ControllerNamespace
+		// below). Only kind=PersistentVolumeClaim is supported for now.
+		"targetRef": map[string]interface{}{
+			"kind": "PersistentVolumeClaim",
+			"name": generatedNames.ExportPVCName,
+		},
+		"volumeMode": art.VolumeMode,
 	}
 	if art.StorageClassName != "" {
 		spec["storageClassName"] = art.StorageClassName

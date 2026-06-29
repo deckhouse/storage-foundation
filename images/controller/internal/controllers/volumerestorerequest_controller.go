@@ -117,6 +117,14 @@ func (r *VolumeRestoreRequestController) Reconcile(ctx context.Context, req ctrl
 		return ctrl.Result{}, nil
 	}
 
+	// Validate restore target kind. Only PersistentVolumeClaim is supported for now (an empty kind is
+	// treated as PersistentVolumeClaim); kind reserves space for future cluster-scoped targets such as
+	// PersistentVolume. Anything else is a terminal error.
+	if !isSupportedRestoreTargetKind(vrr.Spec.TargetRef.Kind) {
+		return r.markFailed(ctx, &vrr, storagev1alpha1.ConditionReasonUnsupportedTargetKind,
+			fmt.Sprintf("Unsupported target kind %q: only %s is supported", vrr.Spec.TargetRef.Kind, KindPersistentVolumeClaim))
+	}
+
 	// Process based on source type
 	switch vrr.Spec.SourceRef.Kind {
 	case SourceKindVolumeSnapshotContent:
@@ -126,6 +134,12 @@ func (r *VolumeRestoreRequestController) Reconcile(ctx context.Context, req ctrl
 	default:
 		return r.markFailed(ctx, &vrr, storagev1alpha1.ConditionReasonInvalidSource, fmt.Sprintf("Unsupported source kind: %s", vrr.Spec.SourceRef.Kind))
 	}
+}
+
+// isSupportedRestoreTargetKind reports whether the VRR target kind is currently supported.
+// Only PersistentVolumeClaim is supported; an empty kind defaults to PersistentVolumeClaim.
+func isSupportedRestoreTargetKind(kind string) bool {
+	return kind == "" || kind == KindPersistentVolumeClaim
 }
 
 // ensureObjectKeeper creates or gets ObjectKeeper for VRR.
@@ -280,11 +294,11 @@ func (r *VolumeRestoreRequestController) processVolumeSnapshotContentRestore(
 	// VRR controller MUST NOT create PVC under any circumstances.
 	// VRR controller only observes and finalizes status when PVC is Bound.
 	targetPVC := &corev1.PersistentVolumeClaim{}
-	if err := r.Get(ctx, client.ObjectKey{Namespace: vrr.Spec.TargetNamespace, Name: vrr.Spec.TargetPVCName}, targetPVC); err != nil {
+	if err := r.Get(ctx, client.ObjectKey{Namespace: vrr.Namespace, Name: vrr.Spec.TargetRef.Name}, targetPVC); err != nil {
 		if apierrors.IsNotFound(err) {
 			// Target PVC doesn't exist yet - external-provisioner hasn't created it
 			// Requeue to wait for external-provisioner
-			l.Info("Target PVC not found yet, waiting for external-provisioner", "namespace", vrr.Spec.TargetNamespace, "name", vrr.Spec.TargetPVCName)
+			l.Info("Target PVC not found yet, waiting for external-provisioner", "namespace", vrr.Namespace, "name", vrr.Spec.TargetRef.Name)
 			return ctrl.Result{RequeueAfter: restorePollInterval}, nil
 		}
 		return ctrl.Result{}, fmt.Errorf("failed to check target PVC: %w", err)
@@ -293,20 +307,21 @@ func (r *VolumeRestoreRequestController) processVolumeSnapshotContentRestore(
 	// 4. Check if PVC is Bound
 	if targetPVC.Status.Phase != corev1.ClaimBound {
 		// PVC exists but not Bound yet - external-provisioner is still working
-		l.Info("Target PVC exists but not Bound yet, waiting for external-provisioner", "namespace", vrr.Spec.TargetNamespace, "name", vrr.Spec.TargetPVCName, "phase", targetPVC.Status.Phase)
+		l.Info("Target PVC exists but not Bound yet, waiting for external-provisioner", "namespace", vrr.Namespace, "name", vrr.Spec.TargetRef.Name, "phase", targetPVC.Status.Phase)
 		return ctrl.Result{RequeueAfter: restorePollInterval}, nil
 	}
 
 	// 5. Success: PVC is Bound - finalize VRR
-	vrr.Status.TargetPVCRef = &storagev1alpha1.ObjectReference{
-		Name:      vrr.Spec.TargetPVCName,
-		Namespace: vrr.Spec.TargetNamespace,
+	vrr.Status.TargetRef = &storagev1alpha1.ObjectReference{
+		Kind:      KindPersistentVolumeClaim,
+		Name:      vrr.Spec.TargetRef.Name,
+		Namespace: vrr.Namespace,
 	}
-	if err := r.finalizeVRR(ctx, vrr, metav1.ConditionTrue, storagev1alpha1.ConditionReasonCompleted, fmt.Sprintf("PVC %s/%s restored successfully", vrr.Spec.TargetNamespace, vrr.Spec.TargetPVCName)); err != nil {
+	if err := r.finalizeVRR(ctx, vrr, metav1.ConditionTrue, storagev1alpha1.ConditionReasonCompleted, fmt.Sprintf("PVC %s/%s restored successfully", vrr.Namespace, vrr.Spec.TargetRef.Name)); err != nil {
 		return ctrl.Result{}, err
 	}
 
-	l.Info("VolumeRestoreRequest completed", "source", "VolumeSnapshotContent", "pvc", vrr.Spec.TargetPVCName)
+	l.Info("VolumeRestoreRequest completed", "source", "VolumeSnapshotContent", "pvc", vrr.Spec.TargetRef.Name)
 	return ctrl.Result{}, nil
 }
 
@@ -358,11 +373,11 @@ func (r *VolumeRestoreRequestController) processPersistentVolumeRestore(
 	// VRR controller MUST NOT create PVC under any circumstances.
 	// VRR controller only observes and finalizes status when PVC is Bound.
 	targetPVC := &corev1.PersistentVolumeClaim{}
-	if err := r.Get(ctx, client.ObjectKey{Namespace: vrr.Spec.TargetNamespace, Name: vrr.Spec.TargetPVCName}, targetPVC); err != nil {
+	if err := r.Get(ctx, client.ObjectKey{Namespace: vrr.Namespace, Name: vrr.Spec.TargetRef.Name}, targetPVC); err != nil {
 		if apierrors.IsNotFound(err) {
 			// Target PVC doesn't exist yet - external-provisioner hasn't created it
 			// Requeue to wait for external-provisioner
-			l.Info("Target PVC not found yet, waiting for external-provisioner", "namespace", vrr.Spec.TargetNamespace, "name", vrr.Spec.TargetPVCName)
+			l.Info("Target PVC not found yet, waiting for external-provisioner", "namespace", vrr.Namespace, "name", vrr.Spec.TargetRef.Name)
 			return ctrl.Result{RequeueAfter: restorePollInterval}, nil
 		}
 		return ctrl.Result{}, fmt.Errorf("failed to check target PVC: %w", err)
@@ -371,20 +386,21 @@ func (r *VolumeRestoreRequestController) processPersistentVolumeRestore(
 	// 4. Check if PVC is Bound
 	if targetPVC.Status.Phase != corev1.ClaimBound {
 		// PVC exists but not Bound yet - external-provisioner is still working
-		l.Info("Target PVC exists but not Bound yet, waiting for external-provisioner", "namespace", vrr.Spec.TargetNamespace, "name", vrr.Spec.TargetPVCName, "phase", targetPVC.Status.Phase)
+		l.Info("Target PVC exists but not Bound yet, waiting for external-provisioner", "namespace", vrr.Namespace, "name", vrr.Spec.TargetRef.Name, "phase", targetPVC.Status.Phase)
 		return ctrl.Result{RequeueAfter: restorePollInterval}, nil
 	}
 
 	// 5. Success: PVC is Bound - finalize VRR
-	vrr.Status.TargetPVCRef = &storagev1alpha1.ObjectReference{
-		Name:      vrr.Spec.TargetPVCName,
-		Namespace: vrr.Spec.TargetNamespace,
+	vrr.Status.TargetRef = &storagev1alpha1.ObjectReference{
+		Kind:      KindPersistentVolumeClaim,
+		Name:      vrr.Spec.TargetRef.Name,
+		Namespace: vrr.Namespace,
 	}
-	if err := r.finalizeVRR(ctx, vrr, metav1.ConditionTrue, storagev1alpha1.ConditionReasonCompleted, fmt.Sprintf("PVC %s/%s restored successfully from PV", vrr.Spec.TargetNamespace, vrr.Spec.TargetPVCName)); err != nil {
+	if err := r.finalizeVRR(ctx, vrr, metav1.ConditionTrue, storagev1alpha1.ConditionReasonCompleted, fmt.Sprintf("PVC %s/%s restored successfully from PV", vrr.Namespace, vrr.Spec.TargetRef.Name)); err != nil {
 		return ctrl.Result{}, err
 	}
 
-	l.Info("VolumeRestoreRequest completed", "source", "PersistentVolume", "pvc", vrr.Spec.TargetPVCName)
+	l.Info("VolumeRestoreRequest completed", "source", "PersistentVolume", "pvc", vrr.Spec.TargetRef.Name)
 	return ctrl.Result{}, nil
 }
 

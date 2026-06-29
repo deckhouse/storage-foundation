@@ -66,13 +66,14 @@ const (
 
 // API constants
 const (
-	APIGroupStorageDeckhouse = "storage.deckhouse.io/v1alpha1"
-	APIGroupSnapshotStorage  = "snapshot.storage.k8s.io"
-	APIGroupDeckhouse        = "deckhouse.io/v1alpha1"
-	KindObjectKeeper         = "ObjectKeeper"
-	KindVolumeCaptureRequest = "VolumeCaptureRequest"
-	KindVolumeRestoreRequest = "VolumeRestoreRequest"
-	KindVolumeSnapshot       = "VolumeSnapshot"
+	APIGroupStorageDeckhouse  = "storage.deckhouse.io/v1alpha1"
+	APIGroupSnapshotStorage   = "snapshot.storage.k8s.io"
+	APIGroupDeckhouse         = "deckhouse.io/v1alpha1"
+	KindObjectKeeper          = "ObjectKeeper"
+	KindVolumeCaptureRequest  = "VolumeCaptureRequest"
+	KindVolumeRestoreRequest  = "VolumeRestoreRequest"
+	KindVolumeSnapshot        = "VolumeSnapshot"
+	KindPersistentVolumeClaim = "PersistentVolumeClaim"
 )
 
 // Annotation key constants

@@ -588,6 +588,7 @@ func (in *VolumeRestoreRequestList) DeepCopyObject() runtime.Object {
 func (in *VolumeRestoreRequestSpec) DeepCopyInto(out *VolumeRestoreRequestSpec) {
 	*out = *in
 	out.SourceRef = in.SourceRef
+	out.TargetRef = in.TargetRef
 	if in.AccessModes != nil {
 		in, out := &in.AccessModes, &out.AccessModes
 		*out = make([]corev1.PersistentVolumeAccessMode, len(*in))
@@ -619,8 +620,8 @@ func (in *VolumeRestoreRequestStatus) DeepCopyInto(out *VolumeRestoreRequestStat
 			(*in)[i].DeepCopyInto(&(*out)[i])
 		}
 	}
-	if in.TargetPVCRef != nil {
-		in, out := &in.TargetPVCRef, &out.TargetPVCRef
+	if in.TargetRef != nil {
+		in, out := &in.TargetRef, &out.TargetRef
 		*out = new(ObjectReference)
 		**out = **in
 	}

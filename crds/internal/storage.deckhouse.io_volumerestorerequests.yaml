@@ -47,8 +47,8 @@ spec:
               accessModes:
                 description: |-
                   AccessModes is the list of access modes for the restored PVC
-                  (optional, defaults to ReadWriteOnce). Enables parity with the PV-source
-                  restore path (e.g. RWX). Invalid modes are rejected by admission via the Enum below.
+                  (optional, defaults to ReadWriteOnce). Enables parity with the PV-source restore
+                  path (e.g. RWX). Invalid modes are rejected by admission via the Enum below.
                 items:
                   enum:
                   - ReadWriteOnce
@@ -58,8 +58,8 @@ spec:
                   type: string
                 type: array
               fsType:
-                description: FsType is the filesystem type for Filesystem volumes (optional,
-                  ignored for Block).
+                description: FsType is the filesystem type for Filesystem volumes
+                  (optional, ignored for Block).
                 type: string
               sourceRef:
                 description: SourceRef references the source data to restore from
@@ -83,13 +83,28 @@ spec:
                 description: StorageClassName is the storage class to use for the
                   restored PVC
                 type: string
-              targetNamespace:
-                description: TargetNamespace is the namespace where the restored PVC
-                  will be created
-                type: string
-              targetPVCName:
-                description: TargetPVCName is the name of the PVC to create
-                type: string
+              targetRef:
+                description: |-
+                  TargetRef identifies the object to restore into. Only kind=PersistentVolumeClaim is supported for
+                  now (an empty kind is treated as PersistentVolumeClaim); kind reserves space for future cluster-scoped
+                  targets such as PersistentVolume. Namespace is intentionally not set in spec: restore is never
+                  cross-namespace, so the target always lives in the VRR namespace (the controller uses
+                  metadata.namespace). Name is required.
+                properties:
+                  kind:
+                    description: Kind is the kind of the referenced object (e.g.,
+                      "VolumeSnapshotContent", "PersistentVolume")
+                    type: string
+                  name:
+                    description: Name is the name of the referenced object
+                    type: string
+                  namespace:
+                    description: Namespace is the namespace of the referenced object
+                      (optional)
+                    type: string
+                required:
+                - name
+                type: object
               volumeMode:
                 description: |-
                   VolumeMode specifies whether the restored volume is Block or Filesystem.
@@ -101,8 +116,7 @@ spec:
                 type: string
             required:
             - sourceRef
-            - targetNamespace
-            - targetPVCName
+            - targetRef
             - volumeMode
             type: object
           status:
@@ -172,8 +186,10 @@ spec:
                   - type
                   type: object
                 type: array
-              targetPVCRef:
-                description: TargetPVCRef references the created target PVC
+              targetRef:
+                description: |-
+                  TargetRef references the created restore target (currently always a PersistentVolumeClaim).
+                  Unlike spec.targetRef, the namespace is populated here so the status is self-contained.
                 properties:
                   kind:
                     description: Kind is the kind of the referenced object (e.g.,
