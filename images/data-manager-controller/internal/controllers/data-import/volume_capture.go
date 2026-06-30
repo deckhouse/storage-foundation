@@ -209,47 +209,31 @@ func vcrReadyCondition(vcr *unstructured.Unstructured) (status, reason string, o
 	return "", "", false
 }
 
-// volumeCaptureArtifact extracts the durable artifact reference for the given target PVC UID from
-// status.dataRefs (matching by targetUID; falling back to the single entry when present). It validates
-// the artifact kind matches what the chosen mode must produce.
-func volumeCaptureArtifact(vcr *unstructured.Unstructured, targetUID, expectedKind string) (*dev1alpha1.DataArtifactReference, error) {
-	dataRefs, found, err := unstructured.NestedSlice(vcr.Object, "status", "dataRefs")
-	if err != nil || !found || len(dataRefs) == 0 {
-		return nil, fmt.Errorf("VolumeCaptureRequest has no status.dataRefs")
+// volumeCaptureArtifact extracts the durable artifact reference from the VolumeCaptureRequest's single
+// status.dataRef. wave1 collapsed the VCR to one target per request (singular status.dataRef), so there
+// is no list to match by targetUID. It validates the artifact kind matches what the chosen mode must
+// produce and carries the artifact uid through into DataArtifactReference.
+func volumeCaptureArtifact(vcr *unstructured.Unstructured, expectedKind string) (*dev1alpha1.DataArtifactReference, error) {
+	dataRef, found, err := unstructured.NestedMap(vcr.Object, "status", "dataRef")
+	if err != nil || !found || len(dataRef) == 0 {
+		return nil, fmt.Errorf("VolumeCaptureRequest has no status.dataRef")
 	}
 
-	pick := func(m map[string]interface{}) (*dev1alpha1.DataArtifactReference, error) {
-		artifact, isMap := m["artifact"].(map[string]interface{})
-		if !isMap {
-			return nil, fmt.Errorf("VolumeCaptureRequest dataRef has no artifact")
-		}
-		apiVersion, _, _ := unstructured.NestedString(artifact, "apiVersion")
-		kind, _, _ := unstructured.NestedString(artifact, "kind")
-		name, _, _ := unstructured.NestedString(artifact, "name")
-		if kind != expectedKind {
-			return nil, fmt.Errorf("VolumeCaptureRequest produced artifact kind %q, expected %q", kind, expectedKind)
-		}
-		if name == "" {
-			return nil, fmt.Errorf("VolumeCaptureRequest artifact has empty name")
-		}
-		return &dev1alpha1.DataArtifactReference{APIVersion: apiVersion, Kind: kind, Name: name}, nil
+	artifact, isMap := dataRef["artifact"].(map[string]interface{})
+	if !isMap {
+		return nil, fmt.Errorf("VolumeCaptureRequest dataRef has no artifact")
 	}
 
-	for _, ref := range dataRefs {
-		m, isMap := ref.(map[string]interface{})
-		if !isMap {
-			continue
-		}
-		uid, _, _ := unstructured.NestedString(m, "targetUID")
-		if uid == targetUID {
-			return pick(m)
-		}
+	apiVersion, _, _ := unstructured.NestedString(artifact, "apiVersion")
+	kind, _, _ := unstructured.NestedString(artifact, "kind")
+	name, _, _ := unstructured.NestedString(artifact, "name")
+	uid, _, _ := unstructured.NestedString(artifact, "uid")
+	if kind != expectedKind {
+		return nil, fmt.Errorf("VolumeCaptureRequest produced artifact kind %q, expected %q", kind, expectedKind)
 	}
-	// Single-target imports: tolerate a missing/empty targetUID by taking the only binding.
-	if len(dataRefs) == 1 {
-		if m, isMap := dataRefs[0].(map[string]interface{}); isMap {
-			return pick(m)
-		}
+	if name == "" {
+		return nil, fmt.Errorf("VolumeCaptureRequest artifact has empty name")
 	}
-	return nil, fmt.Errorf("VolumeCaptureRequest has no dataRef for target UID %q", targetUID)
+
+	return &dev1alpha1.DataArtifactReference{APIVersion: apiVersion, Kind: kind, Name: name, UID: uid}, nil
 }

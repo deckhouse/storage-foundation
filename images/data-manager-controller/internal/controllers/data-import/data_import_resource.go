@@ -572,7 +572,7 @@ func (r *DataImportReconciler) ensureDataArtifact(ctx context.Context, pvc *core
 		return ctrl.Result{RequeueAfter: dataImportRequeueInterval}, nil
 	}
 
-	artifact, err := volumeCaptureArtifact(vcr, string(pvc.UID), expectedKind)
+	artifact, err := volumeCaptureArtifact(vcr, expectedKind)
 	if err != nil {
 		// A produced VCR with a malformed/mismatched dataRef is a contract violation, not transient.
 		return ctrl.Result{}, fmt.Errorf("%w: %w", ErrTargetFailed, err)

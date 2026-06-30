@@ -41,6 +41,11 @@ type DataArtifactReference struct {
 	APIVersion string `json:"apiVersion"`
 	Kind       string `json:"kind"`
 	Name       string `json:"name"`
+	// UID is the durable data artifact UID (for example the VolumeSnapshotContent UID). It makes the
+	// artifact reference self-contained, symmetric with VolumeCaptureRequest's status.dataRef.artifact.uid.
+	// Optional: producers fill it best-effort (the artifact may be referenced before its UID is known).
+	// +optional
+	UID string `json:"uid,omitempty"`
 }
 
 type Statusable interface {

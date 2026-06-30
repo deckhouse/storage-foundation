@@ -119,6 +119,9 @@ spec:
                     name:
                       description: |
                         Имя артефакта данных.
+                    uid:
+                      description: |
+                        UID артефакта данных (например, UID VolumeSnapshotContent). Необязательное; заполняется по возможности.
                 conditions:
                   type: array
                   items:

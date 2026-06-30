@@ -215,6 +215,11 @@ spec:
                       type: string
                     name:
                       type: string
+                    uid:
+                      type: string
+                      description: |
+                        UID of the durable data artifact (for example the VolumeSnapshotContent UID),
+                        making the reference self-contained. Optional; producers fill it best-effort.
                 conditions:
                   type: array
                   items:

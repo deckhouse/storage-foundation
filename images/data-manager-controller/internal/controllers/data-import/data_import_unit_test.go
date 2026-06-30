@@ -180,36 +180,32 @@ func TestVolumeCaptureRequestReadyAndFailed(t *testing.T) {
 func TestVolumeCaptureArtifact(t *testing.T) {
 	vcr := &unstructured.Unstructured{Object: map[string]interface{}{
 		"status": map[string]interface{}{
-			"dataRefs": []interface{}{
-				map[string]interface{}{
-					"targetUID": "uid-1",
-					"artifact": map[string]interface{}{
-						"apiVersion": "snapshot.storage.k8s.io/v1",
-						"kind":       artifactKindVolumeSnapshotContent,
-						"name":       "snapcontent-x",
-					},
+			"dataRef": map[string]interface{}{
+				"targetUID": "uid-1",
+				"artifact": map[string]interface{}{
+					"apiVersion": "snapshot.storage.k8s.io/v1",
+					"kind":       artifactKindVolumeSnapshotContent,
+					"name":       "snapcontent-x",
+					"uid":        "8d7c6b5a-4e3f-4a2b-9c1d-0f1e2d3c4b5a",
 				},
 			},
 		},
 	}}
 
-	art, err := volumeCaptureArtifact(vcr, "uid-1", artifactKindVolumeSnapshotContent)
+	art, err := volumeCaptureArtifact(vcr, artifactKindVolumeSnapshotContent)
 	require.NoError(t, err)
 	assert.Equal(t, "snapcontent-x", art.Name)
 	assert.Equal(t, artifactKindVolumeSnapshotContent, art.Kind)
+	// The artifact uid is carried through from VCR status.dataRef.artifact.uid.
+	assert.Equal(t, "8d7c6b5a-4e3f-4a2b-9c1d-0f1e2d3c4b5a", art.UID)
 
 	// Kind mismatch is rejected.
-	_, err = volumeCaptureArtifact(vcr, "uid-1", artifactKindPersistentVolume)
+	_, err = volumeCaptureArtifact(vcr, artifactKindPersistentVolume)
 	assert.Error(t, err)
 
-	// Missing targetUID match with a single binding falls back to the only entry.
-	art, err = volumeCaptureArtifact(vcr, "other-uid", artifactKindVolumeSnapshotContent)
-	require.NoError(t, err)
-	assert.Equal(t, "snapcontent-x", art.Name)
-
-	// No dataRefs at all errors.
+	// No status.dataRef at all errors.
 	empty := &unstructured.Unstructured{Object: map[string]interface{}{"status": map[string]interface{}{}}}
-	_, err = volumeCaptureArtifact(empty, "uid-1", artifactKindVolumeSnapshotContent)
+	_, err = volumeCaptureArtifact(empty, artifactKindVolumeSnapshotContent)
 	assert.Error(t, err)
 }
 
