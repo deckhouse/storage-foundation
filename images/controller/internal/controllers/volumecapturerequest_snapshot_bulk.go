@@ -288,6 +288,15 @@ func (r *VolumeCaptureRequestController) processSnapshotTarget(
 		csiVSC = &snapshotv1.VolumeSnapshotContent{
 			ObjectMeta: metav1.ObjectMeta{
 				Name: csiVSCName,
+				// Stamp the owning VCR coordinates so the VSC watch (SetupWithManager) can map a
+				// readyToUse/error transition straight back to this VCR and reconcile it immediately,
+				// instead of noticing it only on the 5s requeue tick. This is the L1 latency fix; the
+				// requeue stays as a safety net for VSCs created before this label existed.
+				Labels: map[string]string{
+					LabelKeyVCRNameFull:      vcr.Name,
+					LabelKeyVCRNamespaceFull: vcr.Namespace,
+					LabelKeyVCRUIDFull:       string(vcr.UID),
+				},
 				OwnerReferences: []metav1.OwnerReference{{
 					APIVersion:         APIGroupDeckhouse,
 					Kind:               KindObjectKeeper,

@@ -32,12 +32,34 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
+	"sigs.k8s.io/controller-runtime/pkg/handler"
+	"sigs.k8s.io/controller-runtime/pkg/reconcile"
+
 	deckhousev1alpha1 "github.com/deckhouse/deckhouse/deckhouse-controller/pkg/apis/deckhouse.io/v1alpha1"
 	storagev1alpha1 "github.com/deckhouse/storage-foundation/api/v1alpha1"
 	snapshotv1 "github.com/kubernetes-csi/external-snapshotter/client/v8/apis/volumesnapshot/v1"
 
 	"github.com/deckhouse/storage-foundation/images/controller/pkg/config"
 )
+
+// mapVolumeSnapshotContentToVCR maps a CSI VolumeSnapshotContent event to the owning
+// VolumeCaptureRequest using the coordinate labels stamped at VSC creation (snapshot Snapshot mode).
+// A VSC without those labels (e.g. created before this label existed, or unrelated to a VCR) maps to
+// nothing and is ignored — the VCR's 5s requeue still covers it.
+func mapVolumeSnapshotContentToVCR(_ context.Context, obj client.Object) []reconcile.Request {
+	labels := obj.GetLabels()
+	if labels == nil {
+		return nil
+	}
+	name := labels[LabelKeyVCRNameFull]
+	namespace := labels[LabelKeyVCRNamespaceFull]
+	if name == "" || namespace == "" {
+		return nil
+	}
+	return []reconcile.Request{{
+		NamespacedName: client.ObjectKey{Namespace: namespace, Name: name},
+	}}
+}
 
 // Invariants (architectural guarantees):
 //
@@ -647,6 +669,14 @@ func (r *VolumeCaptureRequestController) finalizeVCR(
 func (r *VolumeCaptureRequestController) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&storagev1alpha1.VolumeCaptureRequest{}).
+		// L1 latency fix: wake the owning VCR the moment the CSI VolumeSnapshotContent flips
+		// readyToUse/error, instead of waiting for the 5s requeue. Mapping is by the VCR-coordinate
+		// labels stamped at VSC creation (mapVolumeSnapshotContentToVCR); the 5s requeue remains a
+		// safety net (e.g. VSCs created before the label existed).
+		Watches(
+			&snapshotv1.VolumeSnapshotContent{},
+			handler.EnqueueRequestsFromMapFunc(mapVolumeSnapshotContentToVCR),
+		).
 		Complete(r)
 }
 
