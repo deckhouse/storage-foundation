@@ -138,7 +138,7 @@ func TestVolumeCaptureRequestStatus_DataRef_JSONRoundTrip(t *testing.T) {
 }
 
 func TestVolumeCaptureRequestCRD_SingleTargetSchema(t *testing.T) {
-	crdPath := filepath.Join("..", "..", "crds", "internal", "storage.deckhouse.io_volumecapturerequests.yaml")
+	crdPath := filepath.Join("..", "..", "crds", "internal", "storage-foundation.deckhouse.io_volumecapturerequests.yaml")
 	data, err := os.ReadFile(crdPath)
 	if err != nil {
 		t.Fatalf("read CRD: %v", err)

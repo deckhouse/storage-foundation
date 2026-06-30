@@ -146,7 +146,7 @@ func newSnapshotLeaf(namespace, name, boundContentName string) *unstructured.Uns
 
 func newSnapshotContent(name, snapshotRefNS, artifactKind, artifactName, volumeMode string) *unstructured.Unstructured {
 	content := &unstructured.Unstructured{}
-	content.SetGroupVersionKind(schema.GroupVersionKind{Group: "storage.deckhouse.io", Version: "v1alpha1", Kind: "SnapshotContent"})
+	content.SetGroupVersionKind(schema.GroupVersionKind{Group: "state-snapshotter.deckhouse.io", Version: "v1alpha1", Kind: "SnapshotContent"})
 	content.SetName(name)
 	if snapshotRefNS != "" {
 		_ = unstructured.SetNestedField(content.Object, snapshotRefNS, "spec", "snapshotRef", "namespace")

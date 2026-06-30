@@ -70,8 +70,8 @@ type pvRecoveryInfo struct {
 }
 
 const (
-	DataExportInProgressKey        = "storage.deckhouse.io/data-export-in-progress"
-	DataExportRequestAnnotationKey = "storage.deckhouse.io/data-export-request"
+	DataExportInProgressKey        = "storage-foundation.deckhouse.io/data-export-in-progress"
+	DataExportRequestAnnotationKey = "storage-foundation.deckhouse.io/data-export-request"
 
 	SeverityWarning = "warning"
 	SeverityError   = "error"
@@ -956,7 +956,7 @@ func (r *DataexportReconciler) validateExportDeploy(ctx context.Context, dataExp
 
 // Delete export deployment and export PVC (if exists)
 // Patch PV for attach it back to user's PVC
-// Delete finalizer: storage.deckhouse.io/data-exporter-controller
+// Delete finalizer: storage-foundation.deckhouse.io/data-exporter-controller
 func (r *DataexportReconciler) clearDataExportProviding(ctx context.Context, dataExport *dev1alpha1.DataExport, generatedNames Names) error {
 	log.Printf("Start recovering configuration before Dataexport %s", dataExport.GetName())
 

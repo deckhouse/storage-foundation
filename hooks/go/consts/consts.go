@@ -53,8 +53,8 @@ var CRGVKsForFinalizerRemoval = []CRGVK{
 	{Group: "snapshot.storage.k8s.io", Version: "v1", Kind: "VolumeSnapshot", Namespaced: true},
 	{Group: "snapshot.storage.k8s.io", Version: "v1", Kind: "VolumeSnapshotContent", Namespaced: false},
 	{Group: "snapshot.storage.k8s.io", Version: "v1", Kind: "VolumeSnapshotClass", Namespaced: false},
-	{Group: "storage.deckhouse.io", Version: "v1alpha1", Kind: "DataExport", Namespaced: true},
-	{Group: "storage.deckhouse.io", Version: "v1alpha1", Kind: "DataImport", Namespaced: true},
+	{Group: "storage-foundation.deckhouse.io", Version: "v1alpha1", Kind: "DataExport", Namespaced: true},
+	{Group: "storage-foundation.deckhouse.io", Version: "v1alpha1", Kind: "DataImport", Namespaced: true},
 }
 
 type CRGVK struct {

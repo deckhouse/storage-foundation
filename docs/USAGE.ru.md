@@ -147,7 +147,7 @@ export TARGET_NAME="fs-pvc-data-exporter-fs-0"
 
 ```bash
 d8 k apply -f -<<EOF
-apiVersion: storage.deckhouse.io/v1alpha1
+apiVersion: storage-foundation.deckhouse.io/v1alpha1
 kind: DataExport
 metadata:
   name: ${DATA_EXPORT_RESOURCE_NAME}
@@ -220,7 +220,7 @@ apiVersion: rbac.authorization.k8s.io/v1
 metadata:
   name: data-exporter-test-role
 rules:
-- apiGroups: ["storage.deckhouse.io"]
+- apiGroups: ["storage-foundation.deckhouse.io"]
   resources: ["dataexports/download"]
   verbs: ["create"]
 EOF

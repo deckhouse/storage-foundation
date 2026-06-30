@@ -64,7 +64,7 @@ func main() {
 	}
 
 	groupKind := schema.GroupKind{
-		Group: "storage.deckhouse.io", // TODO: move this and other values to constants/config/etc
+		Group: "storage-foundation.deckhouse.io", // TODO: move this and other values to constants/config/etc
 		Kind:  "DataImport",
 	}
 	versionResource := schema.GroupVersionResource{
@@ -79,7 +79,7 @@ func main() {
 		// HttpEndpoint:           *httpEndpoint, // ???
 		// MetricsPath:            *metricsPath,  // ???
 		Namespace:              cfgParams.ControllerNamespace,
-		Prefix:                 "storage.deckhouse.io",
+		Prefix:                 "storage-foundation.deckhouse.io",
 		Gk:                     groupKind,
 		Gvr:                    versionResource,
 		ProviderFunctionConfig: pfcfg,

@@ -78,7 +78,7 @@ metadata:
   {{- include "helm_lib_module_labels" (list . (dict "app" "data-manager-controller")) | nindent 2 }}
 rules:
   - apiGroups:
-      - storage.deckhouse.io
+      - storage-foundation.deckhouse.io
     resources:
       - dataexports
       - dataexports/status
@@ -94,7 +94,7 @@ rules:
   # DataImport produces durable data artifacts by creating VolumeCaptureRequests (storage-foundation);
   # DataExport (C6) restores a snapshot's durable artifact into the export PVC via VolumeRestoreRequest.
   - apiGroups:
-      - storage.deckhouse.io
+      - storage-foundation.deckhouse.io
     resources:
       - volumecapturerequests
       - volumerestorerequests
@@ -107,8 +107,9 @@ rules:
       - update
   # DataExport (C6) resolves the snapshot leaf's bound SnapshotContent (cluster-scoped) to read the
   # trusted data artifact reference (status.dataRef) for the VolumeRestoreRequest source. Read-only.
+  # SnapshotContent is owned by state-snapshotter, hence its own API group here.
   - apiGroups:
-      - storage.deckhouse.io
+      - state-snapshotter.deckhouse.io
     resources:
       - snapshotcontents
     verbs:

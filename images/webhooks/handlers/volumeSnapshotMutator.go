@@ -39,7 +39,7 @@ import (
 
 const (
 	storageClassVolumeSnapshotAnnotationName = "storage.deckhouse.io/volumesnapshotclass"
-	storageClassManagedbyLabelName           = "storage.deckhouse.io/managed-by"
+	storageClassManagedbyLabelName           = "storage-foundation.deckhouse.io/managed-by"
 )
 
 func VolumeSnapshotMutate(ctx context.Context, _ *model.AdmissionReview, obj metav1.Object) (*kwhmutating.MutatorResult, error) {

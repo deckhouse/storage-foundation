@@ -33,7 +33,7 @@ metadata:
 rules:
   # VolumeRestoreRequest - the executor watches VRRs. NO /status: the executor
   # never writes VRR status (owned by the storage-foundation VRR controller).
-  - apiGroups: ["storage.deckhouse.io"]
+  - apiGroups: ["storage-foundation.deckhouse.io"]
     resources: ["volumerestorerequests"]
     verbs: ["get", "list", "watch"]
 

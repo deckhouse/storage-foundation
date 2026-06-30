@@ -27,17 +27,17 @@ const (
 	// AnnDeckhouseManaged marks VolumeSnapshotContent or VolumeSnapshot as managed by Deckhouse
 	// When present, snapshot-controller skips CSI CreateSnapshot/DeleteSnapshot calls
 	// and sets ReadyToUse=true without actual snapshot creation
-	AnnDeckhouseManaged = "storage.deckhouse.io/managed"
+	AnnDeckhouseManaged = "storage-foundation.deckhouse.io/managed"
 
 	// AnnDeckhouseSourceSnapshotContent contains the name of the source SnapshotContent (VCR name)
 	// Used by snapshot-controller to find VSC by SFC name
 	// Value: only name (not namespace/name), as snapshot-controller compares only name
-	AnnDeckhouseSourceSnapshotContent = "storage.deckhouse.io/source-snapshot-content"
+	AnnDeckhouseSourceSnapshotContent = "storage-foundation.deckhouse.io/source-snapshot-content"
 
 	// AnnDeckhouseSourcePVC contains the source PVC reference
 	// Format: "namespace/name" (e.g., "default/my-pvc")
 	// Used by snapshot-controller to get PVC size for RestoreSize
-	AnnDeckhouseSourcePVC = "storage.deckhouse.io/source-pvc"
+	AnnDeckhouseSourcePVC = "storage-foundation.deckhouse.io/source-pvc"
 
 	// AnnDeckhouseVCRUID is set on PVC to signal snapshot-controller to create VSC
 	// Format: VCR UID (string)
@@ -49,5 +49,5 @@ const (
 const (
 	// LabelDeckhouseProxy marks VolumeSnapshot as a proxy object
 	// When set to "true", indicates that VS is a proxy for VSC and should not trigger VSC creation
-	LabelDeckhouseProxy = "storage.deckhouse.io/proxy"
+	LabelDeckhouseProxy = "storage-foundation.deckhouse.io/proxy"
 )

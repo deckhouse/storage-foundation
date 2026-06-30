@@ -467,7 +467,7 @@ func (r *VolumeRestoreRequestController) finalizeVRR(
 // setTTLAnnotation sets TTL annotation on the object.
 //
 // IMPORTANT TTL SEMANTICS:
-// - TTL annotation (storage.deckhouse.io/ttl) is INFORMATIONAL ONLY.
+// - TTL annotation (storage-foundation.deckhouse.io/ttl) is INFORMATIONAL ONLY.
 // - Actual TTL deletion timing is controlled by controller configuration (config.RequestTTL).
 // - TTL scanner uses config.RequestTTL, NOT the annotation value.
 // - Annotation is set for observability and post-mortem analysis, but does not affect deletion timing.
@@ -518,7 +518,7 @@ func (r *VolumeRestoreRequestController) SetupWithManager(mgr ctrl.Manager) erro
 //
 // 2. TTL source:
 //   - TTL is ALWAYS taken from controller configuration (config.RequestTTL), NOT from VRR annotations
-//   - TTL annotation (storage.deckhouse.io/ttl) is informational only and does not affect deletion timing
+//   - TTL annotation (storage-foundation.deckhouse.io/ttl) is informational only and does not affect deletion timing
 //   - This ensures predictable cluster-wide retention policy
 //
 // 3. TTL calculation:
@@ -562,13 +562,13 @@ func (r *VolumeRestoreRequestController) StartTTLScanner(ctx context.Context, cl
 // scanAndDeleteExpiredVRRs lists all VRRs and deletes those where completionTimestamp + TTL < now.
 //
 // IMPORTANT:
-// TTL annotation (storage.deckhouse.io/ttl) is informational only.
+// TTL annotation (storage-foundation.deckhouse.io/ttl) is informational only.
 // Actual TTL is controlled exclusively by controller configuration.
 // This ensures predictable cluster-wide retention policy.
 //
 // TTL SEMANTICS:
 // - TTL is ALWAYS taken from controller configuration (config.RequestTTL), NOT from VRR annotations.
-// - TTL annotation (storage.deckhouse.io/ttl) is informational only and is IGNORED by the scanner.
+// - TTL annotation (storage-foundation.deckhouse.io/ttl) is informational only and is IGNORED by the scanner.
 // - This ensures consistent cleanup behavior: all VRRs use the same TTL policy defined by controller config.
 // - TTL starts counting from CompletionTimestamp (when VRR reaches Ready=True or Ready=False).
 func (r *VolumeRestoreRequestController) scanAndDeleteExpiredVRRs(ctx context.Context, client client.Client) {

@@ -250,7 +250,7 @@ func TestNewValidatingWebhookHandler_ServeHTTP(t *testing.T) {
 	makeAdmissionReviewBody := func(t *testing.T) []byte {
 		t.Helper()
 		de := makeDataExport("", "PersistentVolumeClaim", "my-pvc")
-		de.TypeMeta = metav1.TypeMeta{APIVersion: "storage.deckhouse.io/v1alpha1", Kind: "DataExport"}
+		de.TypeMeta = metav1.TypeMeta{APIVersion: "storage-foundation.deckhouse.io/v1alpha1", Kind: "DataExport"}
 		objJSON, err := json.Marshal(de)
 		if err != nil {
 			t.Fatalf("marshal DataExport: %v", err)
@@ -264,12 +264,12 @@ func TestNewValidatingWebhookHandler_ServeHTTP(t *testing.T) {
 				"namespace": "test-ns",
 				"operation": "CREATE",
 				"resource": map[string]interface{}{
-					"group":    "storage.deckhouse.io",
+					"group":    "storage-foundation.deckhouse.io",
 					"version":  "v1alpha1",
 					"resource": "dataexports",
 				},
 				"kind": map[string]interface{}{
-					"group":   "storage.deckhouse.io",
+					"group":   "storage-foundation.deckhouse.io",
 					"version": "v1alpha1",
 					"kind":    "DataExport",
 				},

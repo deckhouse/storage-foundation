@@ -174,7 +174,7 @@ func (c *Client) AuthorizeUser(_ context.Context, operation common.Operation, na
 			ResourceAttributes: &authzv1.ResourceAttributes{
 				Namespace:   namespace,
 				Verb:        "create",
-				Group:       "storage.deckhouse.io",
+				Group:       "storage-foundation.deckhouse.io",
 				Version:     "v1alpha1",
 				Resource:    resource,
 				Subresource: "download",

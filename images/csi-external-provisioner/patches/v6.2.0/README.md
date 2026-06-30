@@ -85,7 +85,7 @@ the VRR lifecycle controller (CR lifecycle, ObjectKeeper, TTL,
 finalizers, status/conditions) lives in `images/controller` of this
 module. The executor only:
 
-- watches `storage.deckhouse.io/v1alpha1 VolumeRestoreRequest` and
+- watches `storage-foundation.deckhouse.io/v1alpha1 VolumeRestoreRequest` and
   enqueues work on a rate-limited workqueue;
 - filters by CSI driver (via the target `StorageClass.provisioner`);
 - validates the restore source (`VolumeSnapshotContent` ready-to-use, or

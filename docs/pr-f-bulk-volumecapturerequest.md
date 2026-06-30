@@ -13,7 +13,7 @@
 | Removed `spec.persistentVolumeClaimRef`, `status.dataRef` | ✅ Go types + CRD |
 | CEL: Snapshot mode requires `has(spec.targets) && size(spec.targets) > 0` | ✅ `+kubebuilder:validation:XValidation` → CRD `x-kubernetes-validations` |
 | CRD drift: `spec.volumeSnapshotClassName` | ✅ removed from generated CRD (not in Go types; controller uses SC annotation) |
-| Codegen | ✅ `zz_generated.deepcopy.go`, `crds/storage.deckhouse.io_volumecapturerequests.yaml` |
+| Codegen | ✅ `zz_generated.deepcopy.go`, `crds/storage-foundation.deckhouse.io_volumecapturerequests.yaml` |
 | API tests | ✅ `volumecapturerequest_prf1_test.go` (JSON round-trip, map-list CRD schema, no singular fields) |
 | Controller behavior | **unchanged semantics** — `singleVolumeCaptureTarget` shim (exactly one target); compile fixes + `dataRefs[]` status shape only |
 | Duplicate `targets[].uid` at apiserver | **TODO PR-F-2** — map-list keys; no envtest in `api/` module |
@@ -202,7 +202,7 @@ After **PR-F** is deployed:
 
 ### 2. CRD / codegen
 
-- Regenerate `crds/storage.deckhouse.io_volumecapturerequests.yaml` + `zz_generated.deepcopy.go`.
+- Regenerate `crds/storage-foundation.deckhouse.io_volumecapturerequests.yaml` + `zz_generated.deepcopy.go`.
 - OpenAPI: required `targets` for Snapshot when product requires ≥1 PVC; reject duplicate map keys; `artifact` minLength on apiVersion/kind/name.
 - **Breaking CRD change** — bump docs / release note.
 

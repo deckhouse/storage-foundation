@@ -31,7 +31,7 @@ index 36f60dc..e865972 100644
  	VolumeSnapshotContentName *string `json:"volumeSnapshotContentName,omitempty" protobuf:"bytes,2,opt,name=volumeSnapshotContentName"`
 +
 +	// import, when present, marks this VolumeSnapshot as an import target: its data artifact is
-+	// produced by a DataImport (state-snapshotter.deckhouse.io) in the same namespace, resolved via
++	// produced by a DataImport (storage-foundation.deckhouse.io) in the same namespace, resolved via
 +	// reverse-lookup (DataImport.spec.targetRef), not named here. It is an empty marker object whose
 +	// mere presence selects import mode. When set, the upstream snapshot-controller does NOT reconcile
 +	// this VolumeSnapshot; the state-snapshotter common controller binds it (sets status).
@@ -42,7 +42,7 @@ index 36f60dc..e865972 100644
  
 +// VolumeSnapshotImportSource is an empty marker selecting import mode for a VolumeSnapshot
 +// (spec.source.import: {}). Its mere presence means the data artifact is produced by a DataImport
-+// (state-snapshotter.deckhouse.io) and the upstream snapshot-controller does NOT reconcile it.
++// (storage-foundation.deckhouse.io) and the upstream snapshot-controller does NOT reconcile it.
 +// Deckhouse fork extension.
 +type VolumeSnapshotImportSource struct{}
 +
@@ -55,7 +55,7 @@ index 36f60dc..e865972 100644
  	VolumeGroupSnapshotName *string `json:"volumeGroupSnapshotName,omitempty" protobuf:"bytes,6,opt,name=volumeGroupSnapshotName"`
 +
 +	// boundSnapshotContentName is the name of the cluster-scoped state-snapshotter SnapshotContent
-+	// (storage.deckhouse.io) that backs this VolumeSnapshot as a logical node in a snapshot tree.
++	// (state-snapshotter.deckhouse.io) that backs this VolumeSnapshot as a logical node in a snapshot tree.
 +	// It is written by the state-snapshotter common controller (in addition to the legacy
 +	// boundVolumeSnapshotContentName which points at the CSI VolumeSnapshotContent). The upstream
 +	// snapshot-controller preserves this field across status updates (read -> DeepCopy -> UpdateStatus)
@@ -197,7 +197,7 @@ index 36f60dc..e865972 100644
  	VolumeSnapshotContentName *string `json:"volumeSnapshotContentName,omitempty" protobuf:"bytes,2,opt,name=volumeSnapshotContentName"`
 +
 +	// import, when present, marks this VolumeSnapshot as an import target: its data artifact is
-+	// produced by a DataImport (state-snapshotter.deckhouse.io) in the same namespace, resolved via
++	// produced by a DataImport (storage-foundation.deckhouse.io) in the same namespace, resolved via
 +	// reverse-lookup (DataImport.spec.targetRef), not named here. It is an empty marker object whose
 +	// mere presence selects import mode. When set, the upstream snapshot-controller does NOT reconcile
 +	// this VolumeSnapshot; the state-snapshotter common controller binds it (sets status).
@@ -208,7 +208,7 @@ index 36f60dc..e865972 100644
  
 +// VolumeSnapshotImportSource is an empty marker selecting import mode for a VolumeSnapshot
 +// (spec.source.import: {}). Its mere presence means the data artifact is produced by a DataImport
-+// (state-snapshotter.deckhouse.io) and the upstream snapshot-controller does NOT reconcile it.
++// (storage-foundation.deckhouse.io) and the upstream snapshot-controller does NOT reconcile it.
 +// Deckhouse fork extension.
 +type VolumeSnapshotImportSource struct{}
 +
@@ -221,7 +221,7 @@ index 36f60dc..e865972 100644
  	VolumeGroupSnapshotName *string `json:"volumeGroupSnapshotName,omitempty" protobuf:"bytes,6,opt,name=volumeGroupSnapshotName"`
 +
 +	// boundSnapshotContentName is the name of the cluster-scoped state-snapshotter SnapshotContent
-+	// (storage.deckhouse.io) that backs this VolumeSnapshot as a logical node in a snapshot tree.
++	// (state-snapshotter.deckhouse.io) that backs this VolumeSnapshot as a logical node in a snapshot tree.
 +	// It is written by the state-snapshotter common controller (in addition to the legacy
 +	// boundVolumeSnapshotContentName which points at the CSI VolumeSnapshotContent). The upstream
 +	// snapshot-controller preserves this field across status updates (read -> DeepCopy -> UpdateStatus)

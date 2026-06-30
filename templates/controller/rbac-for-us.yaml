@@ -13,22 +13,22 @@ metadata:
   {{- include "helm_lib_module_labels" (list . (dict "app" "controller")) | nindent 2 }}
 rules:
 # VolumeCaptureRequest (namespaced)
-- apiGroups: ["storage.deckhouse.io"]
+- apiGroups: ["storage-foundation.deckhouse.io"]
   resources: ["volumecapturerequests"]
   verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
 
 # VolumeCaptureRequest status
-- apiGroups: ["storage.deckhouse.io"]
+- apiGroups: ["storage-foundation.deckhouse.io"]
   resources: ["volumecapturerequests/status"]
   verbs: ["get", "update", "patch"]
 
 # VolumeRestoreRequest (namespaced)
-- apiGroups: ["storage.deckhouse.io"]
+- apiGroups: ["storage-foundation.deckhouse.io"]
   resources: ["volumerestorerequests"]
   verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
 
 # VolumeRestoreRequest status
-- apiGroups: ["storage.deckhouse.io"]
+- apiGroups: ["storage-foundation.deckhouse.io"]
   resources: ["volumerestorerequests/status"]
   verbs: ["get", "update", "patch"]
 

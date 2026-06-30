@@ -166,7 +166,7 @@ spec:
             properties:
               boundSnapshotContentName:
                 description: |-
-                  Name of the cluster-scoped state-snapshotter SnapshotContent (storage.deckhouse.io)
+                  Name of the cluster-scoped state-snapshotter SnapshotContent (state-snapshotter.deckhouse.io)
                   that backs this VolumeSnapshot as a logical node in a snapshot tree. Written by the
                   state-snapshotter common controller in addition to boundVolumeSnapshotContentName.
                   Deckhouse extension.
@@ -390,7 +390,7 @@ spec:
             properties:
               boundSnapshotContentName:
                 description: |-
-                  Name of the cluster-scoped state-snapshotter SnapshotContent (storage.deckhouse.io)
+                  Name of the cluster-scoped state-snapshotter SnapshotContent (state-snapshotter.deckhouse.io)
                   that backs this VolumeSnapshot as a logical node in a snapshot tree. Written by the
                   state-snapshotter common controller in addition to boundVolumeSnapshotContentName.
                   Deckhouse extension.

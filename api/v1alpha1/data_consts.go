@@ -25,10 +25,10 @@ const (
 
 	LabelDataImportValue = "data-importer"
 
-	AnnotationStorageManagerNamespaceKey = "storage.deckhouse.io/storage-manager-namespace"
-	AnnotationStorageManagerNameKey      = "storage.deckhouse.io/storage-manager-name"
-	LabelStorageManagerDeploymentNameKey = "storage.deckhouse.io/storage-manager-deployment-name"
-	StorageManagerFinalizerName          = "storage.deckhouse.io/storage-manager-controller"
+	AnnotationStorageManagerNamespaceKey = "storage-foundation.deckhouse.io/storage-manager-namespace"
+	AnnotationStorageManagerNameKey      = "storage-foundation.deckhouse.io/storage-manager-name"
+	LabelStorageManagerDeploymentNameKey = "storage-foundation.deckhouse.io/storage-manager-deployment-name"
+	StorageManagerFinalizerName          = "storage-foundation.deckhouse.io/storage-manager-controller"
 
 	AuthTypeBearer = "Bearer"
 	AuthTypeBasic  = "Basic"
@@ -49,22 +49,22 @@ const (
 
 	// AnnotationUserPVCNamespaceKey is a PV annotation that stores the original user PVC namespace.
 	// Used to restore the PV binding back to user PVC after export cleanup.
-	AnnotationUserPVCNamespaceKey = "storage.deckhouse.io/original-pvc-namespace"
+	AnnotationUserPVCNamespaceKey = "storage-foundation.deckhouse.io/original-pvc-namespace"
 	// AnnotationUserPVCNameKey is a PV annotation that stores the original user PVC name.
 	// Used together with AnnotationUserPVCNamespaceKey to restore PV binding after export.
-	AnnotationUserPVCNameKey = "storage.deckhouse.io/original-pvc-name"
+	AnnotationUserPVCNameKey = "storage-foundation.deckhouse.io/original-pvc-name"
 
 	// AnnotationPVTargetKindShortKey is a PV annotation that stores the target kind short name (pvc/vd/vs/vdsnapshot).
 	// Used to reconstruct deployment and exportPVC names during orphan cleanup when DataExport is already deleted.
-	AnnotationPVTargetKindShortKey = "storage.deckhouse.io/target-ref"
+	AnnotationPVTargetKindShortKey = "storage-foundation.deckhouse.io/target-ref"
 	// AnnotationPVHashSuffixKey is a PV annotation that stores the hash suffix from generated names.
 	// Used together with AnnotationPVTargetKindShortKey to reconstruct resource names during orphan cleanup.
-	AnnotationPVHashSuffixKey = "storage.deckhouse.io/generated-name-suffix"
+	AnnotationPVHashSuffixKey = "storage-foundation.deckhouse.io/generated-name-suffix"
 
 	// AnnotationOriginalReclaimPolicyKey stores the PV's original reclaim policy before
 	// we change it to Retain during export. This protects data if exportPVC is deleted
 	// accidentally. The original policy is restored during cleanup.
-	AnnotationOriginalReclaimPolicyKey = "storage.deckhouse.io/original-reclaim-policy"
+	AnnotationOriginalReclaimPolicyKey = "storage-foundation.deckhouse.io/original-reclaim-policy"
 
 	// LabelPVDataExporter is added to PVs during export to enable efficient
 	// discovery of orphaned PVs via MatchingLabels in removeOrphanResources.

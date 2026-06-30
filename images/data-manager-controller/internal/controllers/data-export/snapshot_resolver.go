@@ -68,12 +68,14 @@ const (
 
 var (
 	snapshotContentGVR = schema.GroupVersionResource{
-		Group:    "storage.deckhouse.io",
+		// SnapshotContent is owned by state-snapshotter (cross-module read), so it keeps the
+		// state-snapshotter API group, not storage-foundation's.
+		Group:    "state-snapshotter.deckhouse.io",
 		Version:  "v1alpha1",
 		Resource: "snapshotcontents",
 	}
 	volumeRestoreRequestGVR = schema.GroupVersionResource{
-		Group:    "storage.deckhouse.io",
+		Group:    "storage-foundation.deckhouse.io",
 		Version:  "v1alpha1",
 		Resource: "volumerestorerequests",
 	}

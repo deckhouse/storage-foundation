@@ -4,9 +4,9 @@ kind: CustomResourceDefinition
 metadata:
   annotations:
     controller-gen.kubebuilder.io/version: v0.18.0
-  name: volumecapturerequests.storage.deckhouse.io
+  name: volumecapturerequests.storage-foundation.deckhouse.io
 spec:
-  group: storage.deckhouse.io
+  group: storage-foundation.deckhouse.io
   names:
     kind: VolumeCaptureRequest
     listKind: VolumeCaptureRequestList

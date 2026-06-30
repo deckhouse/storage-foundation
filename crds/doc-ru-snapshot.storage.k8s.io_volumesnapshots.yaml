@@ -87,7 +87,7 @@ spec:
             properties:
               boundSnapshotContentName:
                 description: |-
-                  Имя кластерного объекта SnapshotContent (storage.deckhouse.io) state-snapshotter,
+                  Имя кластерного объекта SnapshotContent (state-snapshotter.deckhouse.io) state-snapshotter,
                   который обеспечивает этот VolumeSnapshot как логический узел в дереве снимка.
                   
                   Записывается общим контроллером state-snapshotter в дополнение к boundVolumeSnapshotContentName.
@@ -262,7 +262,7 @@ spec:
             properties:
               boundSnapshotContentName:
                 description: |-
-                  Имя кластерного объекта SnapshotContent (storage.deckhouse.io) state-snapshotter,
+                  Имя кластерного объекта SnapshotContent (state-snapshotter.deckhouse.io) state-snapshotter,
                   который обеспечивает этот VolumeSnapshot как логический узел в дереве снимка.
                   
                   Записывается общим контроллером state-snapshotter в дополнение к boundVolumeSnapshotContentName.

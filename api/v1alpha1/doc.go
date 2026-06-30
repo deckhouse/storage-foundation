@@ -14,6 +14,6 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-// Package v1alpha1 contains API Schema definitions for the storage.deckhouse.io v1alpha1 API group.
-// +groupName=storage.deckhouse.io
+// Package v1alpha1 contains API Schema definitions for the storage-foundation.deckhouse.io v1alpha1 API group.
+// +groupName=storage-foundation.deckhouse.io
 package v1alpha1

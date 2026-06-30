@@ -7,7 +7,7 @@ metadata:
     heritage: deckhouse
     module: storage-foundation
 webhooks:
-  - name: "d8-{{ .Chart.Name }}-volume-snapshot-mutation.storage.deckhouse.io"
+  - name: "d8-{{ .Chart.Name }}-volume-snapshot-mutation.storage-foundation.deckhouse.io"
     failurePolicy: Fail
     rules:
       - apiGroups: ["snapshot.storage.k8s.io"]

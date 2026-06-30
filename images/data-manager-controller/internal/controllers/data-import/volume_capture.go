@@ -62,7 +62,7 @@ const (
 )
 
 var volumeCaptureRequestGVR = schema.GroupVersionResource{
-	Group:    "storage.deckhouse.io",
+	Group:    "storage-foundation.deckhouse.io",
 	Version:  "v1alpha1",
 	Resource: "volumecapturerequests",
 }

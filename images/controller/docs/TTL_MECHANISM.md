@@ -13,7 +13,7 @@ TTL is stored as an annotation on the object:
 ```yaml
 metadata:
   annotations:
-    storage.deckhouse.io/ttl: "10m"
+    storage-foundation.deckhouse.io/ttl: "10m"
 ```
 
 ### TTL Value Source
@@ -134,7 +134,7 @@ After VCR/VRR deletion, IRetainer continues to live and guard artifacts until it
 ### TTL Annotation Key
 
 ```go
-const AnnotationKeyTTL = "storage.deckhouse.io/ttl"
+const AnnotationKeyTTL = "storage-foundation.deckhouse.io/ttl"
 ```
 
 ### Configuration

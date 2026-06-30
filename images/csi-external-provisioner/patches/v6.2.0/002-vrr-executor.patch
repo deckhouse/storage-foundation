@@ -48,7 +48,7 @@ index 9b96ba627..363a43dd8 100644
 +	// -------------------------------
 +	// VolumeRestoreRequest (VRR) informer
 +	vrrGVR := schema.GroupVersionResource{
-+		Group:    "storage.deckhouse.io",
++		Group:    "storage-foundation.deckhouse.io",
 +		Version:  "v1alpha1",
 +		Resource: "volumerestorerequests",
 +	}
@@ -157,7 +157,7 @@ index 3066c0a78..3a9cd196c 100644
 +  # PV/PVC -> events); it MUST NOT write VRR status. Status/lifecycle ownership
 +  # belongs to the storage-foundation VRR controller, so no status subresource
 +  # permission is granted here.
-+  - apiGroups: ["storage.deckhouse.io"]
++  - apiGroups: ["storage-foundation.deckhouse.io"]
 +    resources: ["volumerestorerequests"]
 +    verbs: ["get", "list", "watch"]
 +  # Secrets - provisioner credentials referenced from StorageClass parameters
@@ -253,7 +253,7 @@ index 000000000..4a6c39c28
 +
 +// objectKeeperRefAnnotation carries the ObjectKeeper owner reference set by the
 +// storage-foundation VRR lifecycle controller. The executor only consumes it.
-+const objectKeeperRefAnnotation = "storage.deckhouse.io/object-keeper-ref"
++const objectKeeperRefAnnotation = "storage-foundation.deckhouse.io/object-keeper-ref"
 +
 +// VRRExecutor is the low-level executor of VolumeRestoreRequest (VRR) restore operations.
 +//
@@ -292,7 +292,7 @@ index 000000000..4a6c39c28
 +
 +// NewVRRExecutor creates a new VRR executor and registers the enqueue handlers on
 +// the provided VRR informer. The informer is expected to be a dynamic informer for
-+// the storage.deckhouse.io/v1alpha1 volumerestorerequests resource.
++// the storage-foundation.deckhouse.io/v1alpha1 volumerestorerequests resource.
 +func NewVRRExecutor(
 +	kubeClient kubernetes.Interface,
 +	csiClient csi.ControllerClient,

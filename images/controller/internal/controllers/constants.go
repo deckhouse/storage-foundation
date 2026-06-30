@@ -38,11 +38,11 @@ const (
 	LabelKeyVCRUID             = "vcr-uid"
 	LabelKeyVCRNamespace       = "vcr-namespace"
 	LabelKeyVCRName            = "vcr-name"
-	LabelKeyCreatedBy          = "storage.deckhouse.io/created-by"
-	LabelKeyVCRNameFull        = "storage.deckhouse.io/vcr-name"
-	LabelKeyVCRUIDFull         = "storage.deckhouse.io/vcr-uid"
-	LabelKeySourcePVCName      = "storage.deckhouse.io/source-pvc-name"
-	LabelKeySourcePVCNamespace = "storage.deckhouse.io/source-pvc-namespace"
+	LabelKeyCreatedBy          = "storage-foundation.deckhouse.io/created-by"
+	LabelKeyVCRNameFull        = "storage-foundation.deckhouse.io/vcr-name"
+	LabelKeyVCRUIDFull         = "storage-foundation.deckhouse.io/vcr-uid"
+	LabelKeySourcePVCName      = "storage-foundation.deckhouse.io/source-pvc-name"
+	LabelKeySourcePVCNamespace = "storage-foundation.deckhouse.io/source-pvc-namespace"
 	LabelKeyCSIVSCName         = "csi-vsc-name"
 )
 
@@ -66,7 +66,7 @@ const (
 
 // API constants
 const (
-	APIGroupStorageDeckhouse  = "storage.deckhouse.io/v1alpha1"
+	APIGroupStorageDeckhouse  = "storage-foundation.deckhouse.io/v1alpha1"
 	APIGroupSnapshotStorage   = "snapshot.storage.k8s.io"
 	APIGroupDeckhouse         = "deckhouse.io/v1alpha1"
 	KindObjectKeeper          = "ObjectKeeper"
@@ -78,8 +78,8 @@ const (
 
 // Annotation key constants
 const (
-	AnnotationKeyCSIVSName = "storage.deckhouse.io/csi-vs-name"
-	AnnotationKeyTTL       = "storage.deckhouse.io/ttl" // TTL annotation for automatic deletion
+	AnnotationKeyCSIVSName = "storage-foundation.deckhouse.io/csi-vs-name"
+	AnnotationKeyTTL       = "storage-foundation.deckhouse.io/ttl" // TTL annotation for automatic deletion
 	// AnnotationKeyReadyToStartSnapshot is set on VCR to signal that snapshot-controller should create VSC
 	// This annotation contains VCR UID and is used by snapshot-controller to identify VCR requests
 	AnnotationKeyReadyToStartSnapshot = "volumesnapshot.deckhouse.io/vcr"

@@ -312,7 +312,7 @@ var _ = Describe("VolumeCaptureRequest Controller", func() {
 					}
 					// Update PV ownerRef if it has empty UID (PV name is stored in VCR annotation)
 					if currentVCR.Annotations != nil {
-						if pvName, hasPVName := currentVCR.Annotations["storage.deckhouse.io/detach-pv-name"]; hasPVName {
+						if pvName, hasPVName := currentVCR.Annotations["storage-foundation.deckhouse.io/detach-pv-name"]; hasPVName {
 							pv := &corev1.PersistentVolume{}
 							if err := client.Get(ctx, types.NamespacedName{Name: pvName}, pv); err == nil {
 								needsUpdate := false
@@ -707,8 +707,8 @@ var _ = Describe("VolumeCaptureRequest Controller", func() {
 				updatedPV := &corev1.PersistentVolume{}
 				Expect(client.Get(ctx, types.NamespacedName{Name: "test-pv-detach"}, updatedPV)).To(Succeed())
 				Expect(updatedPV.Spec.ClaimRef).To(BeNil())
-				Expect(updatedPV.Annotations).To(HaveKey("storage.deckhouse.io/detached"))
-				Expect(updatedPV.Annotations["storage.deckhouse.io/detached"]).To(Equal("true"))
+				Expect(updatedPV.Annotations).To(HaveKey("storage-foundation.deckhouse.io/detached"))
+				Expect(updatedPV.Annotations["storage-foundation.deckhouse.io/detached"]).To(Equal("true"))
 
 				// ObjectKeeper exists
 				retainerName := NamePrefixRetainerPV + string(vcr.UID)
@@ -748,7 +748,7 @@ var _ = Describe("VolumeCaptureRequest Controller", func() {
 				if pv.Annotations == nil {
 					pv.Annotations = make(map[string]string)
 				}
-				pv.Annotations["storage.deckhouse.io/detached"] = "true"
+				pv.Annotations["storage-foundation.deckhouse.io/detached"] = "true"
 				Expect(client.Create(ctx, pv)).To(Succeed())
 
 				vcr := newVCR("test-vcr-idempotent", "default", ModeDetach, pvcTarget("default", "test-pvc-idempotent", "uid-test-pvc-idempotent"))
@@ -756,7 +756,7 @@ var _ = Describe("VolumeCaptureRequest Controller", func() {
 				if vcr.Annotations == nil {
 					vcr.Annotations = make(map[string]string)
 				}
-				vcr.Annotations["storage.deckhouse.io/detach-pv-name"] = "test-pv-idempotent"
+				vcr.Annotations["storage-foundation.deckhouse.io/detach-pv-name"] = "test-pv-idempotent"
 				Expect(client.Create(ctx, vcr)).To(Succeed())
 
 				retainerName := NamePrefixRetainerPV + string(vcr.UID)

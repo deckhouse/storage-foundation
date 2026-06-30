@@ -213,7 +213,7 @@ func (r *VolumeCaptureRequestController) processSnapshotMode(ctx context.Context
 }
 
 // processDetachMode handles Detach mode: detaches PV from PVC
-// According to ADR, PV after Detach gets annotation storage.deckhouse.io/detached: "true"
+// According to ADR, PV after Detach gets annotation storage-foundation.deckhouse.io/detached: "true"
 // Provisioner ignores such PV for normal binding (quarantine PV).
 func (r *VolumeCaptureRequestController) processDetachMode(ctx context.Context, vcr *storagev1alpha1.VolumeCaptureRequest) (ctrl.Result, error) {
 	l := log.FromContext(ctx).WithValues("vcr", fmt.Sprintf("%s/%s", vcr.Namespace, vcr.Name), "mode", "Detach")
@@ -233,7 +233,7 @@ func (r *VolumeCaptureRequestController) processDetachMode(ctx context.Context, 
 	pvcNotFound := false
 	pvNameFromAnnotation := ""
 	if vcr.Annotations != nil {
-		if pvName, ok := vcr.Annotations["storage.deckhouse.io/detach-pv-name"]; ok {
+		if pvName, ok := vcr.Annotations["storage-foundation.deckhouse.io/detach-pv-name"]; ok {
 			pvNameFromAnnotation = pvName
 		}
 	}
@@ -284,7 +284,7 @@ func (r *VolumeCaptureRequestController) processDetachMode(ctx context.Context, 
 
 		// Store PV name in annotation for future reconciles (when PVC is deleted)
 		// Use Patch instead of Update to minimize conflicts and reduce churn
-		if vcr.Annotations == nil || vcr.Annotations["storage.deckhouse.io/detach-pv-name"] != pv.Name {
+		if vcr.Annotations == nil || vcr.Annotations["storage-foundation.deckhouse.io/detach-pv-name"] != pv.Name {
 			current := &storagev1alpha1.VolumeCaptureRequest{}
 			if err := r.Get(ctx, client.ObjectKeyFromObject(vcr), current); err != nil {
 				return ctrl.Result{}, fmt.Errorf("failed to get VCR for annotation patch: %w", err)
@@ -293,7 +293,7 @@ func (r *VolumeCaptureRequestController) processDetachMode(ctx context.Context, 
 			if current.Annotations == nil {
 				current.Annotations = make(map[string]string)
 			}
-			current.Annotations["storage.deckhouse.io/detach-pv-name"] = pv.Name
+			current.Annotations["storage-foundation.deckhouse.io/detach-pv-name"] = pv.Name
 			if err := r.Patch(ctx, current, client.MergeFrom(base)); err != nil {
 				return ctrl.Result{}, fmt.Errorf("failed to patch VCR annotation: %w", err)
 			}
@@ -314,7 +314,7 @@ func (r *VolumeCaptureRequestController) processDetachMode(ctx context.Context, 
 		// Check if PV has our detached annotation to confirm it was detached by VCR
 		alreadyDetachedByVCR := false
 		if pv.Annotations != nil {
-			if val, ok := pv.Annotations["storage.deckhouse.io/detached"]; ok && val == "true" {
+			if val, ok := pv.Annotations["storage-foundation.deckhouse.io/detached"]; ok && val == "true" {
 				alreadyDetachedByVCR = true
 			}
 		}
@@ -374,7 +374,7 @@ func (r *VolumeCaptureRequestController) processDetachMode(ctx context.Context, 
 	}
 
 	// 9. Detach PV from PVC and set ownerRef in a single Patch operation
-	// According to ADR, PV after Detach gets annotation storage.deckhouse.io/detached: "true"
+	// According to ADR, PV after Detach gets annotation storage-foundation.deckhouse.io/detached: "true"
 	// NOTE: PV should have ReclaimPolicy=Retain to prevent accidental deletion
 	// Re-read PV to get latest state before patching
 	updatedPV := &corev1.PersistentVolume{}
@@ -388,7 +388,7 @@ func (r *VolumeCaptureRequestController) processDetachMode(ctx context.Context, 
 	if updatedPV.Annotations == nil {
 		updatedPV.Annotations = make(map[string]string)
 	}
-	updatedPV.Annotations["storage.deckhouse.io/detached"] = "true"
+	updatedPV.Annotations["storage-foundation.deckhouse.io/detached"] = "true"
 
 	// Set ownerRef: ObjectKeeper → PV
 	// INVARIANT: PV can have only one controller owner - ObjectKeeper.
@@ -541,7 +541,7 @@ func (r *VolumeCaptureRequestController) ensureObjectKeeper(
 // This ensures predictable cluster-wide retention policy.
 //
 // IMPORTANT:
-// TTL annotation (storage.deckhouse.io/ttl) is informational only.
+// TTL annotation (storage-foundation.deckhouse.io/ttl) is informational only.
 // Actual TTL is controlled exclusively by controller configuration.
 // This ensures predictable cluster-wide retention policy.
 //
@@ -645,7 +645,7 @@ func (r *VolumeCaptureRequestController) SetupWithManager(mgr ctrl.Manager) erro
 //
 // 2. TTL source:
 //   - TTL is ALWAYS taken from controller configuration (config.RequestTTL), NOT from VCR annotations
-//   - TTL annotation (storage.deckhouse.io/ttl) is informational only and does not affect deletion timing
+//   - TTL annotation (storage-foundation.deckhouse.io/ttl) is informational only and does not affect deletion timing
 //   - This ensures predictable cluster-wide retention policy
 //
 // 3. TTL calculation:
@@ -689,13 +689,13 @@ func (r *VolumeCaptureRequestController) StartTTLScanner(ctx context.Context, cl
 // scanAndDeleteExpiredVCRs lists all VCRs and deletes those where completionTimestamp + TTL < now.
 //
 // IMPORTANT:
-// TTL annotation (storage.deckhouse.io/ttl) is informational only.
+// TTL annotation (storage-foundation.deckhouse.io/ttl) is informational only.
 // Actual TTL is controlled exclusively by controller configuration.
 // This ensures predictable cluster-wide retention policy.
 //
 // TTL SEMANTICS:
 // - TTL is ALWAYS taken from controller configuration (config.RequestTTL), NOT from VCR annotations.
-// - TTL annotation (storage.deckhouse.io/ttl) is informational only and is IGNORED by the scanner.
+// - TTL annotation (storage-foundation.deckhouse.io/ttl) is informational only and is IGNORED by the scanner.
 // - This ensures consistent cleanup behavior: all VCRs use the same TTL policy defined by controller config.
 // - TTL starts counting from CompletionTimestamp (when VCR reaches Ready=True or Ready=False).
 func (r *VolumeCaptureRequestController) scanAndDeleteExpiredVCRs(ctx context.Context, client client.Client) {

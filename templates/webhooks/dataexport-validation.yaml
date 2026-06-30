@@ -7,10 +7,10 @@ metadata:
     heritage: deckhouse
     module: storage-foundation
 webhooks:
-  - name: "d8-{{ .Chart.Name }}-dataexport-validation.storage.deckhouse.io"
+  - name: "d8-{{ .Chart.Name }}-dataexport-validation.storage-foundation.deckhouse.io"
     failurePolicy: Fail
     rules:
-      - apiGroups: ["storage.deckhouse.io"]
+      - apiGroups: ["storage-foundation.deckhouse.io"]
         apiVersions: ["v1alpha1"]
         operations: ["CREATE"]
         resources: ["dataexports"]
