@@ -40,6 +40,7 @@ const (
 	LabelKeyVCRName            = "vcr-name"
 	LabelKeyCreatedBy          = "storage.deckhouse.io/created-by"
 	LabelKeyVCRNameFull        = "storage.deckhouse.io/vcr-name"
+	LabelKeyVCRNamespaceFull   = "storage.deckhouse.io/vcr-namespace"
 	LabelKeyVCRUIDFull         = "storage.deckhouse.io/vcr-uid"
 	LabelKeySourcePVCName      = "storage.deckhouse.io/source-pvc-name"
 	LabelKeySourcePVCNamespace = "storage.deckhouse.io/source-pvc-namespace"
