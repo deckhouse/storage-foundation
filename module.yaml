@@ -2,7 +2,6 @@ name: storage-foundation
 stage: "Experimental"
 subsystems:
   - storage
-  - infrastructure
 namespace: d8-storage-foundation
 descriptions:
   en: "Enables snapshot support and volume cloning for compatible CSI drivers in a Kubernetes cluster."
