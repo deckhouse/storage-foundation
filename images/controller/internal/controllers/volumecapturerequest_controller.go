@@ -28,10 +28,12 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/util/retry"
+	"k8s.io/client-go/util/workqueue"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
+	"sigs.k8s.io/controller-runtime/pkg/controller"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
@@ -677,6 +679,19 @@ func (r *VolumeCaptureRequestController) SetupWithManager(mgr ctrl.Manager) erro
 			&snapshotv1.VolumeSnapshotContent{},
 			handler.EnqueueRequestsFromMapFunc(mapVolumeSnapshotContentToVCR),
 		).
+		WithOptions(controller.Options{
+			// L2b-foundation: process independent VolumeCaptureRequests in parallel. Each VCR owns its
+			// own UID-scoped ObjectKeeper / VSC names (objectKeeperNameForVCR, snapshotVSCName) with no
+			// cross-VCR collisions, holds no shared mutable state (Config is read-only), and status
+			// writes go through RetryOnConflict; controller-runtime still serializes reconciles of the
+			// same VCR. This parallelizes the capture leg that gated concurrent tree snapshots once the
+			// state-snapshotter manifest path (L2b-ssc) was no longer the bottleneck.
+			MaxConcurrentReconciles: 4,
+			// Bound the per-item retry backoff (200ms floor -> 10s ceiling) so transient
+			// apiserver/network requeues re-run quickly instead of backing off to the controller-runtime
+			// default (~16min), mirroring the state-snapshotter controllers.
+			RateLimiter: workqueue.NewTypedItemExponentialFailureRateLimiter[ctrl.Request](200*time.Millisecond, 10*time.Second),
+		}).
 		Complete(r)
 }
 
