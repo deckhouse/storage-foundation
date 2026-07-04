@@ -12,6 +12,8 @@ rules:
   resources:
   - volumecapturerequests
   - volumerestorerequests
+  - dataexports
+  - dataimports
   verbs:
   - get
   - list
@@ -40,6 +42,8 @@ rules:
   resources:
   - volumecapturerequests
   - volumerestorerequests
+  - dataexports
+  - dataimports
   verbs:
   - create
   - delete

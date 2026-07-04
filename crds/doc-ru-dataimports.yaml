@@ -1,0 +1,152 @@
+spec:
+  versions:
+    - name: v1alpha1
+      schema:
+        openAPIV3Schema:
+          description: |
+            Ресурс для импорта данных в PV, VolumeSnapshot, VirtualDisk или VirtualDiskSnapshot.
+          properties:
+            spec:
+              properties:
+                ttl:
+                  description: |
+                    Время жизни после последнего запроса пользователя.
+
+                    Допустимые значения:
+
+                    - `<number>s`;
+                    - `<number>m`;
+                    - `<number>h`.
+
+                    Например, `5m`, `2h45m`, или `1d`.
+                publish:
+                  description: |
+                    Включение внешнего доступа к импортер-поду за пределами кластера.
+                waitForFirstConsumer:
+                  description: |
+                    Если параметр установлен в `false`, создаётся load-под для запуска процесса заполнения тома, когда в StorageClass для параметра `volumeBindingMode` задано значение `WaitForFirstConsumer`.
+                storageClassName:
+                  description: |
+                    Только для режима A. StorageClass для временного (scratch) PersistentVolumeClaim, в который записываются импортируемые данные. Его драйвер должен поддерживать снимки (StorageClass ссылается на VolumeSnapshotClass через аннотацию `storage.deckhouse.io/volumesnapshotclass`); создаваемый артефакт всегда является VolumeSnapshotContent. Передаётся напрямую вызывающей стороной (на основе статуса исходного снимка), а не читается из сохранённого манифеста. Не задаётся в режиме B.
+                size:
+                  description: |
+                    Только для режима A. Запрашиваемый размер временного (scratch) PersistentVolumeClaim (величина Kubernetes, например `10Gi`). Не задаётся в режиме B.
+                volumeMode:
+                  description: |
+                    Только для режима A. Режим тома временного (scratch) PersistentVolumeClaim. По умолчанию `Filesystem`. Не задаётся в режиме B.
+                targetRef:
+                  description: |
+                    Полиморфная цель импорта. Поле `kind` выбирает режим импорта:
+
+                    - Режим A (импорт листа-снимка): `kind` — вид листа-снимка (например, `VolumeSnapshot`, `VirtualDiskSnapshot`). `group` и `name` идентифицируют пространственно-зависимый ресурс-лист (пространство имён неявно совпадает с пространством имён самого DataImport); параметры scratch-PVC (`spec.storageClassName/size/volumeMode`) описывают том. Ссылка используется только для обратного поиска DataImport общим контроллером state-snapshotter со стороны листа; сам контроллер DataImport лист не читает. Создаваемый артефакт — VolumeSnapshotContent.
+                    - Режим B (standalone-импорт в PVC): `kind` равно `PersistentVolumeClaim`. `pvcTemplate` полностью описывает целевой PersistentVolumeClaim, в который записываются импортируемые данные; PVC сохраняется после завершения импорта. Долговечный артефакт не создаётся.
+                  properties:
+                    kind:
+                      description: |
+                        Селектор режима импорта. `PersistentVolumeClaim` выбирает режим B (standalone-импорт в PVC через `pvcTemplate`); любое другое значение трактуется как вид листа-снимка и выбирает режим A.
+                    group:
+                      description: |
+                        Только для режима A. API-группа ресурса снимка-листа (например, `snapshot.storage.k8s.io`).
+                    name:
+                      description: |
+                        Только для режима A. Имя объекта-листа.
+                    pvcTemplate:
+                      description: |
+                        Только для режима B. Шаблон PersistentVolumeClaim, полностью описывающий целевой PVC.
+                      properties:
+                        metadata:
+                          description: |
+                            Метаданные PersistentVolumeClaim.
+                          properties:
+                            name:
+                              description: |
+                                Имя PersistentVolumeClaim.
+                            labels:
+                              description: |
+                                Метки PersistentVolumeClaim.
+                            annotations:
+                              description: |
+                                Аннотации PersistentVolumeClaim.
+                        spec:
+                          description: |
+                            Спецификация PersistentVolumeClaim.
+                          properties:
+                            accessModes:
+                              description: |
+                                Желаемые режимы доступа к тому.
+                            resources:
+                              description: |
+                                Минимальные требования к ресурсам тома.
+                              properties:
+                                requests:
+                                  description: |
+                                    Минимальный объём требуемых вычислительных ресурсов.
+                            storageClassName:
+                              description: |
+                                Имя StorageClass, требуемого для PersistentVolumeClaim.
+                            volumeMode:
+                              description: |
+                                Режим тома, требуемый для PersistentVolumeClaim.
+            status:
+              description: |
+                Информация о статусе ресурса DataImport.
+              properties:
+                url:
+                  description: |
+                    Внутренний URL-адрес сервиса импортера.
+                ca:
+                  description: |
+                    CA-сертификат в кодировке Base64 для TLS-соединения с импортер-подом.
+                publicURL:
+                  description: |
+                    Публичный URL-адрес сервиса импортера.
+                accessTimestamp:
+                  description: |
+                    Временная метка последнего доступа, обновляемая импортер-подом.
+                volumeMode:
+                  description: |
+                    Режим тома импортированных данных.
+                dataArtifactRef:
+                  description: |
+                    Ссылка на долговечный кластерный артефакт данных (VolumeSnapshotContent), созданный этим импортом. Заполняется после завершения соответствующего VolumeCaptureRequest.
+                  properties:
+                    apiVersion:
+                      description: |
+                        Версия API артефакта данных.
+                    kind:
+                      description: |
+                        Тип артефакта данных.
+                    name:
+                      description: |
+                        Имя артефакта данных.
+                conditions:
+                  type: array
+                  items:
+                    type: object
+                    description: Массив условий, описывающих текущее состояние ресурса DataImport.
+                    properties:
+                      type:
+                        description: |
+                          Тип условия.
+                      status:
+                        description: |
+                          Статус условия.
+                      reason:
+                        description: |
+                          Причина текущего статуса условия.
+                      message:
+                        description: |
+                          Человекочитаемое сообщение с подробностями о переходе статуса.
+
+                          Может быть пустой строкой.
+                      lastTransitionTime:
+                        description: |
+                          Время последнего перехода условия из одного статуса в другой.
+
+                          Обычно соответствует моменту изменения базового условия.
+                          Если время последнего перехода неизвестно, допускается использование времени изменения поля API.
+                      observedGeneration:
+                        description: |
+                          Значение `.metadata.generation`, на основе которого было установлено условие.
+
+                          Например, если текущее значение `.metadata.generation` равно 12, а `.status.conditions[x].observedGeneration` равно 9, то статус условия не соответствует текущему состоянию ресурса.

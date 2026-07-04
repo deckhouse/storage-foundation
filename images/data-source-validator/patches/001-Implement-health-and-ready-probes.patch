@@ -1,0 +1,143 @@
+From 6e40e966fa24b81f5965bc6271294c1d67bd97f0 Mon Sep 17 00:00:00 2001
+From: Alexey Markov <alexey.markov@flant.com>
+Date: Thu, 30 Oct 2025 15:42:26 +0300
+Subject: [PATCH] Implement health and ready probes
+
+---
+ cmd/volume-data-source-validator/main.go | 78 ++++++++++++++++++++++++
+ 1 file changed, 78 insertions(+)
+
+diff --git a/cmd/volume-data-source-validator/main.go b/cmd/volume-data-source-validator/main.go
+index aa703ad..c8579f2 100644
+--- a/cmd/volume-data-source-validator/main.go
++++ b/cmd/volume-data-source-validator/main.go
+@@ -25,6 +25,7 @@ import (
+ 	"os"
+ 	"os/signal"
+ 	"sync"
++	"sync/atomic"
+ 	"time"
+ 
+ 	"k8s.io/client-go/dynamic"
+@@ -64,6 +65,14 @@ var (
+ 	version = "unknown"
+ )
+ 
++// Health status tracking
++var (
++	// ready indicates if the controller is ready to serve requests
++	ready int32
++	// healthy indicates if the controller is healthy
++	healthy int32
++)
++
+ func main() {
+ 	klog.InitFlags(nil)
+ 	flag.Set("logtostderr", "true")
+@@ -101,6 +110,10 @@ func main() {
+ 	wg := &sync.WaitGroup{}
+ 
+ 	mux := http.NewServeMux()
++
++	mux.HandleFunc("/healthz", healthzHandler)
++	mux.HandleFunc("/readyz", readyzHandler)
++
+ 	if *httpEndpoint != "" {
+ 		err := metricsManager.PrepareMetricsPath(mux, *metricsPath, promklog{})
+ 		if err != nil {
+@@ -108,6 +121,7 @@ func main() {
+ 			os.Exit(1)
+ 		}
+ 		klog.Infof("Metrics path successfully registered at %s", *metricsPath)
++		klog.Infof("Health and readiness endpoints registered at /healthz and /readyz")
+ 	}
+ 	popv1beta1.AddToScheme(scheme.Scheme)
+ 
+@@ -122,16 +136,58 @@ func main() {
+ 	)
+ 
+ 	run := func(context.Context) {
++		// Set healthy status immediately when starting
++		atomic.StoreInt32(&healthy, 1)
++		klog.Infof("Controller marked as healthy")
++
+ 		// run...
+ 		stopCh := make(chan struct{})
+ 		dynFactory.Start(stopCh)
+ 		coreFactory.Start(stopCh)
++
++		// Wait for informer caches to sync before marking as ready
++		go func() {
++			// Wait for caches to sync with a timeout
++			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
++			defer cancel()
++
++			syncResults := dynFactory.WaitForCacheSync(ctx.Done())
++			coreSyncResults := coreFactory.WaitForCacheSync(ctx.Done())
++
++			// Check if all caches synced successfully
++			allSynced := true
++			for gvr, synced := range syncResults {
++				if !synced {
++					klog.Warningf("Cache for %v failed to sync", gvr)
++					allSynced = false
++				}
++			}
++			for informerType, synced := range coreSyncResults {
++				if !synced {
++					klog.Warningf("Cache for %v failed to sync", informerType)
++					allSynced = false
++				}
++			}
++
++			if allSynced {
++				atomic.StoreInt32(&ready, 1)
++				klog.Infof("Controller marked as ready - all caches synced")
++			} else {
++				klog.Warningf("Controller not ready - some caches failed to sync")
++			}
++		}()
++
+ 		go ctrl.Run(*threads, stopCh)
+ 
+ 		// ...until SIGINT
+ 		c := make(chan os.Signal, 1)
+ 		signal.Notify(c, os.Interrupt)
+ 		<-c
++
++		// Mark as not ready and not healthy when shutting down
++		atomic.StoreInt32(&ready, 0)
++		atomic.StoreInt32(&healthy, 0)
++		klog.Infof("Controller marked as not ready and not healthy due to shutdown")
+ 		close(stopCh)
+ 	}
+ 
+@@ -200,3 +256,25 @@ type promklog struct{}
+ func (pl promklog) Println(v ...interface{}) {
+ 	klog.Error(v...)
+ }
++
++// healthzHandler handles the health check endpoint
++func healthzHandler(w http.ResponseWriter, r *http.Request) {
++	if atomic.LoadInt32(&healthy) == 1 {
++		w.WriteHeader(http.StatusOK)
++		w.Write([]byte("ok"))
++	} else {
++		w.WriteHeader(http.StatusServiceUnavailable)
++		w.Write([]byte("not healthy"))
++	}
++}
++
++// readyzHandler handles the readiness check endpoint
++func readyzHandler(w http.ResponseWriter, r *http.Request) {
++	if atomic.LoadInt32(&ready) == 1 {
++		w.WriteHeader(http.StatusOK)
++		w.Write([]byte("ok"))
++	} else {
++		w.WriteHeader(http.StatusServiceUnavailable)
++		w.Write([]byte("not ready"))
++	}
++}
+-- 
+2.34.1
+
