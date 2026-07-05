@@ -74,18 +74,10 @@ func TestVolumeCaptureRequestSpec_Target_JSONRoundTrip(t *testing.T) {
 	}
 }
 
-func TestVolumeCaptureRequestStatus_DataRef_JSONRoundTrip(t *testing.T) {
+func TestVolumeCaptureRequestStatus_Data_JSONRoundTrip(t *testing.T) {
 	vcr := VolumeCaptureRequest{
 		Status: VolumeCaptureRequestStatus{
-			DataRef: &VolumeDataBinding{
-				TargetUID: "uid-a",
-				Target: VolumeCaptureTarget{
-					UID:        "uid-a",
-					APIVersion: "v1",
-					Kind:       "PersistentVolumeClaim",
-					Namespace:  "demo",
-					Name:       "data-a",
-				},
+			Data: &VolumeDataBinding{
 				Artifact: VolumeDataArtifactRef{
 					APIVersion: "snapshot.storage.k8s.io/v1",
 					Kind:       "VolumeSnapshotContent",
@@ -105,20 +97,17 @@ func TestVolumeCaptureRequestStatus_DataRef_JSONRoundTrip(t *testing.T) {
 	if err := json.Unmarshal(data, &out); err != nil {
 		t.Fatalf("unmarshal: %v", err)
 	}
-	if out.Status.DataRef == nil {
-		t.Fatal("status.dataRef must round-trip")
+	if out.Status.Data == nil {
+		t.Fatal("status.data must round-trip")
 	}
-	ref := out.Status.DataRef
-	if ref.TargetUID != "uid-a" || ref.Artifact.Name != "snapcontent-a" {
-		t.Fatalf("dataRef mismatch: %#v", ref)
+	ref := out.Status.Data
+	if ref.Artifact.Name != "snapcontent-a" {
+		t.Fatalf("data mismatch: %#v", ref)
 	}
-	// Artifact UID round-trips so the durable reference is self-contained, symmetric with target.uid.
+	// Artifact UID round-trips so the durable reference is self-contained; the captured PVC identity
+	// lives in spec.target (immutable), not in status.data.
 	if ref.Artifact.UID != "vsc-uid-a" {
-		t.Fatalf("status.dataRef.artifact.uid = %q, want %q", ref.Artifact.UID, "vsc-uid-a")
-	}
-	// Namespace is preserved in status.dataRef.target so the binding is self-contained.
-	if ref.Target.Namespace != "demo" {
-		t.Fatalf("status.dataRef.target.namespace = %q, want %q", ref.Target.Namespace, "demo")
+		t.Fatalf("status.data.artifact.uid = %q, want %q", ref.Artifact.UID, "vsc-uid-a")
 	}
 	if ref.Artifact.Kind == "VolumeCaptureRequest" {
 		t.Fatal("artifact must not reference an execution request")
@@ -129,11 +118,24 @@ func TestVolumeCaptureRequestStatus_DataRef_JSONRoundTrip(t *testing.T) {
 		t.Fatalf("unmarshal raw: %v", err)
 	}
 	status := raw["status"].(map[string]interface{})
+	if _, ok := status["dataRef"]; ok {
+		t.Fatal("legacy status.dataRef must not appear in JSON")
+	}
 	if _, ok := status["dataRefs"]; ok {
 		t.Fatal("legacy status.dataRefs[] must not appear in JSON")
 	}
-	if _, ok := status["dataRef"].(map[string]interface{}); !ok {
-		t.Fatalf("status.dataRef must be a single object, got %#v", status["dataRef"])
+	dataObj, ok := status["data"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("status.data must be a single object, got %#v", status["data"])
+	}
+	if _, ok := dataObj["artifact"].(map[string]interface{}); !ok {
+		t.Fatalf("status.data.artifact must be an object, got %#v", dataObj["artifact"])
+	}
+	if _, ok := dataObj["target"]; ok {
+		t.Fatal("status.data.target must not appear (identity comes from spec.target)")
+	}
+	if _, ok := dataObj["targetUID"]; ok {
+		t.Fatal("status.data.targetUID must not appear (identity comes from spec.target)")
 	}
 }
 
@@ -155,11 +157,18 @@ func TestVolumeCaptureRequestCRD_SingleTargetSchema(t *testing.T) {
 	}
 	for _, required := range []string{
 		"target:",
-		"dataRef:",
-		"targetUID:",
+		"data:",
+		"artifact:",
 	} {
 		if !strings.Contains(content, required) {
 			t.Fatalf("CRD missing %q", required)
+		}
+	}
+	for _, forbidden := range []string{
+		"targetUID:",
+	} {
+		if strings.Contains(content, forbidden) {
+			t.Fatalf("CRD must not contain %q (status.data is artifact-only)", forbidden)
 		}
 	}
 
@@ -182,12 +191,25 @@ func TestVolumeCaptureRequestCRD_SingleTargetSchema(t *testing.T) {
 	}
 
 	statusProps := schema["properties"].(map[string]interface{})["status"].(map[string]interface{})["properties"].(map[string]interface{})
-	dataRef, ok := statusProps["dataRef"].(map[string]interface{})
+	dataObj, ok := statusProps["data"].(map[string]interface{})
 	if !ok {
-		t.Fatalf("status.dataRef must be an object schema, got %#v", statusProps["dataRef"])
+		t.Fatalf("status.data must be an object schema, got %#v", statusProps["data"])
 	}
-	if dataRef["type"] != "object" {
-		t.Fatalf("status.dataRef type: %#v", dataRef["type"])
+	if dataObj["type"] != "object" {
+		t.Fatalf("status.data type: %#v", dataObj["type"])
+	}
+	dataObjProps, ok := dataObj["properties"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("status.data must have properties, got %#v", dataObj["properties"])
+	}
+	if _, ok := dataObjProps["artifact"].(map[string]interface{}); !ok {
+		t.Fatalf("status.data.artifact must be an object schema, got %#v", dataObjProps["artifact"])
+	}
+	if _, ok := dataObjProps["target"]; ok {
+		t.Fatal("status.data.target must not exist in CRD (identity comes from spec.target)")
+	}
+	if _, ok := statusProps["dataRef"]; ok {
+		t.Fatal("status.dataRef must not exist in CRD")
 	}
 	if _, ok := statusProps["dataRefs"]; ok {
 		t.Fatal("status.dataRefs[] must not exist in CRD")

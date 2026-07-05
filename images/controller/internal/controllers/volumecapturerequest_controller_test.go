@@ -452,10 +452,10 @@ var _ = Describe("VolumeCaptureRequest Controller", func() {
 				Expect(readyCondition).ToNot(BeNil())
 				Expect(readyCondition.Status).To(Equal(metav1.ConditionTrue))
 
-				Expect(updatedVCR.Status.DataRef).ToNot(BeNil())
-				Expect(updatedVCR.Status.DataRef.Artifact.Kind).To(Equal("VolumeSnapshotContent"))
-				Expect(updatedVCR.Status.DataRef.Artifact.Name).To(Equal(csiVSCName))
-				Expect(updatedVCR.Status.DataRef.Artifact.UID).To(Equal("vsc-uid-happy"))
+				Expect(updatedVCR.Status.Data).ToNot(BeNil())
+				Expect(updatedVCR.Status.Data.Artifact.Kind).To(Equal("VolumeSnapshotContent"))
+				Expect(updatedVCR.Status.Data.Artifact.Name).To(Equal(csiVSCName))
+				Expect(updatedVCR.Status.Data.Artifact.UID).To(Equal("vsc-uid-happy"))
 			})
 		})
 
@@ -537,10 +537,10 @@ var _ = Describe("VolumeCaptureRequest Controller", func() {
 				Expect(readyCondition.Reason).To(Equal(storagev1alpha1.ConditionReasonSnapshotCreationFailed))
 				Expect(readyCondition.Message).To(ContainSubstring(errorMsg))
 
-				Expect(updatedVCR.Status.DataRef).ToNot(BeNil())
-				Expect(updatedVCR.Status.DataRef.Artifact.Kind).To(Equal("VolumeSnapshotContent"))
-				Expect(updatedVCR.Status.DataRef.Artifact.Name).To(Equal(csiVSCName))
-				Expect(updatedVCR.Status.DataRef.Artifact.UID).To(Equal("vsc-uid-error"))
+				Expect(updatedVCR.Status.Data).ToNot(BeNil())
+				Expect(updatedVCR.Status.Data.Artifact.Kind).To(Equal("VolumeSnapshotContent"))
+				Expect(updatedVCR.Status.Data.Artifact.Name).To(Equal(csiVSCName))
+				Expect(updatedVCR.Status.Data.Artifact.UID).To(Equal("vsc-uid-error"))
 
 				// VSC still exists (not deleted)
 				existingVSC := &snapshotv1.VolumeSnapshotContent{}
@@ -729,10 +729,10 @@ var _ = Describe("VolumeCaptureRequest Controller", func() {
 				// VCR status
 				updatedVCR := &storagev1alpha1.VolumeCaptureRequest{}
 				Expect(client.Get(ctx, types.NamespacedName{Name: vcr.Name, Namespace: vcr.Namespace}, updatedVCR)).To(Succeed())
-				Expect(updatedVCR.Status.DataRef).ToNot(BeNil())
-				Expect(updatedVCR.Status.DataRef.Artifact.Kind).To(Equal("PersistentVolume"))
-				Expect(updatedVCR.Status.DataRef.Artifact.Name).To(Equal("test-pv-detach"))
-				Expect(updatedVCR.Status.DataRef.Artifact.UID).To(Equal("pv-uid-detach"))
+				Expect(updatedVCR.Status.Data).ToNot(BeNil())
+				Expect(updatedVCR.Status.Data.Artifact.Kind).To(Equal("PersistentVolume"))
+				Expect(updatedVCR.Status.Data.Artifact.Name).To(Equal("test-pv-detach"))
+				Expect(updatedVCR.Status.Data.Artifact.UID).To(Equal("pv-uid-detach"))
 
 				readyCondition := getCondition(updatedVCR.Status.Conditions, storagev1alpha1.ConditionTypeReady)
 				Expect(readyCondition).ToNot(BeNil())
@@ -955,7 +955,7 @@ var _ = Describe("VolumeCaptureRequest Controller", func() {
 			Expect(ready.Status).To(Equal(metav1.ConditionFalse))
 			Expect(ready.Reason).To(Equal(storagev1alpha1.ConditionReasonTargetsPending))
 			// dataRef is only set on success.
-			Expect(updated.Status.DataRef).To(BeNil())
+			Expect(updated.Status.Data).To(BeNil())
 		})
 
 		It("should requeue without creating VSC when ObjectKeeper UID is empty", func() {

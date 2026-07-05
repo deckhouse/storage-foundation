@@ -13,16 +13,8 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 )
 
-func vcrDataRefBinding(targetUID, kind, name, apiVersion string) *storagev1alpha1.VolumeDataBinding {
+func vcrDataBinding(kind, name, apiVersion string) *storagev1alpha1.VolumeDataBinding {
 	return &storagev1alpha1.VolumeDataBinding{
-		TargetUID: targetUID,
-		Target: storagev1alpha1.VolumeCaptureTarget{
-			UID:        targetUID,
-			APIVersion: "v1",
-			Kind:       "PersistentVolumeClaim",
-			Namespace:  "default",
-			Name:       "pvc-1",
-		},
 		Artifact: storagev1alpha1.VolumeDataArtifactRef{
 			APIVersion: apiVersion,
 			Kind:       kind,
@@ -39,7 +31,7 @@ func TestCleanupArtifactsForVCR_DeletesOrphans(t *testing.T) {
 	vcr := &storagev1alpha1.VolumeCaptureRequest{
 		ObjectMeta: metav1.ObjectMeta{Name: "vcr-1", Namespace: "default"},
 		Status: storagev1alpha1.VolumeCaptureRequestStatus{
-			DataRef: vcrDataRefBinding("uid-1", "VolumeSnapshotContent", "vsc-1", "snapshot.storage.k8s.io/v1"),
+			Data: vcrDataBinding("VolumeSnapshotContent", "vsc-1", "snapshot.storage.k8s.io/v1"),
 		},
 	}
 	vsc := &snapshotv1.VolumeSnapshotContent{
@@ -73,7 +65,7 @@ func TestCleanupArtifactsForVCR_SkipsManaged(t *testing.T) {
 	vcr := &storagev1alpha1.VolumeCaptureRequest{
 		ObjectMeta: metav1.ObjectMeta{Name: "vcr-2", Namespace: "default"},
 		Status: storagev1alpha1.VolumeCaptureRequestStatus{
-			DataRef: vcrDataRefBinding("uid-2", "VolumeSnapshotContent", "vsc-2", "snapshot.storage.k8s.io/v1"),
+			Data: vcrDataBinding("VolumeSnapshotContent", "vsc-2", "snapshot.storage.k8s.io/v1"),
 		},
 	}
 	vsc := &snapshotv1.VolumeSnapshotContent{
@@ -100,7 +92,7 @@ func TestCleanupArtifactsForVCR_DeletesPVOrphans(t *testing.T) {
 	vcr := &storagev1alpha1.VolumeCaptureRequest{
 		ObjectMeta: metav1.ObjectMeta{Name: "vcr-3", Namespace: "default"},
 		Status: storagev1alpha1.VolumeCaptureRequestStatus{
-			DataRef: vcrDataRefBinding("uid-3", "PersistentVolume", "pv-1", "v1"),
+			Data: vcrDataBinding("PersistentVolume", "pv-1", "v1"),
 		},
 	}
 	pv := &corev1.PersistentVolume{

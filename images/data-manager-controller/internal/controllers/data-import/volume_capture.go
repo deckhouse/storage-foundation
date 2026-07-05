@@ -214,14 +214,14 @@ func vcrReadyCondition(vcr *unstructured.Unstructured) (status, reason string, o
 // is no list to match by targetUID. It validates the artifact kind matches what the chosen mode must
 // produce and carries the artifact uid through into DataArtifactReference.
 func volumeCaptureArtifact(vcr *unstructured.Unstructured, expectedKind string) (*dev1alpha1.DataArtifactReference, error) {
-	dataRef, found, err := unstructured.NestedMap(vcr.Object, "status", "dataRef")
+	dataRef, found, err := unstructured.NestedMap(vcr.Object, "status", "data")
 	if err != nil || !found || len(dataRef) == 0 {
-		return nil, fmt.Errorf("VolumeCaptureRequest has no status.dataRef")
+		return nil, fmt.Errorf("VolumeCaptureRequest has no status.data")
 	}
 
 	artifact, isMap := dataRef["artifact"].(map[string]interface{})
 	if !isMap {
-		return nil, fmt.Errorf("VolumeCaptureRequest dataRef has no artifact")
+		return nil, fmt.Errorf("VolumeCaptureRequest data has no artifact")
 	}
 
 	apiVersion, _, _ := unstructured.NestedString(artifact, "apiVersion")

@@ -43,8 +43,7 @@ type VolumeCaptureTarget struct {
 	// +kubebuilder:validation:MinLength=1
 	Name string `json:"name"`
 	// Namespace is intentionally empty in spec.target (the PVC always lives in the VCR namespace).
-	// The controller fills it in status.dataRef.target from the VCR namespace so the binding is
-	// self-contained for downstream data retrieval.
+	// The captured PVC identity is carried by spec.target (immutable); status.data no longer duplicates it.
 	// +optional
 	Namespace string `json:"namespace,omitempty"`
 }
@@ -71,16 +70,10 @@ type VolumeDataArtifactRef struct {
 }
 
 // +k8s:deepcopy-gen=true
-// VolumeDataBinding associates a capture target with its durable data artifact on one VCR.
+// VolumeDataBinding carries the durable data artifact produced for the VCR's captured target.
+// The captured PVC identity is not duplicated here: it lives in spec.target (immutable), so status.data
+// carries only the artifact.
 type VolumeDataBinding struct {
-	// TargetUID matches spec.target.uid (the captured PersistentVolumeClaim UID).
-	// +kubebuilder:validation:Required
-	// +kubebuilder:validation:MinLength=1
-	TargetUID string `json:"targetUID"`
-
-	// Target identifies the PVC target captured in this binding.
-	Target VolumeCaptureTarget `json:"target"`
-
 	// Artifact references the cluster-scoped durable data artifact.
 	Artifact VolumeDataArtifactRef `json:"artifact"`
 }
@@ -106,9 +99,10 @@ type VolumeCaptureRequestStatus struct {
 	// Conditions represent the latest available observations of the resource's state
 	Conditions []metav1.Condition `json:"conditions,omitempty"`
 
-	// DataRef is the durable data artifact for the captured target (for example VolumeSnapshotContent).
+	// Data is the durable data artifact for the captured target (for example VolumeSnapshotContent).
+	// The captured PVC identity comes from spec.target (immutable); data carries only the artifact.
 	// +optional
-	DataRef *VolumeDataBinding `json:"dataRef,omitempty"`
+	Data *VolumeDataBinding `json:"data,omitempty"`
 }
 
 // +kubebuilder:object:root=true

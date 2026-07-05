@@ -240,13 +240,13 @@ func (r *DataImportReconciler) ensureSnapshotImportTarget(ctx context.Context) (
 	// Terminal: once the artifact is produced the import is done. Re-affirm Completed (idempotent) and
 	// stop, so completed DataImports don't re-derive the scratch PVC on every publish/server event until
 	// TTL expiry.
-	if r.dataImport.Status.DataArtifactRef != nil {
+	if r.dataImport.Status.Data != nil && r.dataImport.Status.Data.Artifact != nil {
 		meta.SetStatusCondition(&r.dataImport.Status.Conditions, metav1.Condition{
 			Type:   string(common.ConditionCompleted),
 			Status: metav1.ConditionTrue,
 			Reason: string(common.ReasonCompleted),
 			Message: fmt.Sprintf("Data import completed: produced %s %s",
-				r.dataImport.Status.DataArtifactRef.Kind, r.dataImport.Status.DataArtifactRef.Name),
+				r.dataImport.Status.Data.Artifact.Kind, r.dataImport.Status.Data.Artifact.Name),
 			ObservedGeneration: r.dataImport.Generation,
 		})
 		return ctrl.Result{}, nil
@@ -584,7 +584,7 @@ func (r *DataImportReconciler) ensureDataArtifact(ctx context.Context, pvc *core
 		return ctrl.Result{}, err
 	}
 
-	r.dataImport.Status.DataArtifactRef = artifact
+	r.dataImport.Status.Data = &dev1alpha1.DataExportImportData{Artifact: artifact}
 	meta.SetStatusCondition(&r.dataImport.Status.Conditions, metav1.Condition{
 		Type:               string(common.ConditionCompleted),
 		Status:             metav1.ConditionTrue,

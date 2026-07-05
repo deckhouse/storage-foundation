@@ -32,13 +32,11 @@ func requireCaptureTarget(spec storagev1alpha1.VolumeCaptureRequestSpec) (storag
 
 func setVolumeSnapshotDataRef(vcr *storagev1alpha1.VolumeCaptureRequest, target storagev1alpha1.VolumeCaptureTarget, vscName, vscUID string) {
 	binding := volumeSnapshotBinding(target, vscName, vscUID)
-	vcr.Status.DataRef = &binding
+	vcr.Status.Data = &binding
 }
 
-func setPersistentVolumeDataRef(vcr *storagev1alpha1.VolumeCaptureRequest, target storagev1alpha1.VolumeCaptureTarget, pvName, pvUID string) {
-	vcr.Status.DataRef = &storagev1alpha1.VolumeDataBinding{
-		TargetUID: target.UID,
-		Target:    target,
+func setPersistentVolumeDataRef(vcr *storagev1alpha1.VolumeCaptureRequest, _ storagev1alpha1.VolumeCaptureTarget, pvName, pvUID string) {
+	vcr.Status.Data = &storagev1alpha1.VolumeDataBinding{
 		Artifact: storagev1alpha1.VolumeDataArtifactRef{
 			APIVersion: "v1",
 			Kind:       "PersistentVolume",
@@ -50,8 +48,8 @@ func setPersistentVolumeDataRef(vcr *storagev1alpha1.VolumeCaptureRequest, targe
 }
 
 func dataArtifactRef(status storagev1alpha1.VolumeCaptureRequestStatus) (storagev1alpha1.VolumeDataArtifactRef, bool) {
-	if status.DataRef == nil {
+	if status.Data == nil {
 		return storagev1alpha1.VolumeDataArtifactRef{}, false
 	}
-	return status.DataRef.Artifact, true
+	return status.Data.Artifact, true
 }

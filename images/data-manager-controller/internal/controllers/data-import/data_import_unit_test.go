@@ -180,8 +180,7 @@ func TestVolumeCaptureRequestReadyAndFailed(t *testing.T) {
 func TestVolumeCaptureArtifact(t *testing.T) {
 	vcr := &unstructured.Unstructured{Object: map[string]interface{}{
 		"status": map[string]interface{}{
-			"dataRef": map[string]interface{}{
-				"targetUID": "uid-1",
+			"data": map[string]interface{}{
 				"artifact": map[string]interface{}{
 					"apiVersion": "snapshot.storage.k8s.io/v1",
 					"kind":       artifactKindVolumeSnapshotContent,
@@ -196,14 +195,14 @@ func TestVolumeCaptureArtifact(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "snapcontent-x", art.Name)
 	assert.Equal(t, artifactKindVolumeSnapshotContent, art.Kind)
-	// The artifact uid is carried through from VCR status.dataRef.artifact.uid.
+	// The artifact uid is carried through from VCR status.data.artifact.uid.
 	assert.Equal(t, "8d7c6b5a-4e3f-4a2b-9c1d-0f1e2d3c4b5a", art.UID)
 
 	// Kind mismatch is rejected.
 	_, err = volumeCaptureArtifact(vcr, artifactKindPersistentVolume)
 	assert.Error(t, err)
 
-	// No status.dataRef at all errors.
+	// No status.data at all errors.
 	empty := &unstructured.Unstructured{Object: map[string]interface{}{"status": map[string]interface{}{}}}
 	_, err = volumeCaptureArtifact(empty, artifactKindVolumeSnapshotContent)
 	assert.Error(t, err)
@@ -352,7 +351,7 @@ func TestHandlePVCImportStatusCompletesWithoutArtifact(t *testing.T) {
 	assert.Zero(t, res.RequeueAfter)
 	assert.True(t, meta.IsStatusConditionTrue(r.dataImport.Status.Conditions, string(common.ConditionCompleted)))
 	// The defining difference of Mode B: no durable artifact is produced.
-	assert.Nil(t, r.dataImport.Status.DataArtifactRef)
+	assert.Nil(t, r.dataImport.Status.Data)
 	assert.Equal(t, "Filesystem", r.dataImport.Status.VolumeMode)
 }
 

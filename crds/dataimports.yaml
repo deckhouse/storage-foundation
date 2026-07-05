@@ -203,23 +203,30 @@ spec:
                   enum: ["Block", "Filesystem"]
                   description: |
                     Volume mode of the exported data.
-                dataArtifactRef:
+                data:
                   type: object
                   description: |
-                    Reference to the durable cluster-scoped data artifact produced by this import
-                    (a VolumeSnapshotContent). Populated once the backing VolumeCaptureRequest completes.
+                    Captured-data block for this import. Carries the durable cluster-scoped data artifact
+                    under data.artifact (a VolumeSnapshotContent). Populated once the backing
+                    VolumeCaptureRequest completes.
                   properties:
-                    apiVersion:
-                      type: string
-                    kind:
-                      type: string
-                    name:
-                      type: string
-                    uid:
-                      type: string
+                    artifact:
+                      type: object
                       description: |
-                        UID of the durable data artifact (for example the VolumeSnapshotContent UID),
-                        making the reference self-contained. Optional; producers fill it best-effort.
+                        Reference to the durable cluster-scoped data artifact produced by this import
+                        (a VolumeSnapshotContent).
+                      properties:
+                        apiVersion:
+                          type: string
+                        kind:
+                          type: string
+                        name:
+                          type: string
+                        uid:
+                          type: string
+                          description: |
+                            UID of the durable data artifact (for example the VolumeSnapshotContent UID),
+                            making the reference self-contained. Optional; producers fill it best-effort.
                 conditions:
                   type: array
                   items:

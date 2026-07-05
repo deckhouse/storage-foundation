@@ -69,10 +69,8 @@ func snapshotVSCName(vcrUID types.UID, targetUID string) string {
 	return fmt.Sprintf("snapshot-%s-%s", string(vcrUID), targetUIDHash(targetUID))
 }
 
-func volumeSnapshotBinding(target storagev1alpha1.VolumeCaptureTarget, vscName, vscUID string) storagev1alpha1.VolumeDataBinding {
+func volumeSnapshotBinding(_ storagev1alpha1.VolumeCaptureTarget, vscName, vscUID string) storagev1alpha1.VolumeDataBinding {
 	return storagev1alpha1.VolumeDataBinding{
-		TargetUID: target.UID,
-		Target:    target,
 		Artifact: storagev1alpha1.VolumeDataArtifactRef{
 			APIVersion: "snapshot.storage.k8s.io/v1",
 			Kind:       "VolumeSnapshotContent",
@@ -317,7 +315,7 @@ func (r *VolumeCaptureRequestController) markFailedSnapshotForTarget(
 ) (ctrl.Result, error) {
 	if vscName != "" {
 		binding := volumeSnapshotBinding(target, vscName, vscUID)
-		vcr.Status.DataRef = &binding
+		vcr.Status.Data = &binding
 	}
 	if err := r.finalizeVCR(ctx, vcr, metav1.ConditionFalse, reason, message); err != nil {
 		return ctrl.Result{}, err

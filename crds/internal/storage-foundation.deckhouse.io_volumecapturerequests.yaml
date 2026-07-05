@@ -66,8 +66,7 @@ spec:
                   namespace:
                     description: |-
                       Namespace is intentionally empty in spec.target (the PVC always lives in the VCR namespace).
-                      The controller fills it in status.dataRef.target from the VCR namespace so the binding is
-                      self-contained for downstream data retrieval.
+                      The captured PVC identity is carried by spec.target (immutable); status.data no longer duplicates it.
                     type: string
                   uid:
                     description: UID is the captured PersistentVolumeClaim UID.
@@ -149,9 +148,10 @@ spec:
                   - type
                   type: object
                 type: array
-              dataRef:
-                description: DataRef is the durable data artifact for the captured
-                  target (for example VolumeSnapshotContent).
+              data:
+                description: |-
+                  Data is the durable data artifact for the captured target (for example VolumeSnapshotContent).
+                  The captured PVC identity comes from spec.target (immutable); data carries only the artifact.
                 properties:
                   artifact:
                     description: Artifact references the cluster-scoped durable data
@@ -177,44 +177,8 @@ spec:
                     - kind
                     - name
                     type: object
-                  target:
-                    description: Target identifies the PVC target captured in this
-                      binding.
-                    properties:
-                      apiVersion:
-                        minLength: 1
-                        type: string
-                      kind:
-                        minLength: 1
-                        type: string
-                      name:
-                        minLength: 1
-                        type: string
-                      namespace:
-                        description: |-
-                          Namespace is intentionally empty in spec.target (the PVC always lives in the VCR namespace).
-                          The controller fills it in status.dataRef.target from the VCR namespace so the binding is
-                          self-contained for downstream data retrieval.
-                        type: string
-                      uid:
-                        description: UID is the captured PersistentVolumeClaim UID.
-                        minLength: 1
-                        type: string
-                    required:
-                    - apiVersion
-                    - kind
-                    - name
-                    - uid
-                    type: object
-                  targetUID:
-                    description: TargetUID matches spec.target.uid (the captured PersistentVolumeClaim
-                      UID).
-                    minLength: 1
-                    type: string
                 required:
                 - artifact
-                - target
-                - targetUID
                 type: object
             type: object
         type: object

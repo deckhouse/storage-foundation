@@ -193,7 +193,7 @@ func (r *VolumeCaptureRequestController) processSnapshotMode(ctx context.Context
 	}
 
 	if tr.ready && tr.binding != nil {
-		vcr.Status.DataRef = tr.binding
+		vcr.Status.Data = tr.binding
 		if err := r.finalizeVCR(ctx, vcr, metav1.ConditionTrue, storagev1alpha1.ConditionReasonCompleted, "target ready"); err != nil {
 			return ctrl.Result{}, err
 		}
@@ -790,10 +790,10 @@ func (r *VolumeCaptureRequestController) scanAndDeleteExpiredVCRs(ctx context.Co
 // cleanupArtifactsForVCR deletes VCR-created artifacts if they have no ownerRef.
 // This is a best-effort cleanup used by the TTL scanner to avoid orphaned artifacts.
 func (r *VolumeCaptureRequestController) cleanupArtifactsForVCR(ctx context.Context, vcr *storagev1alpha1.VolumeCaptureRequest) error {
-	if vcr.Status.DataRef == nil {
+	if vcr.Status.Data == nil {
 		return nil
 	}
-	artifact := vcr.Status.DataRef.Artifact
+	artifact := vcr.Status.Data.Artifact
 	if artifact.Name == "" {
 		return nil
 	}
