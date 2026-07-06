@@ -8,7 +8,6 @@ git:
   - add: {{ .ModuleDir }}
     to: /src
     includePaths:
-      - api
       - images/{{ $.ImageName }}
     stageDependencies:
       install:

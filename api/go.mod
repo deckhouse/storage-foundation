@@ -1,7 +1,6 @@
 module github.com/deckhouse/storage-foundation/api
 
 go 1.26.4
-
 require (
 	gopkg.in/yaml.v3 v3.0.1
 	k8s.io/api v0.34.1

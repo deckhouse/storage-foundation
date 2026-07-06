@@ -4,8 +4,8 @@ subsystems:
   - storage
 namespace: d8-storage-foundation
 descriptions:
-  en: "Enables snapshot support, volume cloning, and secure HTTP-based export/import of persistent volume contents for compatible CSI drivers in a Kubernetes cluster."
-  ru: "Включает поддержку снапшотов, клонирование томов и безопасный экспорт/импорт содержимого постоянных томов по протоколу HTTP для совместимых CSI-драйверов в кластере Kubernetes."
+  en: "Enables snapshot support and volume cloning for compatible CSI drivers in a Kubernetes cluster."
+  ru: "Включает поддержку снапшотов и клонирование томов для совместимых CSI-драйверов в кластере Kubernetes."
 requirements:
   deckhouse: ">= 1.74"
   modules:

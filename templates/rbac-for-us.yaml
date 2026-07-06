@@ -10,8 +10,6 @@ rules:
   resources:
   - volumecapturerequests
   - volumerestorerequests
-  - dataexports
-  - dataimports
   verbs:
   - get
   - list
