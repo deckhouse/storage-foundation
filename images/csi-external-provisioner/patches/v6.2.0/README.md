@@ -43,19 +43,22 @@ git -C <external-provisioner-fork> diff v6.2.0 d8-63742164-vrr \
 ```
 
 API dependency: the executor imports
-`github.com/deckhouse/storage-foundation/api`. The extended VRR API
-(`volumeMode`/`fsType`/`accessModes`, commit `b97b1e1`) is **not yet**
-released as a module tag (`api/v0.1.0` predates it), so `002` pins the
-module via a Go **pseudo-version**
-(`v0.0.0-20260614235316-b97b1e188226`) that resolves to that commit on
-the module proxy. The standard pipeline
-(`rm -rf vendor && go mod download && go mod vendor`) resolves it
-normally — no `-mod=vendor` special case, no shadow API. The patch also
-bumps the `go` directive to `1.25.10` (required by the `api` module).
+`github.com/deckhouse/storage-foundation/api`. As of wave6 the executor
+reads the **honest-refs** VRR API — `spec.sourceRef` + `spec.pvcTemplate`
+(`metadata.name` + `spec.storageClassName`/`volumeMode`/`accessModes`)
+with `fsType` at the spec root — and never writes status. The pinned
+pseudo-version (`v0.0.0-20260614235316-b97b1e188226`, commit `b97b1e1`)
+predates wave6 (it carries the flat `spec.volumeMode`/`fsType`/
+`accessModes` schema), so it will **not** compile against this patch.
 
-FOLLOW-UP: publish a real `api/vX.Y.Z` tag at the extended-API commit and
-replace the pseudo-version in `002` with the tag (one `go.mod`/`go.sum`
-line change).
+BLOCKER / FOLLOW-UP (wave6): `002` was hand-updated blindly to the
+`pvcTemplate`/`pvcRef` schema ahead of the API being published. Before
+building you MUST (1) land the wave6 `api/v1alpha1` VRR types
+(`PvcTemplate`/`PvcRef`), (2) regenerate the fork branch `d8-63742164-vrr`
+from this patch (or re-apply the same edits there and re-diff), and
+(3) re-pin the pseudo-version / tag in `002` to the published wave6 API
+commit. Until then the patch is unverifiable (no compile path). The patch
+also bumps the `go` directive to `1.25.10` (required by the `api` module).
 
 Note: the `api` module is a Go submodule (`module .../api` in `api/`), so
 its version tag is subdirectory-prefixed (`api/vX.Y.Z`); the plain
@@ -120,27 +123,32 @@ go build ./cmd/csi-provisioner` (CGO_ENABLED=0, linux/amd64) succeeds.
 
 ### API dependency — pinned via Go pseudo-version
 
-The executor needs the **extended** VRR API
-(`spec.volumeMode`/`fsType`/`accessModes`, storage-foundation commit
-`b97b1e1`). That extension is **not** in the published `api/v0.1.0` tag
-(commit `bc90a730`, which predates it), so pinning `api v0.1.0` would not
-compile.
+As of wave6 the executor needs the **honest-refs** VRR API:
+`spec.sourceRef` + `spec.pvcTemplate` (with `metadata.name` and
+`spec.storageClassName`/`volumeMode`/`accessModes`), `fsType` at the spec
+root, and `status.pvcRef`. `pvcTemplate` uses the storage-foundation
+string-alias mirror types (`PersistentVolumeMode`,
+`PersistentVolumeAccessMode`), so the executor converts them to core `v1`
+before building CSI capabilities / the PV+PVC (see `convertAccessModes`,
+`vrrVolumeMode`, `vrrStorageClassName`, `vrrTargetPVCName/Namespace`).
 
-Instead `002` pins the module via a Go **pseudo-version**:
+The pinned pseudo-version:
 
 ```
 require github.com/deckhouse/storage-foundation/api v0.0.0-20260614235316-b97b1e188226
 ```
 
-which the module proxy resolves to commit `b97b1e1`. The standard
-pipeline (`rm -rf vendor && go mod download && go mod vendor`) fetches it
-over the network — no `-mod=vendor` special case, no shadow API. The
-patch also bumps the `go` directive to `1.25.10` because the `api`
-module requires it.
+resolves to commit `b97b1e1`, which is the **pre-wave6** flat schema and
+will NOT compile against this patch.
 
-FOLLOW-UP: publish a real `api/vX.Y.Z` tag at (or after) `b97b1e1` and
-replace the pseudo-version in `002` with that tag (one `go.mod` line plus
-matching `go.sum` lines).
+BLOCKER / FOLLOW-UP (wave6): `002` was hand-updated blindly to the
+`pvcTemplate`/`pvcRef` schema before the API was published. To build:
+(1) land the wave6 VRR API types, (2) regenerate the fork branch
+`d8-63742164-vrr` from this patch (or mirror the edits and re-diff), and
+(3) re-pin the pseudo-version / tag in `002` to the published wave6 API
+commit (one `go.mod` line plus matching `go.sum` lines). The patch also
+bumps the `go` directive to `1.25.10` because the `api` module requires
+it.
 
 ### RBAC for the provisioner ServiceAccount
 

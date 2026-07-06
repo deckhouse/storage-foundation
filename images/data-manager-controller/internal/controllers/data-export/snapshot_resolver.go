@@ -271,33 +271,38 @@ func (r *DataexportReconciler) ensureVolumeRestoreRequest(ctx context.Context, d
 	}
 
 	// art.VolumeMode is guaranteed non-empty (resolveSnapshotDataArtifact rejects an empty one as
-	// not-ready), so the required VRR volumeMode comes straight from the trusted dataRef.
-	spec := map[string]interface{}{
-		"sourceRef": map[string]interface{}{
-			"kind": art.ArtifactKind,
-			"name": art.ArtifactName,
-		},
-		// targetRef carries only kind+name: restore is never cross-namespace, so the foundation VRR
-		// controller derives the target namespace from metadata.namespace (set to ControllerNamespace
-		// below). Only kind=PersistentVolumeClaim is supported for now.
-		"targetRef": map[string]interface{}{
-			"kind": "PersistentVolumeClaim",
-			"name": generatedNames.ExportPVCName,
-		},
+	// not-ready), so the required pvcTemplate volumeMode comes straight from the trusted dataRef.
+	// pvcTemplate describes the export PVC the restore creates; its namespace is implicit = the VRR
+	// namespace (restore is never cross-namespace), so metadata.namespace = ControllerNamespace applies.
+	pvcSpec := map[string]interface{}{
 		"volumeMode": art.VolumeMode,
 	}
 	if art.StorageClassName != "" {
-		spec["storageClassName"] = art.StorageClassName
-	}
-	if art.FsType != "" {
-		spec["fsType"] = art.FsType
+		pvcSpec["storageClassName"] = art.StorageClassName
 	}
 	if len(art.AccessModes) > 0 {
 		modes := make([]interface{}, 0, len(art.AccessModes))
 		for _, m := range art.AccessModes {
 			modes = append(modes, m)
 		}
-		spec["accessModes"] = modes
+		pvcSpec["accessModes"] = modes
+	}
+	spec := map[string]interface{}{
+		"sourceRef": map[string]interface{}{
+			"kind": art.ArtifactKind,
+			"name": art.ArtifactName,
+		},
+		"pvcTemplate": map[string]interface{}{
+			"metadata": map[string]interface{}{
+				"name": generatedNames.ExportPVCName,
+			},
+			"spec": pvcSpec,
+		},
+	}
+	// fsType is a restore execution parameter read by the external-provisioner, not a PVC field, so it
+	// stays at spec root (optional, ignored for Block volumes).
+	if art.FsType != "" {
+		spec["fsType"] = art.FsType
 	}
 
 	vrr := &unstructured.Unstructured{Object: map[string]interface{}{

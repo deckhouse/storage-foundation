@@ -679,7 +679,7 @@ func (r *DataImportReconciler) cleanupDataImport(ctx context.Context) error {
 		dev1alpha1.StorageManagerFinalizerName,
 	)
 	if err != nil {
-		logger.Error(err, "Failed to remove finalizer from TargetRef")
+		logger.Error(err, "Failed to remove finalizer from target PVC")
 		return err
 	}
 

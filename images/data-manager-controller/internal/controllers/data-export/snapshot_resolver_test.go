@@ -304,18 +304,18 @@ func TestEnsureVolumeRestoreRequest_CreatesAndIsIdempotent(t *testing.T) {
 
 	sourceKind, _, _ := unstructured.NestedString(vrr.Object, "spec", "sourceRef", "kind")
 	sourceName, _, _ := unstructured.NestedString(vrr.Object, "spec", "sourceRef", "name")
-	targetKind, _, _ := unstructured.NestedString(vrr.Object, "spec", "targetRef", "kind")
-	targetPVC, _, _ := unstructured.NestedString(vrr.Object, "spec", "targetRef", "name")
-	targetNS, hasTargetNS, _ := unstructured.NestedString(vrr.Object, "spec", "targetRef", "namespace")
-	volumeMode, _, _ := unstructured.NestedString(vrr.Object, "spec", "volumeMode")
+	targetPVC, _, _ := unstructured.NestedString(vrr.Object, "spec", "pvcTemplate", "metadata", "name")
+	_, hasTargetNS, _ := unstructured.NestedString(vrr.Object, "spec", "pvcTemplate", "metadata", "namespace")
+	volumeMode, _, _ := unstructured.NestedString(vrr.Object, "spec", "pvcTemplate", "spec", "volumeMode")
+	_, hasLegacyTargetRef, _ := unstructured.NestedMap(vrr.Object, "spec", "targetRef")
 	metaNS := vrr.GetNamespace()
 	assert.Equal(t, artifactKindVolumeSnapshotContent, sourceKind)
 	assert.Equal(t, "vsc1", sourceName)
-	assert.Equal(t, "PersistentVolumeClaim", targetKind)
+	assert.False(t, hasLegacyTargetRef, "spec.targetRef must not be set (replaced by pvcTemplate)")
 	assert.Equal(t, names.ExportPVCName, targetPVC)
-	// Restore is never cross-namespace: targetRef carries no namespace; the target lives in the VRR namespace.
-	assert.False(t, hasTargetNS, "spec.targetRef.namespace must not be set")
-	assert.Empty(t, targetNS)
+	// Restore is never cross-namespace: pvcTemplate.metadata carries no namespace; the target lives in
+	// the VRR namespace.
+	assert.False(t, hasTargetNS, "spec.pvcTemplate.metadata.namespace must not be set")
 	assert.Equal(t, testControllerNamespace, metaNS)
 	assert.Equal(t, "Block", volumeMode)
 

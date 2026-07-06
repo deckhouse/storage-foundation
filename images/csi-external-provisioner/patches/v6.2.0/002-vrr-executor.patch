@@ -202,7 +202,7 @@ new file mode 100644
 index 000000000..4a6c39c28
 --- /dev/null
 +++ b/pkg/controller/vrr_handler.go
-@@ -0,0 +1,821 @@
+@@ -0,0 +1,862 @@
 +/*
 +Copyright 2025 Flant JSC
 +
@@ -430,17 +430,17 @@ index 000000000..4a6c39c28
 +// storage-foundation controller is responsible for marking such VRRs terminal.
 +func (e *VRRExecutor) reconcile(ctx context.Context, vrr *storagev1alpha1.VolumeRestoreRequest) error {
 +	// Minimal validation.
-+	if vrr.Spec.StorageClassName == "" {
++	if vrrStorageClassName(vrr) == "" {
 +		e.eventRecorder.Eventf(vrr, v1.EventTypeWarning, "VRRInvalidSpec",
-+			"StorageClassName is required but not specified")
-+		klog.Warningf("VRR %s/%s has empty StorageClassName, ignoring", vrr.Namespace, vrr.Name)
++			"pvcTemplate.spec.storageClassName is required but not specified")
++		klog.Warningf("VRR %s/%s has empty pvcTemplate storageClassName, ignoring", vrr.Namespace, vrr.Name)
 +		return nil
 +	}
 +
 +	// CRITICAL SECURITY INVARIANT: the driver filter MUST be the first executable
 +	// step after minimal validation. In multi-CSI clusters this prevents this
 +	// provisioner from acting on PVCs/PVs belonging to other CSI drivers.
-+	sc, err := e.scLister.Get(vrr.Spec.StorageClassName)
++	sc, err := e.scLister.Get(vrrStorageClassName(vrr))
 +	if err != nil {
 +		if apierrors.IsNotFound(err) {
 +			// Not our StorageClass (or not present yet): ignore silently.
@@ -463,21 +463,21 @@ index 000000000..4a6c39c28
 +	// there is no implicit default. A wrong/empty mode silently breaks Block volumes,
 +	// so reject it as a permanent invalid spec (event-only; status is the controller's).
 +	// Validated only after the driver filter so foreign-driver VRRs stay untouched.
-+	switch vrr.Spec.VolumeMode {
++	switch vrrVolumeMode(vrr) {
 +	case v1.PersistentVolumeBlock, v1.PersistentVolumeFilesystem:
 +	default:
 +		e.eventRecorder.Eventf(vrr, v1.EventTypeWarning, "VRRInvalidSpec",
-+			"VolumeMode is required and must be Block or Filesystem, got %q", vrr.Spec.VolumeMode)
-+		klog.Warningf("VRR %s/%s has invalid VolumeMode %q, ignoring", vrr.Namespace, vrr.Name, vrr.Spec.VolumeMode)
++			"pvcTemplate.spec.volumeMode is required and must be Block or Filesystem, got %q", vrrVolumeMode(vrr))
++		klog.Warningf("VRR %s/%s has invalid pvcTemplate volumeMode %q, ignoring", vrr.Namespace, vrr.Name, vrrVolumeMode(vrr))
 +		return nil
 +	}
 +
 +	// AccessModes are validated here so an invalid spec fails closed (event-only,
 +	// return nil) symmetrically with VolumeMode, instead of looping forever in the
 +	// retryable capability-conversion error path. Status remains the controller's.
-+	if err := validateVRRAccessModes(vrr.Spec.AccessModes); err != nil {
++	if err := validateVRRAccessModes(convertAccessModes(vrr.Spec.PvcTemplate.AccessModes)); err != nil {
 +		e.eventRecorder.Eventf(vrr, v1.EventTypeWarning, "VRRInvalidSpec", "Invalid accessModes: %v", err)
-+		klog.Warningf("VRR %s/%s has invalid accessModes %v: %v, ignoring", vrr.Namespace, vrr.Name, vrr.Spec.AccessModes, err)
++		klog.Warningf("VRR %s/%s has invalid accessModes %v: %v, ignoring", vrr.Namespace, vrr.Name, vrr.Spec.PvcTemplate.AccessModes, err)
 +		return nil
 +	}
 +
@@ -488,7 +488,7 @@ index 000000000..4a6c39c28
 +	}
 +
 +	// Idempotency / conflict detection on the target PVC.
-+	existingPVC, err := e.kubeClient.CoreV1().PersistentVolumeClaims(vrr.Spec.TargetNamespace).Get(ctx, vrr.Spec.TargetPVCName, metav1.GetOptions{})
++	existingPVC, err := e.kubeClient.CoreV1().PersistentVolumeClaims(vrrTargetNamespace(vrr)).Get(ctx, vrrTargetPVCName(vrr), metav1.GetOptions{})
 +	switch {
 +	case err == nil:
 +		if existingPVC.Spec.VolumeName != "" && existingPVC.Spec.VolumeName != pvName {
@@ -496,7 +496,7 @@ index 000000000..4a6c39c28
 +			// conflict with another owner. Report and let the controller decide.
 +			e.eventRecorder.Eventf(vrr, v1.EventTypeWarning, "VRRTargetPVCConflict",
 +				"Target PVC %s/%s is bound to volume %q, expected %q",
-+				vrr.Spec.TargetNamespace, vrr.Spec.TargetPVCName, existingPVC.Spec.VolumeName, pvName)
++				vrrTargetNamespace(vrr), vrrTargetPVCName(vrr), existingPVC.Spec.VolumeName, pvName)
 +			klog.Warningf("VRR %s/%s: target PVC conflict (bound to %q, expected %q)",
 +				vrr.Namespace, vrr.Name, existingPVC.Spec.VolumeName, pvName)
 +			return nil
@@ -504,10 +504,10 @@ index 000000000..4a6c39c28
 +		// Target PVC already created by a previous run: executor is done. The
 +		// controller observes the PVC and finalizes the VRR status.
 +		klog.V(4).Infof("VRR %s/%s: target PVC %s/%s already exists, nothing to do",
-+			vrr.Namespace, vrr.Name, vrr.Spec.TargetNamespace, vrr.Spec.TargetPVCName)
++			vrr.Namespace, vrr.Name, vrrTargetNamespace(vrr), vrrTargetPVCName(vrr))
 +		return nil
 +	case !apierrors.IsNotFound(err):
-+		return fmt.Errorf("failed to check target PVC %s/%s: %w", vrr.Spec.TargetNamespace, vrr.Spec.TargetPVCName, err)
++		return fmt.Errorf("failed to check target PVC %s/%s: %w", vrrTargetNamespace(vrr), vrrTargetPVCName(vrr), err)
 +	}
 +
 +	switch vrr.Spec.SourceRef.Kind {
@@ -611,7 +611,7 @@ index 000000000..4a6c39c28
 +		return nil, fmt.Errorf("failed to convert AccessModes to CSI access mode: %w", err)
 +	}
 +
-+	switch vrr.Spec.VolumeMode {
++	switch vrrVolumeMode(vrr) {
 +	case v1.PersistentVolumeBlock:
 +		return []*csi.VolumeCapability{
 +			{
@@ -631,7 +631,7 @@ index 000000000..4a6c39c28
 +			},
 +		}, nil
 +	default:
-+		return nil, fmt.Errorf("unsupported volumeMode %q (must be Block or Filesystem)", vrr.Spec.VolumeMode)
++		return nil, fmt.Errorf("unsupported volumeMode %q (must be Block or Filesystem)", vrrVolumeMode(vrr))
 +	}
 +}
 +
@@ -644,12 +644,53 @@ index 000000000..4a6c39c28
 +	return e.defaultFSType
 +}
 +
-+// effectiveAccessModes returns the VRR-requested access modes, defaulting to
-+// ReadWriteOnce when none are specified. The returned slice is what is recorded on
-+// the PV/PVC verbatim (no lossy reverse-mapping from the single CSI access mode).
++// convertAccessModes maps storage-foundation pvcTemplate access modes to core v1 access modes. Both api
++// types are string aliases over the same Kubernetes values, so the conversion is value-preserving (an
++// unknown mode round-trips unchanged so validateVRRAccessModes can still reject it).
++func convertAccessModes(in []storagev1alpha1.PersistentVolumeAccessMode) []v1.PersistentVolumeAccessMode {
++	if len(in) == 0 {
++		return nil
++	}
++	out := make([]v1.PersistentVolumeAccessMode, 0, len(in))
++	for _, m := range in {
++		out = append(out, v1.PersistentVolumeAccessMode(string(m)))
++	}
++	return out
++}
++
++// vrrStorageClassName returns the target PVC StorageClass from spec.pvcTemplate (empty when unset).
++func vrrStorageClassName(vrr *storagev1alpha1.VolumeRestoreRequest) string {
++	if vrr.Spec.PvcTemplate.StorageClassName != nil {
++		return *vrr.Spec.PvcTemplate.StorageClassName
++	}
++	return ""
++}
++
++// vrrVolumeMode returns the target PVC volume mode from spec.pvcTemplate as a core v1 value (empty when
++// unset; both api types are string aliases over Block/Filesystem).
++func vrrVolumeMode(vrr *storagev1alpha1.VolumeRestoreRequest) v1.PersistentVolumeMode {
++	if vrr.Spec.PvcTemplate.VolumeMode != nil {
++		return v1.PersistentVolumeMode(string(*vrr.Spec.PvcTemplate.VolumeMode))
++	}
++	return ""
++}
++
++// vrrTargetPVCName and vrrTargetNamespace resolve the restore target PVC. Restore is never
++// cross-namespace, so the PVC is spec.pvcTemplate.metadata.name in the VRR's own namespace.
++func vrrTargetPVCName(vrr *storagev1alpha1.VolumeRestoreRequest) string {
++	return vrr.Spec.PvcTemplate.Name
++}
++
++func vrrTargetNamespace(vrr *storagev1alpha1.VolumeRestoreRequest) string {
++	return vrr.Namespace
++}
++
++// effectiveAccessModes returns the VRR-requested access modes (from spec.pvcTemplate), defaulting to
++// ReadWriteOnce when none are specified. The returned slice is what is recorded on the PV/PVC verbatim
++// (no lossy reverse-mapping from the single CSI access mode).
 +func effectiveAccessModes(vrr *storagev1alpha1.VolumeRestoreRequest) []v1.PersistentVolumeAccessMode {
-+	if len(vrr.Spec.AccessModes) > 0 {
-+		return vrr.Spec.AccessModes
++	if modes := convertAccessModes(vrr.Spec.PvcTemplate.AccessModes); len(modes) > 0 {
++		return modes
 +	}
 +	return []v1.PersistentVolumeAccessMode{v1.ReadWriteOnce}
 +}
@@ -812,11 +853,11 @@ index 000000000..4a6c39c28
 +//     the storage-foundation controller).
 +//   - AlreadyExists is treated as idempotent success.
 +func (e *VRRExecutor) createPVCFromVRR(ctx context.Context, vrr *storagev1alpha1.VolumeRestoreRequest, pv *v1.PersistentVolume) error {
-+	storageClassName := vrr.Spec.StorageClassName
++	storageClassName := vrrStorageClassName(vrr)
 +	pvc := &v1.PersistentVolumeClaim{
 +		ObjectMeta: metav1.ObjectMeta{
-+			Name:      vrr.Spec.TargetPVCName,
-+			Namespace: vrr.Spec.TargetNamespace,
++			Name:      vrrTargetPVCName(vrr),
++			Namespace: vrrTargetNamespace(vrr),
 +		},
 +		Spec: v1.PersistentVolumeClaimSpec{
 +			StorageClassName: &storageClassName,
@@ -842,16 +883,16 @@ index 000000000..4a6c39c28
 +		}
 +	}
 +
-+	if _, err := e.kubeClient.CoreV1().PersistentVolumeClaims(vrr.Spec.TargetNamespace).Create(ctx, pvc, metav1.CreateOptions{}); err != nil {
++	if _, err := e.kubeClient.CoreV1().PersistentVolumeClaims(vrrTargetNamespace(vrr)).Create(ctx, pvc, metav1.CreateOptions{}); err != nil {
 +		if apierrors.IsAlreadyExists(err) {
-+			klog.V(2).Infof("createPVCFromVRR: PVC %s/%s already exists, idempotent success", vrr.Spec.TargetNamespace, vrr.Spec.TargetPVCName)
++			klog.V(2).Infof("createPVCFromVRR: PVC %s/%s already exists, idempotent success", vrrTargetNamespace(vrr), vrrTargetPVCName(vrr))
 +			return nil
 +		}
-+		return fmt.Errorf("failed to create PVC %s/%s: %w", vrr.Spec.TargetNamespace, vrr.Spec.TargetPVCName, err)
++		return fmt.Errorf("failed to create PVC %s/%s: %w", vrrTargetNamespace(vrr), vrrTargetPVCName(vrr), err)
 +	}
 +
-+	klog.V(2).Infof("createPVCFromVRR: created PVC %s/%s for VRR %s/%s", vrr.Spec.TargetNamespace, vrr.Spec.TargetPVCName, vrr.Namespace, vrr.Name)
-+	e.eventRecorder.Eventf(vrr, v1.EventTypeNormal, "VRRPVCCreated", "Successfully created PVC %s/%s", vrr.Spec.TargetNamespace, vrr.Spec.TargetPVCName)
++	klog.V(2).Infof("createPVCFromVRR: created PVC %s/%s for VRR %s/%s", vrrTargetNamespace(vrr), vrrTargetPVCName(vrr), vrr.Namespace, vrr.Name)
++	e.eventRecorder.Eventf(vrr, v1.EventTypeNormal, "VRRPVCCreated", "Successfully created PVC %s/%s", vrrTargetNamespace(vrr), vrrTargetPVCName(vrr))
 +	return nil
 +}
 +
@@ -1029,7 +1070,7 @@ new file mode 100644
 index 000000000..794ddee41
 --- /dev/null
 +++ b/pkg/controller/vrr_handler_test.go
-@@ -0,0 +1,1073 @@
+@@ -0,0 +1,1084 @@
 +/*
 +Copyright 2025 Flant JSC
 +
@@ -1150,7 +1191,7 @@ index 000000000..794ddee41
 +	mockSCLister := NewMockStorageClassLister(ctrl)
 +
 +	vrr := createTestVRR("test-vrr", "test-ns", "VolumeSnapshotContent", "test-vsc")
-+	vrr.Spec.StorageClassName = ""
++	vrr.Spec.PvcTemplate.StorageClassName = nil
 +
 +	kubeClient := fakeclientset.NewSimpleClientset()
 +	eventRecorder := record.NewFakeRecorder(10)
@@ -1325,7 +1366,7 @@ index 000000000..794ddee41
 +	mockSCLister.storageClasses[vrrTestStorageClass] = ourStorageClass()
 +
 +	vrr := createTestVRR("test-vrr", "test-ns", "VolumeSnapshotContent", "test-vsc")
-+	vrr.Spec.VolumeMode = "" // required; executor must reject
++	vrr.Spec.PvcTemplate.VolumeMode = nil // required; executor must reject
 +
 +	kubeClient := fakeclientset.NewSimpleClientset()
 +	eventRecorder := record.NewFakeRecorder(10)
@@ -1352,8 +1393,9 @@ index 000000000..794ddee41
 +	mockSCLister.storageClasses[vrrTestStorageClass] = ourStorageClass()
 +
 +	vrr := createTestVRR("test-vrr", "test-ns", "VolumeSnapshotContent", "test-vsc")
-+	vrr.Spec.VolumeMode = v1.PersistentVolumeBlock
-+	vrr.Spec.AccessModes = []v1.PersistentVolumeAccessMode{v1.ReadWriteMany}
++	blockMode := storagev1alpha1.PersistentVolumeBlock
++	vrr.Spec.PvcTemplate.VolumeMode = &blockMode
++	vrr.Spec.PvcTemplate.AccessModes = []storagev1alpha1.PersistentVolumeAccessMode{storagev1alpha1.ReadWriteMany}
 +	vsc := readyVSC("test-vsc", vrrTestSnapshotHandle)
 +
 +	kubeClient := fakeclientset.NewSimpleClientset()
@@ -1689,9 +1731,9 @@ index 000000000..794ddee41
 +
 +	tests := []struct {
 +		name           string
-+		volumeMode     v1.PersistentVolumeMode
++		volumeMode     storagev1alpha1.PersistentVolumeMode
 +		fsType         string
-+		accessModes    []v1.PersistentVolumeAccessMode
++		accessModes    []storagev1alpha1.PersistentVolumeAccessMode
 +		sc             *storagev1.StorageClass
 +		wantBlock      bool
 +		wantFSType     string
@@ -1700,7 +1742,7 @@ index 000000000..794ddee41
 +	}{
 +		{
 +			name:           "filesystem: default RWO, fsType fallback, SC mount options",
-+			volumeMode:     v1.PersistentVolumeFilesystem,
++			volumeMode:     storagev1alpha1.PersistentVolumeFilesystem,
 +			sc:             scWithMount,
 +			wantBlock:      false,
 +			wantFSType:     vrrTestDefaultFSType,
@@ -1709,7 +1751,7 @@ index 000000000..794ddee41
 +		},
 +		{
 +			name:           "filesystem: explicit fsType, no SC mount options",
-+			volumeMode:     v1.PersistentVolumeFilesystem,
++			volumeMode:     storagev1alpha1.PersistentVolumeFilesystem,
 +			fsType:         "xfs",
 +			sc:             ourStorageClass(),
 +			wantBlock:      false,
@@ -1719,8 +1761,8 @@ index 000000000..794ddee41
 +		},
 +		{
 +			name:           "block: RWX maps to MULTI_NODE_MULTI_WRITER",
-+			volumeMode:     v1.PersistentVolumeBlock,
-+			accessModes:    []v1.PersistentVolumeAccessMode{v1.ReadWriteMany},
++			volumeMode:     storagev1alpha1.PersistentVolumeBlock,
++			accessModes:    []storagev1alpha1.PersistentVolumeAccessMode{storagev1alpha1.ReadWriteMany},
 +			sc:             ourStorageClass(),
 +			wantBlock:      true,
 +			wantAccessMode: csi.VolumeCapability_AccessMode_MULTI_NODE_MULTI_WRITER,
@@ -1731,9 +1773,10 @@ index 000000000..794ddee41
 +		t.Run(tt.name, func(t *testing.T) {
 +			e := newTestExecutor(&mockControllerClient{}, nil, nil, nil, nil)
 +			vrr := createTestVRR("test-vrr", "test-ns", "VolumeSnapshotContent", "test-vsc")
-+			vrr.Spec.VolumeMode = tt.volumeMode
++			vm := tt.volumeMode
++			vrr.Spec.PvcTemplate.VolumeMode = &vm
 +			vrr.Spec.FsType = tt.fsType
-+			vrr.Spec.AccessModes = tt.accessModes
++			vrr.Spec.PvcTemplate.AccessModes = tt.accessModes
 +
 +			caps, err := e.getVolumeCapabilitiesFromVRR(vrr, tt.sc)
 +			if err != nil {
@@ -1782,7 +1825,7 @@ index 000000000..794ddee41
 +	mockSCLister.storageClasses[vrrTestStorageClass] = ourStorageClass()
 +
 +	vrr := createTestVRR("test-vrr", "test-ns", "VolumeSnapshotContent", "test-vsc")
-+	vrr.Spec.AccessModes = []v1.PersistentVolumeAccessMode{"BogusMode"}
++	vrr.Spec.PvcTemplate.AccessModes = []storagev1alpha1.PersistentVolumeAccessMode{"BogusMode"}
 +
 +	kubeClient := fakeclientset.NewSimpleClientset()
 +	eventRecorder := record.NewFakeRecorder(10)
@@ -1983,6 +2026,10 @@ index 000000000..794ddee41
 +}
 +
 +func createTestVRR(name, namespace, sourceKind, sourceName string) *storagev1alpha1.VolumeRestoreRequest {
++	scName := vrrTestStorageClass
++	fsMode := storagev1alpha1.PersistentVolumeFilesystem
++	// Restore is never cross-namespace: the target PVC (pvcTemplate.metadata.name) lives in the VRR
++	// namespace, so the callers pass namespace == vrrTestTargetNamespace.
 +	return &storagev1alpha1.VolumeRestoreRequest{
 +		ObjectMeta: metav1.ObjectMeta{
 +			Name:      name,
@@ -1990,11 +2037,16 @@ index 000000000..794ddee41
 +			UID:       types.UID("test-uid-" + name),
 +		},
 +		Spec: storagev1alpha1.VolumeRestoreRequestSpec{
-+			SourceRef:        storagev1alpha1.ObjectReference{Kind: sourceKind, Name: sourceName},
-+			TargetNamespace:  vrrTestTargetNamespace,
-+			TargetPVCName:    vrrTestTargetPVCName,
-+			StorageClassName: vrrTestStorageClass,
-+			VolumeMode:       v1.PersistentVolumeFilesystem,
++			SourceRef: storagev1alpha1.ObjectReference{Kind: sourceKind, Name: sourceName},
++			PvcTemplate: storagev1alpha1.PersistentVolumeClaimTemplateSpec{
++				PersistentVolumeClaimTemplateMetadata: storagev1alpha1.PersistentVolumeClaimTemplateMetadata{
++					Name: vrrTestTargetPVCName,
++				},
++				PersistentVolumeClaimSpec: storagev1alpha1.PersistentVolumeClaimSpec{
++					StorageClassName: &scName,
++					VolumeMode:       &fsMode,
++				},
++			},
 +		},
 +	}
 +}
