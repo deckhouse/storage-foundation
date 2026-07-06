@@ -25,11 +25,15 @@ import flow. Must keep applying to the build branch `d8-63742164-vsc-only`.
   marker used by every state-snapshotter snapshot kind.
 - Adds `status.boundSnapshotContentName` (points at the cluster-scoped
   state-snapshotter `SnapshotContent`, alongside legacy
-  `boundVolumeSnapshotContentName`) plus `status.storageClassName`,
-  `status.size` and `status.volumeMode` — mirrored volume metadata for d8
-  export/consumption. Forking the Go types + deepcopy is enough:
-  `updateSnapshotStatus` does read -> `DeepCopy()` -> `UpdateStatus`, so the
-  fields are preserved without controller logic changes.
+  `boundVolumeSnapshotContentName`) plus `status.data` — a self-contained data
+  binding (`source` + `artifact` + volume metadata: `volumeMode` / `fsType` /
+  `accessModes` / `storageClassName` / `size`) whose JSON wire shape is
+  byte-identical to the state-snapshotter `SnapshotContent.status.data` and to
+  the domain data leaves, so d8 resolves the captured-volume descriptor from the
+  namespaced `VolumeSnapshot` alone (no cluster-scoped `SnapshotContent` read).
+  Forking the Go types + deepcopy is enough: `updateSnapshotStatus` does
+  read -> `DeepCopy()` -> `UpdateStatus`, so the field is preserved without
+  controller logic changes.
 - Behavioral skip: `syncSnapshot` and `syncSnapshotByKey` (before snapshot-class
   resolution) skip any `VolumeSnapshot` whose `spec.source.import` is set
   — those objects are owned/bound by the state-snapshotter common controller.

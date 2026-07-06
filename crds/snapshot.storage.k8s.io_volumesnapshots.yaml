@@ -193,6 +193,71 @@ spec:
                   If not specified, the creation time of the snapshot is unknown.
                 format: date-time
                 type: string
+              data:
+                description: |-
+                  data is the self-contained data binding (source + artifact + volume metadata)
+                  mirrored from the backing state-snapshotter SnapshotContent.status.data, so d8
+                  resolves the captured-volume descriptor from this namespaced VolumeSnapshot
+                  alone. Written by the state-snapshotter common controller. Deckhouse extension.
+                properties:
+                  accessModes:
+                    description: Source PVC access modes (e.g. ReadWriteOnce).
+                    items:
+                      type: string
+                    type: array
+                  artifact:
+                    description: Durable data artifact (a VolumeSnapshotContent).
+                    properties:
+                      apiVersion:
+                        type: string
+                      kind:
+                        type: string
+                      name:
+                        type: string
+                      uid:
+                        type: string
+                    required:
+                    - apiVersion
+                    - kind
+                    - name
+                    type: object
+                  fsType:
+                    description: Source filesystem type (Filesystem volumes only).
+                    type: string
+                  size:
+                    description: Real allocated size of the captured volume (e.g. "10Gi").
+                    type: string
+                  source:
+                    description: Captured PersistentVolumeClaim source (uid is the volume identity).
+                    properties:
+                      apiVersion:
+                        type: string
+                      kind:
+                        type: string
+                      name:
+                        type: string
+                      namespace:
+                        type: string
+                      uid:
+                        type: string
+                    required:
+                    - apiVersion
+                    - kind
+                    - name
+                    type: object
+                  storageClassName:
+                    description: Source StorageClass of the captured volume.
+                    type: string
+                  volumeMode:
+                    description: Source volume mode (Block or Filesystem).
+                    enum:
+                    - Block
+                    - Filesystem
+                    type: string
+                required:
+                - artifact
+                - source
+                type: object
               error:
                 description: |-
                   Last observed error during snapshot creation, if any.
@@ -240,30 +305,9 @@ spec:
                   If not specified, the size is unknown.
                 pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
                 x-kubernetes-int-or-string: true
-              size:
-                description: |-
-                  size mirrors the real volume size (e.g. "10Gi"). Written by the state-snapshotter
-                  common controller (from DataImport.spec.size on import, or the bound content on
-                  capture). Deckhouse extension.
-                type: string
-              storageClassName:
-                description: |-
-                  storageClassName mirrors the source volume StorageClass for d8 export/consumption.
-                  For import VolumeSnapshots it is taken from DataImport.spec.storageClassName; for
-                  capture it mirrors the bound content's storage class. Written by the
-                  state-snapshotter common controller. Deckhouse extension.
-                type: string
               volumeGroupSnapshotName:
                 description: |-
                   Name of the VolumeGroupSnapshot of which this VolumeSnapshot is a part.
-                type: string
-              volumeMode:
-                description: |-
-                  volumeMode mirrors the source volume mode (Filesystem or Block). Written by the
-                  state-snapshotter common controller. Deckhouse extension.
-                enum:
-                - Block
-                - Filesystem
                 type: string
             type: object
         required:
@@ -417,6 +461,71 @@ spec:
                   If not specified, the creation time of the snapshot is unknown.
                 format: date-time
                 type: string
+              data:
+                description: |-
+                  data is the self-contained data binding (source + artifact + volume metadata)
+                  mirrored from the backing state-snapshotter SnapshotContent.status.data, so d8
+                  resolves the captured-volume descriptor from this namespaced VolumeSnapshot
+                  alone. Written by the state-snapshotter common controller. Deckhouse extension.
+                properties:
+                  accessModes:
+                    description: Source PVC access modes (e.g. ReadWriteOnce).
+                    items:
+                      type: string
+                    type: array
+                  artifact:
+                    description: Durable data artifact (a VolumeSnapshotContent).
+                    properties:
+                      apiVersion:
+                        type: string
+                      kind:
+                        type: string
+                      name:
+                        type: string
+                      uid:
+                        type: string
+                    required:
+                    - apiVersion
+                    - kind
+                    - name
+                    type: object
+                  fsType:
+                    description: Source filesystem type (Filesystem volumes only).
+                    type: string
+                  size:
+                    description: Real allocated size of the captured volume (e.g. "10Gi").
+                    type: string
+                  source:
+                    description: Captured PersistentVolumeClaim source (uid is the volume identity).
+                    properties:
+                      apiVersion:
+                        type: string
+                      kind:
+                        type: string
+                      name:
+                        type: string
+                      namespace:
+                        type: string
+                      uid:
+                        type: string
+                    required:
+                    - apiVersion
+                    - kind
+                    - name
+                    type: object
+                  storageClassName:
+                    description: Source StorageClass of the captured volume.
+                    type: string
+                  volumeMode:
+                    description: Source volume mode (Block or Filesystem).
+                    enum:
+                    - Block
+                    - Filesystem
+                    type: string
+                required:
+                - artifact
+                - source
+                type: object
               error:
                 description: |-
                   Last observed error during snapshot creation, if any.
@@ -464,30 +573,9 @@ spec:
                   If not specified, the size is unknown.
                 pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
                 x-kubernetes-int-or-string: true
-              size:
-                description: |-
-                  size mirrors the real volume size (e.g. "10Gi"). Written by the state-snapshotter
-                  common controller (from DataImport.spec.size on import, or the bound content on
-                  capture). Deckhouse extension.
-                type: string
-              storageClassName:
-                description: |-
-                  storageClassName mirrors the source volume StorageClass for d8 export/consumption.
-                  For import VolumeSnapshots it is taken from DataImport.spec.storageClassName; for
-                  capture it mirrors the bound content's storage class. Written by the
-                  state-snapshotter common controller. Deckhouse extension.
-                type: string
               volumeGroupSnapshotName:
                 description: |-
                   Name of the VolumeGroupSnapshot of which this VolumeSnapshot is a part.
-                type: string
-              volumeMode:
-                description: |-
-                  volumeMode mirrors the source volume mode (Filesystem or Block). Written by the
-                  state-snapshotter common controller. Deckhouse extension.
-                enum:
-                - Block
-                - Filesystem
                 type: string
             type: object
         required:

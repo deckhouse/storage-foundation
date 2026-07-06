@@ -25,7 +25,7 @@ index 36f60dc..e865972 100644
  type VolumeSnapshotSource struct {
  	// persistentVolumeClaimName specifies the name of the PersistentVolumeClaim
  	// object representing the volume from which a snapshot should be created.
-@@ -122,8 +128,23 @@ type VolumeSnapshotSource struct {
+@@ -122,8 +128,72 @@ type VolumeSnapshotSource struct {
  	// +optional
  	// +kubebuilder:validation:XValidation:rule="self == oldSelf",message="volumeSnapshotContentName is immutable"
  	VolumeSnapshotContentName *string `json:"volumeSnapshotContentName,omitempty" protobuf:"bytes,2,opt,name=volumeSnapshotContentName"`
@@ -46,10 +46,59 @@ index 36f60dc..e865972 100644
 +// Deckhouse fork extension.
 +type VolumeSnapshotImportSource struct{}
 +
++// VolumeSnapshotDataBinding is the self-contained data binding mirrored onto an import VolumeSnapshot's
++// status.data by the state-snapshotter common controller. Its JSON wire shape is byte-identical to the
++// state-snapshotter SnapshotContent.status.data (source + artifact + volume metadata), so d8 reads the
++// captured-volume descriptor from the namespaced VolumeSnapshot without the cluster-scoped SnapshotContent.
++// Deckhouse fork extension.
++type VolumeSnapshotDataBinding struct {
++	// source identifies the captured PersistentVolumeClaim backing this node's data (uid is the identity).
++	Source VolumeSnapshotDataSource `json:"source" protobuf:"bytes,1,opt,name=source"`
++	// artifact references the cluster-scoped durable data artifact (a VolumeSnapshotContent).
++	Artifact VolumeSnapshotDataArtifact `json:"artifact" protobuf:"bytes,2,opt,name=artifact"`
++	// volumeMode records the source volume mode (Block or Filesystem).
++	// +optional
++	VolumeMode string `json:"volumeMode,omitempty" protobuf:"bytes,3,opt,name=volumeMode"`
++	// fsType records the source filesystem type (Filesystem volumes only).
++	// +optional
++	FsType string `json:"fsType,omitempty" protobuf:"bytes,4,opt,name=fsType"`
++	// accessModes records the source PVC access modes (e.g. ReadWriteOnce).
++	// +optional
++	AccessModes []string `json:"accessModes,omitempty" protobuf:"bytes,5,rep,name=accessModes"`
++	// storageClassName records the source StorageClass of the captured volume.
++	// +optional
++	StorageClassName string `json:"storageClassName,omitempty" protobuf:"bytes,6,opt,name=storageClassName"`
++	// size records the real allocated size of the captured volume (e.g. "10Gi").
++	// +optional
++	Size string `json:"size,omitempty" protobuf:"bytes,7,opt,name=size"`
++}
++
++// VolumeSnapshotDataSource identifies the captured PVC source of a VolumeSnapshotDataBinding.
++// Deckhouse fork extension.
++type VolumeSnapshotDataSource struct {
++	APIVersion string `json:"apiVersion" protobuf:"bytes,1,opt,name=apiVersion"`
++	Kind       string `json:"kind" protobuf:"bytes,2,opt,name=kind"`
++	Name       string `json:"name" protobuf:"bytes,3,opt,name=name"`
++	// +optional
++	Namespace string `json:"namespace,omitempty" protobuf:"bytes,4,opt,name=namespace"`
++	// +optional
++	UID string `json:"uid,omitempty" protobuf:"bytes,5,opt,name=uid"`
++}
++
++// VolumeSnapshotDataArtifact points to the durable data artifact of a VolumeSnapshotDataBinding
++// (for example a VolumeSnapshotContent). Deckhouse fork extension.
++type VolumeSnapshotDataArtifact struct {
++	APIVersion string `json:"apiVersion" protobuf:"bytes,1,opt,name=apiVersion"`
++	Kind       string `json:"kind" protobuf:"bytes,2,opt,name=kind"`
++	Name       string `json:"name" protobuf:"bytes,3,opt,name=name"`
++	// +optional
++	UID string `json:"uid,omitempty" protobuf:"bytes,4,opt,name=uid"`
++}
++
  // VolumeSnapshotStatus is the status of the VolumeSnapshot
  // Note that CreationTime, RestoreSize, ReadyToUse, and Error are in both
  // VolumeSnapshotStatus and VolumeSnapshotContentStatus. Fields in VolumeSnapshotStatus
-@@ -194,6 +215,33 @@ type VolumeSnapshotStatus struct {
+@@ -194,6 +264,22 @@ type VolumeSnapshotStatus struct {
  	// VolumeSnapshot is a part of.
  	// +optional
  	VolumeGroupSnapshotName *string `json:"volumeGroupSnapshotName,omitempty" protobuf:"bytes,6,opt,name=volumeGroupSnapshotName"`
@@ -63,23 +112,12 @@ index 36f60dc..e865972 100644
 +	// +optional
 +	BoundSnapshotContentName *string `json:"boundSnapshotContentName,omitempty" protobuf:"bytes,7,opt,name=boundSnapshotContentName"`
 +
-+	// storageClassName mirrors the source volume StorageClass for d8 export/consumption. For import
-+	// VolumeSnapshots it is taken from DataImport.spec.storageClassName; for capture it mirrors the
-+	// bound content's storage class. Written by the state-snapshotter common controller.
-+	// Deckhouse fork extension.
++	// data is the self-contained data binding (source + artifact + volume metadata) mirrored from the
++	// backing state-snapshotter SnapshotContent.status.data. Its wire shape is byte-identical to the
++	// domain data leaves, so d8 resolves the captured-volume descriptor from this namespaced VolumeSnapshot
++	// alone. Written by the state-snapshotter common controller (import flow). Deckhouse fork extension.
 +	// +optional
-+	StorageClassName *string `json:"storageClassName,omitempty" protobuf:"bytes,8,opt,name=storageClassName"`
-+
-+	// size mirrors the real volume size (e.g. "10Gi"). Written by the state-snapshotter common
-+	// controller (from DataImport.spec.size on import, or the bound content on capture).
-+	// Deckhouse fork extension.
-+	// +optional
-+	Size *string `json:"size,omitempty" protobuf:"bytes,9,opt,name=size"`
-+
-+	// volumeMode mirrors the source volume mode (Filesystem or Block). Written by the
-+	// state-snapshotter common controller. Deckhouse fork extension.
-+	// +optional
-+	VolumeMode *string `json:"volumeMode,omitempty" protobuf:"bytes,10,opt,name=volumeMode"`
++	Data *VolumeSnapshotDataBinding `json:"data,omitempty" protobuf:"bytes,8,opt,name=data"`
  }
  
  // +genclient
@@ -99,7 +137,7 @@ index a590aef..82aeaa3 100644
  	return
  }
  
-@@ -427,6 +432,26 @@ func (in *VolumeSnapshotStatus) DeepCopyInto(out *VolumeSnapshotStatus) {
+@@ -427,6 +432,36 @@ func (in *VolumeSnapshotStatus) DeepCopyInto(out *VolumeSnapshotStatus) {
  		*out = new(string)
  		**out = **in
  	}
@@ -108,23 +146,33 @@ index a590aef..82aeaa3 100644
 +		*out = new(string)
 +		**out = **in
 +	}
-+	if in.StorageClassName != nil {
-+		in, out := &in.StorageClassName, &out.StorageClassName
-+		*out = new(string)
-+		**out = **in
-+	}
-+	if in.Size != nil {
-+		in, out := &in.Size, &out.Size
-+		*out = new(string)
-+		**out = **in
-+	}
-+	if in.VolumeMode != nil {
-+		in, out := &in.VolumeMode, &out.VolumeMode
-+		*out = new(string)
-+		**out = **in
++	if in.Data != nil {
++		in, out := &in.Data, &out.Data
++		*out = new(VolumeSnapshotDataBinding)
++		(*in).DeepCopyInto(*out)
 +	}
  	return
  }
++
++// DeepCopyInto is a deepcopy function, copying the receiver, writing into out. in must be non-nil.
++func (in *VolumeSnapshotDataBinding) DeepCopyInto(out *VolumeSnapshotDataBinding) {
++	*out = *in
++	if in.AccessModes != nil {
++		in, out := &in.AccessModes, &out.AccessModes
++		*out = make([]string, len(*in))
++		copy(*out, *in)
++	}
++}
++
++// DeepCopy is a deepcopy function, copying the receiver, creating a new VolumeSnapshotDataBinding.
++func (in *VolumeSnapshotDataBinding) DeepCopy() *VolumeSnapshotDataBinding {
++	if in == nil {
++		return nil
++	}
++	out := new(VolumeSnapshotDataBinding)
++	in.DeepCopyInto(out)
++	return out
++}
  
 diff --git a/pkg/common-controller/snapshot_controller.go b/pkg/common-controller/snapshot_controller.go
 index 8c1ba60..510f39f 100644
@@ -191,7 +239,7 @@ index 36f60dc..e865972 100644
  type VolumeSnapshotSource struct {
  	// persistentVolumeClaimName specifies the name of the PersistentVolumeClaim
  	// object representing the volume from which a snapshot should be created.
-@@ -122,8 +128,23 @@ type VolumeSnapshotSource struct {
+@@ -122,8 +128,72 @@ type VolumeSnapshotSource struct {
  	// +optional
  	// +kubebuilder:validation:XValidation:rule="self == oldSelf",message="volumeSnapshotContentName is immutable"
  	VolumeSnapshotContentName *string `json:"volumeSnapshotContentName,omitempty" protobuf:"bytes,2,opt,name=volumeSnapshotContentName"`
@@ -212,10 +260,59 @@ index 36f60dc..e865972 100644
 +// Deckhouse fork extension.
 +type VolumeSnapshotImportSource struct{}
 +
++// VolumeSnapshotDataBinding is the self-contained data binding mirrored onto an import VolumeSnapshot's
++// status.data by the state-snapshotter common controller. Its JSON wire shape is byte-identical to the
++// state-snapshotter SnapshotContent.status.data (source + artifact + volume metadata), so d8 reads the
++// captured-volume descriptor from the namespaced VolumeSnapshot without the cluster-scoped SnapshotContent.
++// Deckhouse fork extension.
++type VolumeSnapshotDataBinding struct {
++	// source identifies the captured PersistentVolumeClaim backing this node's data (uid is the identity).
++	Source VolumeSnapshotDataSource `json:"source" protobuf:"bytes,1,opt,name=source"`
++	// artifact references the cluster-scoped durable data artifact (a VolumeSnapshotContent).
++	Artifact VolumeSnapshotDataArtifact `json:"artifact" protobuf:"bytes,2,opt,name=artifact"`
++	// volumeMode records the source volume mode (Block or Filesystem).
++	// +optional
++	VolumeMode string `json:"volumeMode,omitempty" protobuf:"bytes,3,opt,name=volumeMode"`
++	// fsType records the source filesystem type (Filesystem volumes only).
++	// +optional
++	FsType string `json:"fsType,omitempty" protobuf:"bytes,4,opt,name=fsType"`
++	// accessModes records the source PVC access modes (e.g. ReadWriteOnce).
++	// +optional
++	AccessModes []string `json:"accessModes,omitempty" protobuf:"bytes,5,rep,name=accessModes"`
++	// storageClassName records the source StorageClass of the captured volume.
++	// +optional
++	StorageClassName string `json:"storageClassName,omitempty" protobuf:"bytes,6,opt,name=storageClassName"`
++	// size records the real allocated size of the captured volume (e.g. "10Gi").
++	// +optional
++	Size string `json:"size,omitempty" protobuf:"bytes,7,opt,name=size"`
++}
++
++// VolumeSnapshotDataSource identifies the captured PVC source of a VolumeSnapshotDataBinding.
++// Deckhouse fork extension.
++type VolumeSnapshotDataSource struct {
++	APIVersion string `json:"apiVersion" protobuf:"bytes,1,opt,name=apiVersion"`
++	Kind       string `json:"kind" protobuf:"bytes,2,opt,name=kind"`
++	Name       string `json:"name" protobuf:"bytes,3,opt,name=name"`
++	// +optional
++	Namespace string `json:"namespace,omitempty" protobuf:"bytes,4,opt,name=namespace"`
++	// +optional
++	UID string `json:"uid,omitempty" protobuf:"bytes,5,opt,name=uid"`
++}
++
++// VolumeSnapshotDataArtifact points to the durable data artifact of a VolumeSnapshotDataBinding
++// (for example a VolumeSnapshotContent). Deckhouse fork extension.
++type VolumeSnapshotDataArtifact struct {
++	APIVersion string `json:"apiVersion" protobuf:"bytes,1,opt,name=apiVersion"`
++	Kind       string `json:"kind" protobuf:"bytes,2,opt,name=kind"`
++	Name       string `json:"name" protobuf:"bytes,3,opt,name=name"`
++	// +optional
++	UID string `json:"uid,omitempty" protobuf:"bytes,4,opt,name=uid"`
++}
++
  // VolumeSnapshotStatus is the status of the VolumeSnapshot
  // Note that CreationTime, RestoreSize, ReadyToUse, and Error are in both
  // VolumeSnapshotStatus and VolumeSnapshotContentStatus. Fields in VolumeSnapshotStatus
-@@ -194,6 +215,33 @@ type VolumeSnapshotStatus struct {
+@@ -194,6 +264,22 @@ type VolumeSnapshotStatus struct {
  	// VolumeSnapshot is a part of.
  	// +optional
  	VolumeGroupSnapshotName *string `json:"volumeGroupSnapshotName,omitempty" protobuf:"bytes,6,opt,name=volumeGroupSnapshotName"`
@@ -229,23 +326,12 @@ index 36f60dc..e865972 100644
 +	// +optional
 +	BoundSnapshotContentName *string `json:"boundSnapshotContentName,omitempty" protobuf:"bytes,7,opt,name=boundSnapshotContentName"`
 +
-+	// storageClassName mirrors the source volume StorageClass for d8 export/consumption. For import
-+	// VolumeSnapshots it is taken from DataImport.spec.storageClassName; for capture it mirrors the
-+	// bound content's storage class. Written by the state-snapshotter common controller.
-+	// Deckhouse fork extension.
++	// data is the self-contained data binding (source + artifact + volume metadata) mirrored from the
++	// backing state-snapshotter SnapshotContent.status.data. Its wire shape is byte-identical to the
++	// domain data leaves, so d8 resolves the captured-volume descriptor from this namespaced VolumeSnapshot
++	// alone. Written by the state-snapshotter common controller (import flow). Deckhouse fork extension.
 +	// +optional
-+	StorageClassName *string `json:"storageClassName,omitempty" protobuf:"bytes,8,opt,name=storageClassName"`
-+
-+	// size mirrors the real volume size (e.g. "10Gi"). Written by the state-snapshotter common
-+	// controller (from DataImport.spec.size on import, or the bound content on capture).
-+	// Deckhouse fork extension.
-+	// +optional
-+	Size *string `json:"size,omitempty" protobuf:"bytes,9,opt,name=size"`
-+
-+	// volumeMode mirrors the source volume mode (Filesystem or Block). Written by the
-+	// state-snapshotter common controller. Deckhouse fork extension.
-+	// +optional
-+	VolumeMode *string `json:"volumeMode,omitempty" protobuf:"bytes,10,opt,name=volumeMode"`
++	Data *VolumeSnapshotDataBinding `json:"data,omitempty" protobuf:"bytes,8,opt,name=data"`
  }
  
  // +genclient
@@ -265,7 +351,7 @@ index a590aef..82aeaa3 100644
  	return
  }
  
-@@ -427,6 +432,26 @@ func (in *VolumeSnapshotStatus) DeepCopyInto(out *VolumeSnapshotStatus) {
+@@ -427,6 +432,36 @@ func (in *VolumeSnapshotStatus) DeepCopyInto(out *VolumeSnapshotStatus) {
  		*out = new(string)
  		**out = **in
  	}
@@ -274,21 +360,31 @@ index a590aef..82aeaa3 100644
 +		*out = new(string)
 +		**out = **in
 +	}
-+	if in.StorageClassName != nil {
-+		in, out := &in.StorageClassName, &out.StorageClassName
-+		*out = new(string)
-+		**out = **in
-+	}
-+	if in.Size != nil {
-+		in, out := &in.Size, &out.Size
-+		*out = new(string)
-+		**out = **in
-+	}
-+	if in.VolumeMode != nil {
-+		in, out := &in.VolumeMode, &out.VolumeMode
-+		*out = new(string)
-+		**out = **in
++	if in.Data != nil {
++		in, out := &in.Data, &out.Data
++		*out = new(VolumeSnapshotDataBinding)
++		(*in).DeepCopyInto(*out)
 +	}
  	return
  }
++
++// DeepCopyInto is a deepcopy function, copying the receiver, writing into out. in must be non-nil.
++func (in *VolumeSnapshotDataBinding) DeepCopyInto(out *VolumeSnapshotDataBinding) {
++	*out = *in
++	if in.AccessModes != nil {
++		in, out := &in.AccessModes, &out.AccessModes
++		*out = make([]string, len(*in))
++		copy(*out, *in)
++	}
++}
++
++// DeepCopy is a deepcopy function, copying the receiver, creating a new VolumeSnapshotDataBinding.
++func (in *VolumeSnapshotDataBinding) DeepCopy() *VolumeSnapshotDataBinding {
++	if in == nil {
++		return nil
++	}
++	out := new(VolumeSnapshotDataBinding)
++	in.DeepCopyInto(out)
++	return out
++}
  
