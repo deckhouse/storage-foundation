@@ -77,10 +77,11 @@ var volumeCaptureRequestGVR = schema.GroupVersionResource{
 // (no/invalid VolumeSnapshotClass) it fails closed: PersistentVolume/Detach import is intentionally not
 // supported here.
 func (r *DataImportReconciler) resolveSnapshotCaptureMode(ctx context.Context) (mode, expectedKind string, err error) {
-	scName := r.dataImport.Spec.StorageClassName
-	if scName == "" {
-		return "", "", fmt.Errorf("spec.storageClassName is required to select a VolumeSnapshotClass")
+	tmpl := r.dataImport.Spec.ScratchVolumeTemplate
+	if tmpl == nil || tmpl.StorageClassName == "" {
+		return "", "", fmt.Errorf("spec.scratchVolumeTemplate.storageClassName is required to select a VolumeSnapshotClass")
 	}
+	scName := tmpl.StorageClassName
 
 	sc := &storagev1.StorageClass{}
 	if err := r.Client.Get(ctx, types.NamespacedName{Name: scName}, sc); err != nil {

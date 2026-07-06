@@ -39,78 +39,107 @@ type DataImportList struct {
 	Items []DataImport `json:"items"`
 }
 
+// DataImportMode is the explicit discriminator that selects what a DataImport does with the imported
+// bytes. It replaces the former polymorphic targetRef.kind discrimination.
+// +kubebuilder:validation:Enum=PopulateVolume;ProduceArtifact
+type DataImportMode string
+
+const (
+	// DataImportModePopulateVolume imports bytes into a volume that is preserved afterwards. The bytes
+	// land either in a newly created PVC (pvcTemplate) or in an existing volume overwritten in place
+	// (volumeRef + force). No durable artifact is produced; the volume itself is the product.
+	DataImportModePopulateVolume DataImportMode = "PopulateVolume"
+	// DataImportModeProduceArtifact materializes the data leg of an already-existing snapshot node: bytes
+	// are staged into a transient scratch volume (scratchVolumeTemplate) and captured into a durable
+	// VolumeSnapshotContent. snapshotRef identifies the owning node for the state-snapshotter
+	// reverse-lookup; the DataImport controller itself does not read it.
+	DataImportModeProduceArtifact DataImportMode = "ProduceArtifact"
+)
+
+// DataImportSpec is the desired state of a DataImport. The suffix convention is authoritative:
+// ...Template is a spec for an object the import CREATES; ...Ref points at an object that already EXISTS.
+//
+// spec.mode is the explicit discriminator; the field sets valid on each mode are mutually exclusive and
+// enforced by CRD CEL (see crds/dataimports.yaml) with a controller-side fail-closed guard:
+//
+//   - ProduceArtifact: snapshotRef (Ref) + scratchVolumeTemplate (Template) are required;
+//     pvcTemplate/volumeRef/force are forbidden.
+//   - PopulateVolume: exactly one of {pvcTemplate (Template), volumeRef (Ref)}; force is allowed only
+//     together with volumeRef; snapshotRef/scratchVolumeTemplate are forbidden.
+//
 // +k8s:deepcopy-gen=true
 type DataImportSpec struct {
 	Ttl                  string `json:"ttl"`
 	Publish              bool   `json:"publish,omitempty"`
 	WaitForFirstConsumer bool   `json:"waitForFirstConsumer"`
-	// TargetRef is the polymorphic target of the import; its Kind selects the import mode:
-	//   - Mode A (snapshot leaf import): Kind is a snapshot leaf kind (e.g. "VolumeSnapshot"); Group+Name
-	//     identify the leaf and the root StorageClassName/Size/VolumeMode below describe the scratch PVC.
-	//   - Mode B (standalone PVC import): Kind == "PersistentVolumeClaim"; TargetRef.PvcTemplate fully
-	//     specifies the target PVC and the root volume parameters are unused.
-	TargetRef DataImportTargetRefSpec `json:"targetRef"`
-	// StorageClassName, Size and VolumeMode describe the scratch PVC the imported bytes are written into
-	// in Mode A (snapshot leaf import). They are provided directly in the spec (by d8, mirrored from the
-	// source xxxSnapshot.status) instead of being read from the leaf's captured PVC manifest — the
-	// snapshot is no longer downloaded on import. The selected StorageClass must be snapshot-capable (its
-	// driver has a VolumeSnapshotClass); the produced durable artifact is always a VolumeSnapshotContent.
-	// PersistentVolume/Detach import is not supported in core. Unused in Mode B (the target PVC is fully
-	// described by targetRef.pvcTemplate).
+
+	// Mode selects what the import does with the bytes. Defaults to PopulateVolume.
+	// +kubebuilder:default=PopulateVolume
 	// +optional
-	StorageClassName string `json:"storageClassName,omitempty"`
-	// Size is the requested scratch-PVC size in Mode A (a Kubernetes quantity, e.g. "10Gi"). Unused in
-	// Mode B.
+	Mode DataImportMode `json:"mode,omitempty"`
+
+	// SnapshotRef (ProduceArtifact) references the ALREADY-EXISTING xxxSnapshot node the produced durable
+	// artifact belongs to (apiVersion/kind/name; namespace implicit = the DataImport namespace). It is set
+	// by the external creator (d8/user/backup); the DataImport controller does not read it — it exists so
+	// the state-snapshotter reverse-lookup can match the leaf against spec.snapshotRef. Forbidden in
+	// PopulateVolume.
 	// +optional
-	Size string `json:"size,omitempty"`
-	// VolumeMode is the scratch-PVC volume mode (Block or Filesystem) in Mode A; defaults to Filesystem
-	// when empty. Unused in Mode B.
+	SnapshotRef *ObjectReference `json:"snapshotRef,omitempty"`
+	// ScratchVolumeTemplate (ProduceArtifact) describes the transient scratch volume the imported bytes are
+	// staged into before being captured into the durable VolumeSnapshotContent. The scratch volume is
+	// destroyed after capture. Its StorageClass must be snapshot-capable. Forbidden in PopulateVolume.
+	// +optional
+	ScratchVolumeTemplate *ScratchVolumeSpec `json:"scratchVolumeTemplate,omitempty"`
+
+	// PvcTemplate (PopulateVolume, create) fully specifies a PVC to create and populate; the PVC is
+	// preserved after the import. Mutually exclusive with volumeRef. Forbidden in ProduceArtifact.
+	// +optional
+	PvcTemplate *PersistentVolumeClaimTemplateSpec `json:"pvcTemplate,omitempty"`
+	// VolumeRef (PopulateVolume, overwrite) references an EXISTING volume (kind=PersistentVolumeClaim) to
+	// overwrite in place; force must be set to acknowledge the destructive overwrite. Mutually exclusive
+	// with pvcTemplate. Forbidden in ProduceArtifact.
+	// +optional
+	VolumeRef *ObjectReference `json:"volumeRef,omitempty"`
+	// Force acknowledges the destructive in-place overwrite of an existing volume; it is only valid
+	// together with volumeRef.
+	// +optional
+	Force bool `json:"force,omitempty"`
+}
+
+// EffectiveMode returns the import mode, defaulting an empty value to PopulateVolume (the CRD default) so
+// controller logic never has to special-case the unset field.
+func (s DataImportSpec) EffectiveMode() DataImportMode {
+	if s.Mode == "" {
+		return DataImportModePopulateVolume
+	}
+	return s.Mode
+}
+
+// ScratchVolumeSpec parameterizes the transient scratch volume used by a ProduceArtifact import. The bytes
+// are staged into a PVC shaped from these parameters and then captured into a durable
+// VolumeSnapshotContent; the scratch PVC is destroyed afterwards. StorageClassName and Size are required;
+// VolumeMode defaults to Filesystem when empty.
+// +k8s:deepcopy-gen=true
+type ScratchVolumeSpec struct {
+	// StorageClassName is the StorageClass of the scratch PVC. It must be snapshot-capable (its driver has
+	// a VolumeSnapshotClass); the produced durable artifact is always a VolumeSnapshotContent.
+	StorageClassName string `json:"storageClassName"`
+	// Size is the requested scratch-PVC size (a Kubernetes quantity, e.g. "10Gi").
+	Size string `json:"size"`
+	// VolumeMode is the scratch-PVC volume mode (Block or Filesystem); defaults to Filesystem when empty.
 	// +kubebuilder:validation:Enum=Block;Filesystem
 	// +optional
 	VolumeMode string `json:"volumeMode,omitempty"`
 }
 
-// DataImportTargetRefSpec is the polymorphic target reference of a DataImport. Its Kind selects the
-// import mode:
-//
-//   - Mode A (snapshot leaf import): Kind is the kind of a namespaced snapshot leaf CR (e.g.
-//     "VolumeSnapshot", "VirtualDiskSnapshot"). Group and Name identify the leaf; the namespace is
-//     implicit (the DataImport's own namespace). This ref exists so the state-snapshotter common
-//     controller can reverse-lookup the DataImport from the leaf (matching spec.targetRef); the
-//     DataImport controller itself does not read the leaf. The produced durable artifact is a
-//     VolumeSnapshotContent.
-//   - Mode B (standalone PVC import): Kind == "PersistentVolumeClaim". PvcTemplate fully specifies the
-//     target PVC the imported bytes are written into; Group/Name are unused. No durable artifact is
-//     produced and the PVC is preserved after the import.
-//
-// +k8s:deepcopy-gen=true
-type DataImportTargetRefSpec struct {
-	// Kind selects the import mode: "PersistentVolumeClaim" -> Mode B (standalone PVC import via
-	// pvcTemplate); any other kind is treated as a snapshot leaf kind -> Mode A.
-	// +kubebuilder:validation:MinLength=1
-	Kind string `json:"kind"`
-	// Group is the API group of the leaf snapshot resource in Mode A (e.g. "snapshot.storage.k8s.io",
-	// "virtualization.deckhouse.io"). The served version is resolved dynamically. Unused in Mode B.
-	// +optional
-	Group string `json:"group,omitempty"`
-	// Name is the leaf object name in Mode A. Unused in Mode B (the PVC name comes from
-	// pvcTemplate.metadata.name).
-	// +optional
-	Name string `json:"name,omitempty"`
-	// PvcTemplate fully specifies the target PVC in Mode B (Kind == "PersistentVolumeClaim"). The PVC is
-	// created from it and preserved after the import completes. Forbidden in Mode A.
-	// +optional
-	PvcTemplate *PersistentVolumeClaimTemplateSpec `json:"pvcTemplate,omitempty"`
-}
-
 // +k8s:deepcopy-gen=true
 type PersistentVolumeClaimTemplateSpec struct {
-	DataImportTargetRefMetaSpec `json:"metadata,omitempty"`
-	PersistentVolumeClaimSpec   `json:"spec,omitempty"`
+	PersistentVolumeClaimTemplateMetadata `json:"metadata,omitempty"`
+	PersistentVolumeClaimSpec             `json:"spec,omitempty"`
 }
 
 // +k8s:deepcopy-gen=true
-type DataImportTargetRefMetaSpec struct {
+type PersistentVolumeClaimTemplateMetadata struct {
 	Name        string            `json:"name,omitempty"`
 	Annotations map[string]string `json:"annotations,omitempty"`
 	Labels      map[string]string `json:"labels,omitempty"`

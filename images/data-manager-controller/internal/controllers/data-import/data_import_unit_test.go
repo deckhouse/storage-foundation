@@ -38,27 +38,30 @@ import (
 )
 
 func TestScratchVolumeParamsFromSpec(t *testing.T) {
-	params, err := scratchVolumeParamsFromSpec(dev1alpha1.DataImportSpec{
-		StorageClassName: "fast",
-		Size:             "10Gi",
-		VolumeMode:       "Block",
-	})
+	svt := func(sc, size, mode string) dev1alpha1.DataImportSpec {
+		return dev1alpha1.DataImportSpec{ScratchVolumeTemplate: &dev1alpha1.ScratchVolumeSpec{
+			StorageClassName: sc, Size: size, VolumeMode: mode,
+		}}
+	}
+
+	params, err := scratchVolumeParamsFromSpec(svt("fast", "10Gi", "Block"))
 	require.NoError(t, err)
 	assert.Equal(t, "fast", params.StorageClassName)
 	assert.Equal(t, "Block", params.VolumeMode)
 	assert.Equal(t, "10Gi", params.Size.String())
 
 	// volumeMode is optional.
-	params, err = scratchVolumeParamsFromSpec(dev1alpha1.DataImportSpec{StorageClassName: "fast", Size: "3Gi"})
+	params, err = scratchVolumeParamsFromSpec(svt("fast", "3Gi", ""))
 	require.NoError(t, err)
 	assert.Equal(t, "", params.VolumeMode)
 	assert.Equal(t, "3Gi", params.Size.String())
 
-	// storageClass and size are required, size must parse.
+	// the scratch template, its storageClass and its size are required, and size must parse.
 	errCases := map[string]dev1alpha1.DataImportSpec{
-		"no storageclass": {Size: "3Gi"},
-		"no size":         {StorageClassName: "fast"},
-		"bad size":        {StorageClassName: "fast", Size: "not-a-quantity"},
+		"no template":     {},
+		"no storageclass": svt("", "3Gi", ""),
+		"no size":         svt("fast", "", ""),
+		"bad size":        svt("fast", "not-a-quantity", ""),
 	}
 	for name, spec := range errCases {
 		t.Run(name, func(t *testing.T) {
@@ -107,13 +110,19 @@ func TestResolveSnapshotCaptureMode(t *testing.T) {
 		fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithRuntimeObjects(objs...).Build()
 		return &DataImportReconciler{Client: fakeClient}
 	}
+	specSC := func(name string) dev1alpha1.DataImportSpec {
+		return dev1alpha1.DataImportSpec{
+			Mode:                  dev1alpha1.DataImportModeProduceArtifact,
+			ScratchVolumeTemplate: &dev1alpha1.ScratchVolumeSpec{StorageClassName: name, Size: "1Gi"},
+		}
+	}
 
 	t.Run("snapshot capable", func(t *testing.T) {
 		r := build(
 			sc("fast", "csi.example.com", map[string]string{storageClassVSCAnnotation: "fast-vsc"}),
 			vsc("fast-vsc", "csi.example.com"),
 		)
-		r.dataImport = &dev1alpha1.DataImport{Spec: dev1alpha1.DataImportSpec{StorageClassName: "fast"}}
+		r.dataImport = &dev1alpha1.DataImport{Spec: specSC("fast")}
 		mode, kind, err := r.resolveSnapshotCaptureMode(context.Background())
 		require.NoError(t, err)
 		assert.Equal(t, vcrModeSnapshot, mode)
@@ -122,21 +131,21 @@ func TestResolveSnapshotCaptureMode(t *testing.T) {
 
 	t.Run("storage class not found fails closed", func(t *testing.T) {
 		r := build()
-		r.dataImport = &dev1alpha1.DataImport{Spec: dev1alpha1.DataImportSpec{StorageClassName: "missing"}}
+		r.dataImport = &dev1alpha1.DataImport{Spec: specSC("missing")}
 		_, _, err := r.resolveSnapshotCaptureMode(context.Background())
 		assert.Error(t, err)
 	})
 
 	t.Run("missing annotation fails closed", func(t *testing.T) {
 		r := build(sc("plain", "csi.example.com", nil))
-		r.dataImport = &dev1alpha1.DataImport{Spec: dev1alpha1.DataImportSpec{StorageClassName: "plain"}}
+		r.dataImport = &dev1alpha1.DataImport{Spec: specSC("plain")}
 		_, _, err := r.resolveSnapshotCaptureMode(context.Background())
 		assert.Error(t, err)
 	})
 
 	t.Run("referenced VolumeSnapshotClass not found fails closed", func(t *testing.T) {
 		r := build(sc("fast", "csi.example.com", map[string]string{storageClassVSCAnnotation: "ghost-vsc"}))
-		r.dataImport = &dev1alpha1.DataImport{Spec: dev1alpha1.DataImportSpec{StorageClassName: "fast"}}
+		r.dataImport = &dev1alpha1.DataImport{Spec: specSC("fast")}
 		_, _, err := r.resolveSnapshotCaptureMode(context.Background())
 		assert.Error(t, err)
 	})
@@ -146,14 +155,14 @@ func TestResolveSnapshotCaptureMode(t *testing.T) {
 			sc("fast", "csi.example.com", map[string]string{storageClassVSCAnnotation: "other-vsc"}),
 			vsc("other-vsc", "csi.other.com"),
 		)
-		r.dataImport = &dev1alpha1.DataImport{Spec: dev1alpha1.DataImportSpec{StorageClassName: "fast"}}
+		r.dataImport = &dev1alpha1.DataImport{Spec: specSC("fast")}
 		_, _, err := r.resolveSnapshotCaptureMode(context.Background())
 		assert.Error(t, err)
 	})
 
-	t.Run("empty storageClassName fails closed", func(t *testing.T) {
+	t.Run("missing scratchVolumeTemplate fails closed", func(t *testing.T) {
 		r := build()
-		r.dataImport = &dev1alpha1.DataImport{Spec: dev1alpha1.DataImportSpec{}}
+		r.dataImport = &dev1alpha1.DataImport{Spec: dev1alpha1.DataImportSpec{Mode: dev1alpha1.DataImportModeProduceArtifact}}
 		_, _, err := r.resolveSnapshotCaptureMode(context.Background())
 		assert.Error(t, err)
 	})
@@ -277,22 +286,21 @@ func TestBuildVolumeCaptureRequestTargetsScratchPVC(t *testing.T) {
 	assert.True(t, *owners[0].Controller)
 }
 
-func TestIsStandalonePVCImport(t *testing.T) {
+func TestIsPopulateVolumeMode(t *testing.T) {
 	cases := map[string]struct {
-		kind string
+		mode dev1alpha1.DataImportMode
 		want bool
 	}{
-		"PersistentVolumeClaim is Mode B":    {kind: dev1alpha1.KindPVC, want: true},
-		"VolumeSnapshot leaf is Mode A":      {kind: dev1alpha1.KindVolumeSnapshot, want: false},
-		"VirtualDiskSnapshot leaf is Mode A": {kind: "VirtualDiskSnapshot", want: false},
-		"empty kind is not Mode B":           {kind: "", want: false},
+		"PopulateVolume":                   {mode: dev1alpha1.DataImportModePopulateVolume, want: true},
+		"ProduceArtifact":                  {mode: dev1alpha1.DataImportModeProduceArtifact, want: false},
+		"empty defaults to PopulateVolume": {mode: "", want: true},
 	}
 	for name, tc := range cases {
 		t.Run(name, func(t *testing.T) {
 			r := &DataImportReconciler{dataImport: &dev1alpha1.DataImport{
-				Spec: dev1alpha1.DataImportSpec{TargetRef: dev1alpha1.DataImportTargetRefSpec{Kind: tc.kind}},
+				Spec: dev1alpha1.DataImportSpec{Mode: tc.mode},
 			}}
-			assert.Equal(t, tc.want, r.isStandalonePVCImport())
+			assert.Equal(t, tc.want, r.isPopulateVolumeMode())
 		})
 	}
 }
@@ -300,15 +308,29 @@ func TestIsStandalonePVCImport(t *testing.T) {
 func TestEnsurePVCImportTargetRequiresTemplate(t *testing.T) {
 	r := &DataImportReconciler{dataImport: &dev1alpha1.DataImport{
 		ObjectMeta: metav1.ObjectMeta{Name: "imp-b", Namespace: "ns"},
-		Spec:       dev1alpha1.DataImportSpec{TargetRef: dev1alpha1.DataImportTargetRefSpec{Kind: dev1alpha1.KindPVC}},
+		Spec:       dev1alpha1.DataImportSpec{Mode: dev1alpha1.DataImportModePopulateVolume},
 	}}
 	_, err := r.ensurePVCImportTarget(context.Background())
 	require.Error(t, err)
 	assert.ErrorIs(t, err, ErrTargetFailed)
 }
 
-// newModeBReconciler builds a Mode B reconciler whose PVC import target is restored-pvc, with a fake
-// client carrying only corev1/storagev1 (the standalone path never touches snapshot machinery).
+func TestEnsurePVCImportTargetVolumeRefNotImplemented(t *testing.T) {
+	r := &DataImportReconciler{dataImport: &dev1alpha1.DataImport{
+		ObjectMeta: metav1.ObjectMeta{Name: "imp-b", Namespace: "ns"},
+		Spec: dev1alpha1.DataImportSpec{
+			Mode:      dev1alpha1.DataImportModePopulateVolume,
+			VolumeRef: &dev1alpha1.ObjectReference{Kind: dev1alpha1.KindPVC, Name: "data"},
+			Force:     true,
+		},
+	}}
+	_, err := r.ensurePVCImportTarget(context.Background())
+	require.Error(t, err)
+	assert.ErrorIs(t, err, ErrTargetFailed)
+}
+
+// newModeBReconciler builds a PopulateVolume reconciler whose PVC import target is restored-pvc, with a
+// fake client carrying only corev1/storagev1 (the populate path never touches snapshot machinery).
 func newModeBReconciler(objs ...runtime.Object) *DataImportReconciler {
 	scheme := runtime.NewScheme()
 	_ = corev1.AddToScheme(scheme)
@@ -319,11 +341,9 @@ func newModeBReconciler(objs ...runtime.Object) *DataImportReconciler {
 		dataImport: &dev1alpha1.DataImport{
 			ObjectMeta: metav1.ObjectMeta{Name: "imp-b", Namespace: "ns"},
 			Spec: dev1alpha1.DataImportSpec{
-				TargetRef: dev1alpha1.DataImportTargetRefSpec{
-					Kind: dev1alpha1.KindPVC,
-					PvcTemplate: &dev1alpha1.PersistentVolumeClaimTemplateSpec{
-						DataImportTargetRefMetaSpec: dev1alpha1.DataImportTargetRefMetaSpec{Name: "restored-pvc"},
-					},
+				Mode: dev1alpha1.DataImportModePopulateVolume,
+				PvcTemplate: &dev1alpha1.PersistentVolumeClaimTemplateSpec{
+					PersistentVolumeClaimTemplateMetadata: dev1alpha1.PersistentVolumeClaimTemplateMetadata{Name: "restored-pvc"},
 				},
 			},
 		},
@@ -373,7 +393,7 @@ func TestEnsureImportPVCWiresDataSourceRefToDataImport(t *testing.T) {
 	sc := "fast"
 	fs := dev1alpha1.PersistentVolumeFilesystem
 	tmpl := &dev1alpha1.PersistentVolumeClaimTemplateSpec{
-		DataImportTargetRefMetaSpec: dev1alpha1.DataImportTargetRefMetaSpec{
+		PersistentVolumeClaimTemplateMetadata: dev1alpha1.PersistentVolumeClaimTemplateMetadata{
 			Name:   "restored-pvc",
 			Labels: map[string]string{"app": "my-app"},
 		},

@@ -91,7 +91,8 @@ func (r *DataImportReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 
 	// Server-side resource names (upload deployment, service, ingress, dummy job) are always keyed on
 	// the DataImport identity with the PVC short kind, independent of the import mode and of the actual
-	// PVC name (Mode A names the scratch PVC after the DataImport; Mode B names it from pvcTemplate).
+	// PVC name (ProduceArtifact names the scratch PVC after the DataImport; PopulateVolume names it from
+	// pvcTemplate).
 	r.names = common.NewNames(dev1alpha1.KindPVC, dataImport.Name, dataImport.Namespace, dataImport.Name)
 	r.dataImport = dataImport
 
@@ -211,26 +212,26 @@ func mutateReadyByErr(dataImport *dev1alpha1.DataImport, reconcileErr error) {
 	})
 }
 
-// isStandalonePVCImport reports whether this DataImport is a Mode B (standalone PVC import) request: the
-// imported bytes are written into a user-described PVC (targetRef.pvcTemplate) that is preserved after
-// the import, with no durable artifact produced. The mode is discriminated solely by
-// targetRef.kind == PersistentVolumeClaim (pvcTemplate is its mandatory companion, validated by CRD CEL).
-func (r *DataImportReconciler) isStandalonePVCImport() bool {
-	return r.dataImport.Spec.TargetRef.Kind == dev1alpha1.KindPVC
+// isPopulateVolumeMode reports whether this DataImport populates a preserved volume (PopulateVolume): the
+// imported bytes are written into a created PVC (pvcTemplate) or an overwritten existing volume
+// (volumeRef+force), with no durable artifact produced. The mode is the explicit spec.mode discriminator
+// (defaulting to PopulateVolume); the alternative is ProduceArtifact.
+func (r *DataImportReconciler) isPopulateVolumeMode() bool {
+	return r.dataImport.Spec.EffectiveMode() == dev1alpha1.DataImportModePopulateVolume
 }
 
-// ensureTarget dispatches to the import pipeline for the active mode (selected by targetRef.kind):
-// Mode B (PersistentVolumeClaim) imports into a user-described PVC; any other (snapshot leaf) kind
-// captures the imported bytes into a durable VolumeSnapshotContent.
+// ensureTarget dispatches to the import pipeline for the active spec.mode: PopulateVolume imports into a
+// preserved volume (created PVC or overwritten existing volume); ProduceArtifact captures the imported
+// bytes into a durable VolumeSnapshotContent.
 func (r *DataImportReconciler) ensureTarget(ctx context.Context) (ctrl.Result, error) {
-	if r.isStandalonePVCImport() {
+	if r.isPopulateVolumeMode() {
 		return r.ensurePVCImportTarget(ctx)
 	}
 	return r.ensureSnapshotImportTarget(ctx)
 }
 
-// ensureSnapshotImportTarget runs the snapshot-leaf import pipeline (Mode A): derive scratch-PVC
-// parameters from the spec -> ensure the scratch PVC (the volume the imported bytes land in) -> once it
+// ensureSnapshotImportTarget runs the ProduceArtifact pipeline: derive scratch-PVC parameters from
+// spec.scratchVolumeTemplate -> ensure the scratch PVC (the volume the imported bytes land in) -> once it
 // is bound, produce the durable data artifact (VolumeSnapshotContent). It returns a RequeueAfter while
 // waiting on out-of-band preconditions (PVC bind, VolumeCaptureRequest completion) that the controller
 // does not watch.
@@ -292,23 +293,27 @@ type scratchVolumeParams struct {
 	Size             resource.Quantity
 }
 
-// scratchVolumeParamsFromSpec validates and converts the DataImport spec volume parameters. storageClass
-// and size are required (the scratch PVC cannot be built without them); volumeMode is optional and
-// defaults to Filesystem downstream.
+// scratchVolumeParamsFromSpec validates and converts the ProduceArtifact scratch volume parameters from
+// spec.scratchVolumeTemplate. The template, its storageClass and its size are required (the scratch PVC
+// cannot be built without them); volumeMode is optional and defaults to Filesystem downstream.
 func scratchVolumeParamsFromSpec(spec dev1alpha1.DataImportSpec) (scratchVolumeParams, error) {
-	if spec.StorageClassName == "" {
-		return scratchVolumeParams{}, fmt.Errorf("spec.storageClassName is required")
+	tmpl := spec.ScratchVolumeTemplate
+	if tmpl == nil {
+		return scratchVolumeParams{}, fmt.Errorf("spec.scratchVolumeTemplate is required for ProduceArtifact")
 	}
-	if spec.Size == "" {
-		return scratchVolumeParams{}, fmt.Errorf("spec.size is required")
+	if tmpl.StorageClassName == "" {
+		return scratchVolumeParams{}, fmt.Errorf("spec.scratchVolumeTemplate.storageClassName is required")
 	}
-	size, err := resource.ParseQuantity(spec.Size)
+	if tmpl.Size == "" {
+		return scratchVolumeParams{}, fmt.Errorf("spec.scratchVolumeTemplate.size is required")
+	}
+	size, err := resource.ParseQuantity(tmpl.Size)
 	if err != nil {
-		return scratchVolumeParams{}, fmt.Errorf("parse spec.size %q: %w", spec.Size, err)
+		return scratchVolumeParams{}, fmt.Errorf("parse spec.scratchVolumeTemplate.size %q: %w", tmpl.Size, err)
 	}
 	return scratchVolumeParams{
-		StorageClassName: spec.StorageClassName,
-		VolumeMode:       spec.VolumeMode,
+		StorageClassName: tmpl.StorageClassName,
+		VolumeMode:       tmpl.VolumeMode,
 		Size:             size,
 	}, nil
 }
@@ -322,8 +327,8 @@ func (r *DataImportReconciler) ensureScratchPVC(ctx context.Context, params scra
 
 // ensureImportPVC creates/updates the PVC the imported bytes land in from the given template, wiring its
 // DataSourceRef to this DataImport so the volume populator picks it up and brings up the upload endpoint.
-// Both modes share it: Mode A passes an internally-derived scratch template (named after the DataImport),
-// Mode B passes the user's targetRef.pvcTemplate (named by the user).
+// Both modes share it: ProduceArtifact passes an internally-derived scratch template (named after the
+// DataImport), PopulateVolume passes the user's spec.pvcTemplate (named by the user).
 func (r *DataImportReconciler) ensureImportPVC(ctx context.Context, pvcTemplate *dev1alpha1.PersistentVolumeClaimTemplateSpec) error {
 	apiGroup := dev1alpha1.APIGroup
 	dataSourceRef := &corev1.TypedObjectReference{
@@ -344,7 +349,7 @@ func scratchPVCTemplate(name string, params scratchVolumeParams) *dev1alpha1.Per
 		volumeMode = dev1alpha1.PersistentVolumeMode(params.VolumeMode)
 	}
 	return &dev1alpha1.PersistentVolumeClaimTemplateSpec{
-		DataImportTargetRefMetaSpec: dev1alpha1.DataImportTargetRefMetaSpec{Name: name},
+		PersistentVolumeClaimTemplateMetadata: dev1alpha1.PersistentVolumeClaimTemplateMetadata{Name: name},
 		PersistentVolumeClaimSpec: dev1alpha1.PersistentVolumeClaimSpec{
 			AccessModes:      []dev1alpha1.PersistentVolumeAccessMode{dev1alpha1.ReadWriteOnce},
 			Resources:        dev1alpha1.VolumeResourceRequirements{Requests: dev1alpha1.ResourceList{dev1alpha1.ResourceStorage: params.Size}},
@@ -425,11 +430,11 @@ func (r *DataImportReconciler) handleTargetStatus(ctx context.Context, pvc *core
 	return ctrl.Result{}, nil
 }
 
-// ensurePVCImportTarget runs the standalone PVC import pipeline (Mode B): ensure the user-described
-// target PVC (targetRef.pvcTemplate) -> once it is bound and the upload has finished, mark the import
-// Completed. Unlike the snapshot-leaf path it derives nothing from the root volume params, does not gate
-// on snapshot capability, and produces no durable artifact (status.dataArtifactRef stays empty); the PVC
-// itself is the product and is preserved on cleanup.
+// ensurePVCImportTarget runs the PopulateVolume pipeline: ensure the user-described target PVC
+// (spec.pvcTemplate) -> once it is bound and the upload has finished, mark the import Completed. Unlike
+// ProduceArtifact it derives nothing from a scratch template, does not gate on snapshot capability, and
+// produces no durable artifact (status.data stays empty); the PVC itself is the product and is preserved
+// on cleanup.
 func (r *DataImportReconciler) ensurePVCImportTarget(ctx context.Context) (ctrl.Result, error) {
 	logger := log.FromContext(ctx)
 
@@ -438,10 +443,17 @@ func (r *DataImportReconciler) ensurePVCImportTarget(ctx context.Context) (ctrl.
 		return ctrl.Result{}, nil
 	}
 
-	pvcTemplate := r.dataImport.Spec.TargetRef.PvcTemplate
+	// volumeRef (overwrite an existing volume in place) is accepted by the API/CEL but not yet wired into
+	// the populator pipeline. Fail closed so the destructive overwrite never runs half-configured; the
+	// create path (pvcTemplate) is the only implemented PopulateVolume variant for now.
+	if r.dataImport.Spec.VolumeRef != nil {
+		return ctrl.Result{}, fmt.Errorf("%w: PopulateVolume via volumeRef+force is not yet implemented", ErrTargetFailed)
+	}
+
+	pvcTemplate := r.dataImport.Spec.PvcTemplate
 	if pvcTemplate == nil || pvcTemplate.Name == "" {
 		// CRD CEL enforces this; guard anyway since the controller would otherwise build an unnamed PVC.
-		return ctrl.Result{}, fmt.Errorf("%w: targetRef.pvcTemplate with metadata.name is required for PersistentVolumeClaim import", ErrTargetFailed)
+		return ctrl.Result{}, fmt.Errorf("%w: pvcTemplate with metadata.name is required for PopulateVolume", ErrTargetFailed)
 	}
 
 	if err := r.ensureImportPVC(ctx, pvcTemplate); err != nil {
@@ -532,7 +544,7 @@ func (r *DataImportReconciler) handlePVCImportStatus(ctx context.Context, pvc *c
 
 // ensureDataArtifact captures the bound scratch PVC into a durable cluster-scoped VolumeSnapshotContent
 // via a VolumeCaptureRequest, pins the artifact's reclaim policy to Retain, anchors it to the import's
-// lifetime via the import ObjectKeeper, and records it in status.dataArtifactRef + Completed. The capture
+// lifetime via the import ObjectKeeper, and records it in status.data.artifact + Completed. The capture
 // mode is auto-detected from the spec StorageClass (snapshot-capable -> Snapshot); a non-snapshot-capable
 // StorageClass fails closed. It requeues while the VolumeCaptureRequest is in progress. DataImport never
 // becomes the artifact's controller owner (storage-foundation's VCR retainer is); see object_keeper.go /
@@ -650,12 +662,12 @@ func (r *DataImportReconciler) cleanupDataImport(ctx context.Context) error {
 	}
 
 	// Remove the import finalizer from the PVC. RemovePVCFinalizer never deletes the PVC, so the volume
-	// is preserved in both modes — which is exactly the contract for Mode B (the user's PVC is the
-	// product). The PVC name differs by mode: Mode A's scratch PVC is named after the DataImport, while
-	// Mode B's PVC is named by the user's pvcTemplate.
+	// is preserved in both modes — which is exactly the contract for PopulateVolume (the user's PVC is the
+	// product). The PVC name differs by mode: ProduceArtifact's scratch PVC is named after the DataImport,
+	// while PopulateVolume's PVC is named by the user's pvcTemplate.
 	pvcName := r.dataImport.Name
-	if r.isStandalonePVCImport() {
-		if tmpl := r.dataImport.Spec.TargetRef.PvcTemplate; tmpl != nil && tmpl.Name != "" {
+	if r.isPopulateVolumeMode() {
+		if tmpl := r.dataImport.Spec.PvcTemplate; tmpl != nil && tmpl.Name != "" {
 			pvcName = tmpl.Name
 		}
 	}

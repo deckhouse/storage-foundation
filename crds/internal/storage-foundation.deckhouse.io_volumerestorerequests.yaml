@@ -65,6 +65,12 @@ spec:
                 description: SourceRef references the source data to restore from
                   (VolumeSnapshotContent or PersistentVolume)
                 properties:
+                  apiVersion:
+                    description: |-
+                      APIVersion is the group/version of the referenced object (e.g., "snapshot.storage.k8s.io/v1").
+                      Optional: kind-only refs (e.g. core PersistentVolumeClaim) leave it empty. It is required for
+                      snapshot-leaf refs (spec.snapshotRef) so the state-snapshotter reverse-lookup can derive the group.
+                    type: string
                   kind:
                     description: Kind is the kind of the referenced object (e.g.,
                       "VolumeSnapshotContent", "PersistentVolume")
@@ -91,6 +97,12 @@ spec:
                   cross-namespace, so the target always lives in the VRR namespace (the controller uses
                   metadata.namespace). Name is required.
                 properties:
+                  apiVersion:
+                    description: |-
+                      APIVersion is the group/version of the referenced object (e.g., "snapshot.storage.k8s.io/v1").
+                      Optional: kind-only refs (e.g. core PersistentVolumeClaim) leave it empty. It is required for
+                      snapshot-leaf refs (spec.snapshotRef) so the state-snapshotter reverse-lookup can derive the group.
+                    type: string
                   kind:
                     description: Kind is the kind of the referenced object (e.g.,
                       "VolumeSnapshotContent", "PersistentVolume")
@@ -191,6 +203,12 @@ spec:
                   TargetRef references the created restore target (currently always a PersistentVolumeClaim).
                   Unlike spec.targetRef, the namespace is populated here so the status is self-contained.
                 properties:
+                  apiVersion:
+                    description: |-
+                      APIVersion is the group/version of the referenced object (e.g., "snapshot.storage.k8s.io/v1").
+                      Optional: kind-only refs (e.g. core PersistentVolumeClaim) leave it empty. It is required for
+                      snapshot-leaf refs (spec.snapshotRef) so the state-snapshotter reverse-lookup can derive the group.
+                    type: string
                   kind:
                     description: Kind is the kind of the referenced object (e.g.,
                       "VolumeSnapshotContent", "PersistentVolume")

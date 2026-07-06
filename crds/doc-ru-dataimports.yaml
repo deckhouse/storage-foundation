@@ -25,68 +25,94 @@ spec:
                 waitForFirstConsumer:
                   description: |
                     Если параметр установлен в `false`, создаётся load-под для запуска процесса заполнения тома, когда в StorageClass для параметра `volumeBindingMode` задано значение `WaitForFirstConsumer`.
-                storageClassName:
+                mode:
                   description: |
-                    Только для режима A. StorageClass для временного (scratch) PersistentVolumeClaim, в который записываются импортируемые данные. Его драйвер должен поддерживать снимки (StorageClass ссылается на VolumeSnapshotClass через аннотацию `storage.deckhouse.io/volumesnapshotclass`); создаваемый артефакт всегда является VolumeSnapshotContent. Передаётся напрямую вызывающей стороной (на основе статуса исходного снимка), а не читается из сохранённого манифеста. Не задаётся в режиме B.
-                size:
-                  description: |
-                    Только для режима A. Запрашиваемый размер временного (scratch) PersistentVolumeClaim (величина Kubernetes, например `10Gi`). Не задаётся в режиме B.
-                volumeMode:
-                  description: |
-                    Только для режима A. Режим тома временного (scratch) PersistentVolumeClaim. По умолчанию `Filesystem`. Не задаётся в режиме B.
-                targetRef:
-                  description: |
-                    Полиморфная цель импорта. Поле `kind` выбирает режим импорта:
+                    Дискриминатор, определяющий, что импорт делает с данными:
 
-                    - Режим A (импорт листа-снимка): `kind` — вид листа-снимка (например, `VolumeSnapshot`, `VirtualDiskSnapshot`). `group` и `name` идентифицируют пространственно-зависимый ресурс-лист (пространство имён неявно совпадает с пространством имён самого DataImport); параметры scratch-PVC (`spec.storageClassName/size/volumeMode`) описывают том. Ссылка используется только для обратного поиска DataImport общим контроллером state-snapshotter со стороны листа; сам контроллер DataImport лист не читает. Создаваемый артефакт — VolumeSnapshotContent.
-                    - Режим B (standalone-импорт в PVC): `kind` равно `PersistentVolumeClaim`. `pvcTemplate` полностью описывает целевой PersistentVolumeClaim, в который записываются импортируемые данные; PVC сохраняется после завершения импорта. Долговечный артефакт не создаётся.
+                    - `PopulateVolume`: запись в сохраняемый том — в создаваемый PVC (`pvcTemplate`) либо в существующий том с перезаписью на месте (`volumeRef` + `force`). Долговечный артефакт не создаётся.
+                    - `ProduceArtifact`: данные заливаются во временный (scratch) том (`scratchVolumeTemplate`) и захватываются в долговечный VolumeSnapshotContent для уже существующего узла-снимка, указанного в `snapshotRef`.
+                snapshotRef:
+                  description: |
+                    Только для режима ProduceArtifact. Ссылка на уже существующий узел xxxSnapshot, которому принадлежит создаваемый долговечный артефакт (пространство имён неявно совпадает с пространством имён DataImport). Проставляется внешним создателем (d8/пользователь/система резервного копирования); контроллер DataImport её не читает — она нужна, чтобы обратный поиск state-snapshotter сопоставил лист по `spec.snapshotRef`.
                   properties:
+                    apiVersion:
+                      description: |
+                        Группа/версия узла-снимка (например, `snapshot.storage.k8s.io/v1`).
                     kind:
                       description: |
-                        Селектор режима импорта. `PersistentVolumeClaim` выбирает режим B (standalone-импорт в PVC через `pvcTemplate`); любое другое значение трактуется как вид листа-снимка и выбирает режим A.
-                    group:
-                      description: |
-                        Только для режима A. API-группа ресурса снимка-листа (например, `snapshot.storage.k8s.io`).
+                        Вид узла-снимка (например, `VolumeSnapshot`, `VirtualDiskSnapshot`).
                     name:
                       description: |
-                        Только для режима A. Имя объекта-листа.
-                    pvcTemplate:
+                        Имя узла-снимка.
+                scratchVolumeTemplate:
+                  description: |
+                    Только для режима ProduceArtifact. Временный (scratch) том, в который заливаются импортируемые данные до захвата; уничтожается после создания долговечного VolumeSnapshotContent. Его StorageClass должен поддерживать снимки (ссылается на VolumeSnapshotClass через аннотацию `storage.deckhouse.io/volumesnapshotclass`).
+                  properties:
+                    storageClassName:
                       description: |
-                        Только для режима B. Шаблон PersistentVolumeClaim, полностью описывающий целевой PVC.
+                        StorageClass временного (scratch) PVC (должен поддерживать снимки).
+                    size:
+                      description: |
+                        Запрашиваемый размер временного (scratch) PVC (величина Kubernetes, например `10Gi`).
+                    volumeMode:
+                      description: |
+                        Режим тома временного (scratch) PVC. По умолчанию `Filesystem`.
+                volumeRef:
+                  description: |
+                    Только для режима PopulateVolume (перезапись). Ссылка на существующий том (`kind: PersistentVolumeClaim`) для перезаписи на месте; требуется `force`. Взаимоисключима с `pvcTemplate`.
+                  properties:
+                    apiVersion:
+                      description: |
+                        Группа/версия ссылаемого тома (необязательно для core PersistentVolumeClaim).
+                    kind:
+                      description: |
+                        Вид ссылаемого тома (сейчас `PersistentVolumeClaim`).
+                    name:
+                      description: |
+                        Имя ссылаемого тома.
+                    namespace:
+                      description: |
+                        Пространство имён ссылаемого тома (необязательно; по умолчанию — пространство имён DataImport).
+                force:
+                  description: |
+                    Только для режима PopulateVolume. Подтверждает деструктивную перезапись на месте существующего тома, указанного в `volumeRef`. Допустимо только вместе с `volumeRef`.
+                pvcTemplate:
+                  description: |
+                    Только для режима PopulateVolume (создание). Шаблон PersistentVolumeClaim, полностью описывающий целевой PVC, в который записываются импортируемые данные; PVC сохраняется после импорта. Взаимоисключим с `volumeRef`.
+                  properties:
+                    metadata:
+                      description: |
+                        Метаданные PersistentVolumeClaim.
                       properties:
-                        metadata:
+                        name:
                           description: |
-                            Метаданные PersistentVolumeClaim.
-                          properties:
-                            name:
-                              description: |
-                                Имя PersistentVolumeClaim.
-                            labels:
-                              description: |
-                                Метки PersistentVolumeClaim.
-                            annotations:
-                              description: |
-                                Аннотации PersistentVolumeClaim.
-                        spec:
+                            Имя PersistentVolumeClaim.
+                        labels:
                           description: |
-                            Спецификация PersistentVolumeClaim.
+                            Метки PersistentVolumeClaim.
+                        annotations:
+                          description: |
+                            Аннотации PersistentVolumeClaim.
+                    spec:
+                      description: |
+                        Спецификация PersistentVolumeClaim.
+                      properties:
+                        accessModes:
+                          description: |
+                            Желаемые режимы доступа к тому.
+                        resources:
+                          description: |
+                            Минимальные требования к ресурсам тома.
                           properties:
-                            accessModes:
+                            requests:
                               description: |
-                                Желаемые режимы доступа к тому.
-                            resources:
-                              description: |
-                                Минимальные требования к ресурсам тома.
-                              properties:
-                                requests:
-                                  description: |
-                                    Минимальный объём требуемых вычислительных ресурсов.
-                            storageClassName:
-                              description: |
-                                Имя StorageClass, требуемого для PersistentVolumeClaim.
-                            volumeMode:
-                              description: |
-                                Режим тома, требуемый для PersistentVolumeClaim.
+                                Минимальный объём требуемых вычислительных ресурсов.
+                        storageClassName:
+                          description: |
+                            Имя StorageClass, требуемого для PersistentVolumeClaim.
+                        volumeMode:
+                          description: |
+                            Режим тома, требуемый для PersistentVolumeClaim.
             status:
               description: |
                 Информация о статусе ресурса DataImport.
