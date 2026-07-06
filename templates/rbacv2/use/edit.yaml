@@ -13,8 +13,6 @@ rules:
     resources:
       - volumecapturerequests
       - volumerestorerequests
-      - dataexports
-      - dataimports
     verbs:
       - create
       - update

@@ -29,12 +29,9 @@ const (
 
 var (
 	// GroupVersion is group version used to register these objects
-	GroupVersion = schema.GroupVersion{Group: APIGroup, Version: APIVersion}
-	// SchemeGroupVersion is an alias of GroupVersion kept for compatibility with code
-	// migrated from storage-volume-data-manager that referenced SchemeGroupVersion.
-	SchemeGroupVersion = GroupVersion
-	SchemeBuilder      = runtime.NewSchemeBuilder(AddKnownTypes)
-	AddToScheme        = SchemeBuilder.AddToScheme
+	GroupVersion  = schema.GroupVersion{Group: APIGroup, Version: APIVersion}
+	SchemeBuilder = runtime.NewSchemeBuilder(AddKnownTypes)
+	AddToScheme   = SchemeBuilder.AddToScheme
 )
 
 // AddKnownTypes adds the set of types defined in this package to the given scheme.
@@ -44,10 +41,6 @@ func AddKnownTypes(scheme *runtime.Scheme) error {
 		&VolumeCaptureRequestList{},
 		&VolumeRestoreRequest{},
 		&VolumeRestoreRequestList{},
-		&DataExport{},
-		&DataExportList{},
-		&DataImport{},
-		&DataImportList{},
 	)
 	metav1.AddToGroupVersion(scheme, GroupVersion)
 	return nil

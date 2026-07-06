@@ -43,18 +43,12 @@ var VRRExecutorNamespaces = []string{
 
 var AllowedProvisioners = []string{}
 
-var WebhookConfigurationsToDelete = []string{
-	// ValidatingWebhookConfiguration for DataExport (templates/webhooks/dataexport-validation.yaml).
-	// Removed on module deletion so the API server stops calling the webhooks service once it is gone.
-	ModuleNamespace + "-dataexport-validation",
-}
+var WebhookConfigurationsToDelete = []string{}
 
 var CRGVKsForFinalizerRemoval = []CRGVK{
 	{Group: "snapshot.storage.k8s.io", Version: "v1", Kind: "VolumeSnapshot", Namespaced: true},
 	{Group: "snapshot.storage.k8s.io", Version: "v1", Kind: "VolumeSnapshotContent", Namespaced: false},
 	{Group: "snapshot.storage.k8s.io", Version: "v1", Kind: "VolumeSnapshotClass", Namespaced: false},
-	{Group: "storage.deckhouse.io", Version: "v1alpha1", Kind: "DataExport", Namespaced: true},
-	{Group: "storage.deckhouse.io", Version: "v1alpha1", Kind: "DataImport", Namespaced: true},
 }
 
 type CRGVK struct {
