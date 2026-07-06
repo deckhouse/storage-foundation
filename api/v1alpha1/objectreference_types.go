@@ -30,4 +30,8 @@ type ObjectReference struct {
 	Namespace string `json:"namespace,omitempty"`
 	// Kind is the kind of the referenced object (e.g., "VolumeSnapshotContent", "PersistentVolume")
 	Kind string `json:"kind,omitempty"`
+	// UID is the unique identifier of the referenced object. It is populated in status references (e.g.
+	// VolumeRestoreRequest status.pvcRef) so consumers can detect recreation; spec refs may leave it empty.
+	// +optional
+	UID string `json:"uid,omitempty"`
 }

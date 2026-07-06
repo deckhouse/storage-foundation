@@ -17,40 +17,28 @@ limitations under the License.
 package v1alpha1
 
 import (
-	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
 // +k8s:deepcopy-gen=true
-// VolumeRestoreRequestSpec defines the desired state of VolumeRestoreRequest
+// VolumeRestoreRequestSpec defines the desired state of VolumeRestoreRequest.
+//
+// The suffix convention is authoritative: sourceRef (Ref) points at an object that already EXISTS;
+// pvcTemplate (Template) is the spec of the PVC the restore CREATES. The external-provisioner
+// provisions the PV from sourceRef and creates the PVC from pvcTemplate (name required), then binds
+// them in the VRR namespace (restore is never cross-namespace).
+// +kubebuilder:validation:XValidation:rule="size(self.pvcTemplate.metadata.name) > 0",message="pvcTemplate.metadata.name is required"
 type VolumeRestoreRequestSpec struct {
-	// SourceRef references the source data to restore from (VolumeSnapshotContent or PersistentVolume)
+	// SourceRef references the source data to restore from (VolumeSnapshotContent or PersistentVolume).
 	SourceRef ObjectReference `json:"sourceRef"`
-	// TargetRef identifies the object to restore into. Only kind=PersistentVolumeClaim is supported for
-	// now (an empty kind is treated as PersistentVolumeClaim); kind reserves space for future cluster-scoped
-	// targets such as PersistentVolume. Namespace is intentionally not set in spec: restore is never
-	// cross-namespace, so the target always lives in the VRR namespace (the controller uses
-	// metadata.namespace). Name is required.
-	// +kubebuilder:validation:Required
-	TargetRef ObjectReference `json:"targetRef"`
-	// StorageClassName is the storage class to use for the restored PVC
-	// +optional
-	StorageClassName string `json:"storageClassName,omitempty"`
-	// VolumeMode specifies whether the restored volume is Block or Filesystem.
-	// It is required: the executor builds CSI VolumeCapabilities from it and there is
-	// no implicit default (mismatched mode breaks Block volumes).
-	// +kubebuilder:validation:Required
-	// +kubebuilder:validation:Enum=Block;Filesystem
-	VolumeMode corev1.PersistentVolumeMode `json:"volumeMode"`
-	// FsType is the filesystem type for Filesystem volumes (optional, ignored for Block).
+	// PvcTemplate is the spec of the PersistentVolumeClaim the restore creates and binds. It absorbs the
+	// former root storageClassName/volumeMode/accessModes/size; the PVC name lives in
+	// pvcTemplate.metadata.name (required). Namespace is implicit = the VRR namespace.
+	PvcTemplate PersistentVolumeClaimTemplateSpec `json:"pvcTemplate"`
+	// FsType is the filesystem type for Filesystem volumes (optional, ignored for Block). It is a restore
+	// execution parameter read by the external-provisioner, not a PVC field, so it stays at spec root.
 	// +optional
 	FsType string `json:"fsType,omitempty"`
-	// AccessModes is the list of access modes for the restored PVC
-	// (optional, defaults to ReadWriteOnce). Enables parity with the PV-source restore
-	// path (e.g. RWX). Invalid modes are rejected by admission via the Enum below.
-	// +optional
-	// +kubebuilder:validation:items:Enum=ReadWriteOnce;ReadOnlyMany;ReadWriteMany;ReadWriteOncePod
-	AccessModes []corev1.PersistentVolumeAccessMode `json:"accessModes,omitempty"`
 }
 
 // +k8s:deepcopy-gen=true
@@ -60,9 +48,9 @@ type VolumeRestoreRequestStatus struct {
 	CompletionTimestamp *metav1.Time `json:"completionTimestamp,omitempty"`
 	// Conditions represent the latest available observations of the resource's state
 	Conditions []metav1.Condition `json:"conditions,omitempty"`
-	// TargetRef references the created restore target (currently always a PersistentVolumeClaim).
-	// Unlike spec.targetRef, the namespace is populated here so the status is self-contained.
-	TargetRef *ObjectReference `json:"targetRef,omitempty"`
+	// PvcRef references the created restore target PersistentVolumeClaim. Unlike spec, the namespace and
+	// uid are populated here so the status is self-contained and consumers can detect recreation.
+	PvcRef *ObjectReference `json:"pvcRef,omitempty"`
 }
 
 // +kubebuilder:object:root=true
