@@ -32,13 +32,14 @@ via `git: add: patches/<version>` with `stageDependencies: install:
 '**/*'`, so editing any patch file reliably busts the cache. This is the
 same pattern `csi-external-snapshotter` uses.
 
-Source of truth for the executor remains the Deckhouse fork branch
-`d8-63742164-vrr`; `002-vrr-executor.patch` is the diff of that branch
-against `v6.2.0` (excluding `vendor/`). To regenerate after a branch
-change:
+`002-vrr-executor.patch` is the source of truth for the executor; it is a
+plain diff against `v6.2.0` (excluding `vendor/`) applied directly to the
+tag at build time. There is no long-lived fork branch in the build path —
+the patch was developed on the throwaway branch `d8-63742164-vrr`. To
+re-derive the diff from such a branch:
 
 ```
-git -C <external-provisioner-fork> diff v6.2.0 d8-63742164-vrr \
+git -C <external-provisioner-checkout> diff v6.2.0 <branch> \
     -- . ':(exclude)vendor' > 002-vrr-executor.patch
 ```
 
@@ -46,19 +47,19 @@ API dependency: the executor imports
 `github.com/deckhouse/storage-foundation/api`. As of wave6 the executor
 reads the **honest-refs** VRR API — `spec.sourceRef` + `spec.pvcTemplate`
 (`metadata.name` + `spec.storageClassName`/`volumeMode`/`accessModes`)
-with `fsType` at the spec root — and never writes status. The pinned
-pseudo-version (`v0.0.0-20260614235316-b97b1e188226`, commit `b97b1e1`)
-predates wave6 (it carries the flat `spec.volumeMode`/`fsType`/
-`accessModes` schema), so it will **not** compile against this patch.
+with `fsType` at the spec root — and never writes status. It is pinned to
+the wave6 API pseudo-version `v0.0.0-20260706134706-2c525506f13c` (commit
+`2c52550`), which carries the `pvcTemplate`/`pvcRef` schema. The patch
+also bumps the `go` directive to `1.26.4` because the `api` module
+requires it.
 
-BLOCKER / FOLLOW-UP (wave6): `002` was hand-updated blindly to the
-`pvcTemplate`/`pvcRef` schema ahead of the API being published. Before
-building you MUST (1) land the wave6 `api/v1alpha1` VRR types
-(`PvcTemplate`/`PvcRef`), (2) regenerate the fork branch `d8-63742164-vrr`
-from this patch (or re-apply the same edits there and re-diff), and
-(3) re-pin the pseudo-version / tag in `002` to the published wave6 API
-commit. Until then the patch is unverifiable (no compile path). The patch
-also bumps the `go` directive to `1.25.10` (required by the `api` module).
+Verified (wave6): applying `001` + `002` to a clean `v6.2.0` checkout
+compiles and the executor test suite passes —
+`CGO_ENABLED=0 go build -mod=mod ./cmd/csi-provisioner` and
+`go test -mod=mod ./pkg/controller/` (VRR tests) are both green against
+the pinned wave6 API. When the API gets a published `api/vX.Y.Z` tag,
+replace the pseudo-version with that tag (one `go.mod` line plus matching
+`go.sum` lines).
 
 Note: the `api` module is a Go submodule (`module .../api` in `api/`), so
 its version tag is subdirectory-prefixed (`api/vX.Y.Z`); the plain
@@ -114,12 +115,13 @@ freshly-started worker never sees an existing StorageClass as NotFound),
 types) but does **not** vendor it — the dependency is resolved from the
 module proxy (see below).
 
-Source of truth for the executor code is the development branch
-`d8-63742164-vrr` in the `external-provisioner` fork; this patch is the
-diff of that branch against upstream v6.2.0 (excluding `vendor/`).
-Verified end-to-end on a clean `v6.2.0` checkout with `001` + `002`
-applied: `rm -rf vendor && go mod download && go mod vendor &&
-go build ./cmd/csi-provisioner` (CGO_ENABLED=0, linux/amd64) succeeds.
+This patch is the source of truth for the executor code (developed on the
+throwaway branch `d8-63742164-vrr`, then diffed against upstream v6.2.0
+excluding `vendor/`). Verified end-to-end on a clean `v6.2.0` checkout
+with `001` + `002` applied: `go build ./cmd/csi-provisioner`
+(CGO_ENABLED=0) and `go test ./pkg/controller/` (VRR tests) both succeed
+against the pinned wave6 API. The build pipeline itself does
+`rm -rf vendor && go mod download && go mod vendor` before `make build`.
 
 ### API dependency — pinned via Go pseudo-version
 
@@ -135,20 +137,14 @@ before building CSI capabilities / the PV+PVC (see `convertAccessModes`,
 The pinned pseudo-version:
 
 ```
-require github.com/deckhouse/storage-foundation/api v0.0.0-20260614235316-b97b1e188226
+require github.com/deckhouse/storage-foundation/api v0.0.0-20260706134706-2c525506f13c
 ```
 
-resolves to commit `b97b1e1`, which is the **pre-wave6** flat schema and
-will NOT compile against this patch.
-
-BLOCKER / FOLLOW-UP (wave6): `002` was hand-updated blindly to the
-`pvcTemplate`/`pvcRef` schema before the API was published. To build:
-(1) land the wave6 VRR API types, (2) regenerate the fork branch
-`d8-63742164-vrr` from this patch (or mirror the edits and re-diff), and
-(3) re-pin the pseudo-version / tag in `002` to the published wave6 API
-commit (one `go.mod` line plus matching `go.sum` lines). The patch also
-bumps the `go` directive to `1.25.10` because the `api` module requires
-it.
+resolves to commit `2c52550` (wave6 `pvcTemplate`/`pvcRef` schema). The
+patch also bumps the `go` directive to `1.26.4` because the `api` module
+requires it. When the API gets a published `api/vX.Y.Z` tag, replace the
+pseudo-version with that tag (one `go.mod` line plus matching `go.sum`
+lines).
 
 ### RBAC for the provisioner ServiceAccount
 

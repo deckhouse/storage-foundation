@@ -176,11 +176,11 @@ index 9e1264600..d5862ffc3 100644
  module github.com/kubernetes-csi/external-provisioner/v5
  
 -go 1.25.7
-+go 1.25.10
++go 1.26.4
  
  require (
  	github.com/container-storage-interface/spec v1.12.0
-+	github.com/deckhouse/storage-foundation/api v0.0.0-20260614235316-b97b1e188226
++	github.com/deckhouse/storage-foundation/api v0.0.0-20260706134706-2c525506f13c
  	github.com/golang/mock v1.6.0
  	github.com/google/uuid v1.6.0 // indirect
  	github.com/kubernetes-csi/csi-lib-utils v0.23.2
@@ -192,8 +192,8 @@ index fbc500deb..cc4dd56ca 100644
  github.com/davecgh/go-spew v1.1.1/go.mod h1:J7Y8YcW2NihsgmVo/mv3lAwl/skON4iLHjSsI+c5H38=
  github.com/davecgh/go-spew v1.1.2-0.20180830191138-d8f796af33cc h1:U9qPSI2PIWSS1VwoXQT9A3Wy9MM3WgvqSxFWenqJduM=
  github.com/davecgh/go-spew v1.1.2-0.20180830191138-d8f796af33cc/go.mod h1:J7Y8YcW2NihsgmVo/mv3lAwl/skON4iLHjSsI+c5H38=
-+github.com/deckhouse/storage-foundation/api v0.0.0-20260614235316-b97b1e188226 h1:chWiDopdMkx0UsAXstu//YpjUaqKhuP8Ni3m+vABwbI=
-+github.com/deckhouse/storage-foundation/api v0.0.0-20260614235316-b97b1e188226/go.mod h1:FRaWxya+74ktZMBDr96eudQs9xPkYmMDFiLpl3K7+O8=
++github.com/deckhouse/storage-foundation/api v0.0.0-20260706134706-2c525506f13c h1:fPX62n3igjkfA6hPYKh1t/h8JhKj6Ev92oycPYhKrhk=
++github.com/deckhouse/storage-foundation/api v0.0.0-20260706134706-2c525506f13c/go.mod h1:EYki1R5o84Rt8WgEwIGj2MUvsGHG6SxwqbeIPmPV1x0=
  github.com/distribution/reference v0.6.0 h1:0IXCQ5g4/QMHHkarYzh5l+u8T3t73zM5QvfrDyIgxBk=
  github.com/distribution/reference v0.6.0/go.mod h1:BbU0aIcezP1/5jX/8MP0YiH4SdvB5Y4f/wlDRiLyi3E=
  github.com/dustin/go-humanize v1.0.1 h1:GzkhY7T5VNhEkwH0PVJgjz+fX1rhBrR7pRT3mDkpeCY=
