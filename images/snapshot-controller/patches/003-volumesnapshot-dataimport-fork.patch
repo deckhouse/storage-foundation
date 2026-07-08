@@ -1,5 +1,5 @@
 diff --git a/client/apis/volumesnapshot/v1/types.go b/client/apis/volumesnapshot/v1/types.go
-index 36f60dc..e865972 100644
+index 36f60dc95..2f26914f2 100644
 --- a/client/apis/volumesnapshot/v1/types.go
 +++ b/client/apis/volumesnapshot/v1/types.go
 @@ -96,13 +96,19 @@ type VolumeSnapshotSpec struct {
@@ -25,7 +25,7 @@ index 36f60dc..e865972 100644
  type VolumeSnapshotSource struct {
  	// persistentVolumeClaimName specifies the name of the PersistentVolumeClaim
  	// object representing the volume from which a snapshot should be created.
-@@ -122,8 +128,72 @@ type VolumeSnapshotSource struct {
+@@ -122,6 +128,70 @@ type VolumeSnapshotSource struct {
  	// +optional
  	// +kubebuilder:validation:XValidation:rule="self == oldSelf",message="volumeSnapshotContentName is immutable"
  	VolumeSnapshotContentName *string `json:"volumeSnapshotContentName,omitempty" protobuf:"bytes,2,opt,name=volumeSnapshotContentName"`
@@ -38,8 +38,8 @@ index 36f60dc..e865972 100644
 +	// Deckhouse fork extension.
 +	// +optional
 +	Import *VolumeSnapshotImportSource `json:"import,omitempty" protobuf:"bytes,3,opt,name=import"`
- }
- 
++}
++
 +// VolumeSnapshotImportSource is an empty marker selecting import mode for a VolumeSnapshot
 +// (spec.source.import: {}). Its mere presence means the data artifact is produced by a DataImport
 +// (storage-foundation.deckhouse.io) and the upstream snapshot-controller does NOT reconcile it.
@@ -93,12 +93,10 @@ index 36f60dc..e865972 100644
 +	Name       string `json:"name" protobuf:"bytes,3,opt,name=name"`
 +	// +optional
 +	UID string `json:"uid,omitempty" protobuf:"bytes,4,opt,name=uid"`
-+}
-+
+ }
+ 
  // VolumeSnapshotStatus is the status of the VolumeSnapshot
- // Note that CreationTime, RestoreSize, ReadyToUse, and Error are in both
- // VolumeSnapshotStatus and VolumeSnapshotContentStatus. Fields in VolumeSnapshotStatus
-@@ -194,6 +264,22 @@ type VolumeSnapshotStatus struct {
+@@ -194,6 +264,114 @@ type VolumeSnapshotStatus struct {
  	// VolumeSnapshot is a part of.
  	// +optional
  	VolumeGroupSnapshotName *string `json:"volumeGroupSnapshotName,omitempty" protobuf:"bytes,6,opt,name=volumeGroupSnapshotName"`
@@ -118,14 +116,114 @@ index 36f60dc..e865972 100644
 +	// alone. Written by the state-snapshotter common controller (import flow). Deckhouse fork extension.
 +	// +optional
 +	Data *VolumeSnapshotDataBinding `json:"data,omitempty" protobuf:"bytes,8,opt,name=data"`
++
++	// captureState collects the state-snapshotter capture signals mirrored onto this VolumeSnapshot when it
++	// is a domain snapshot node: commonController holds the core-written capture-leg latches, and
++	// domainSpecificController holds the domain-written planning refs and lifecycle. The upstream
++	// snapshot-controller never sets it, but MUST preserve it across its own status updates
++	// (Get -> DeepCopy -> UpdateStatus), so it is typed here. Deckhouse fork extension.
++	// +optional
++	CaptureState *VolumeSnapshotCaptureState `json:"captureState,omitempty" protobuf:"bytes,9,opt,name=captureState"`
++
++	// childrenSnapshotRefs are the direct child snapshot edges when this VolumeSnapshot participates in a
++	// snapshot tree. A VolumeSnapshot is a data leaf, so this is normally empty; it is typed for round-trip
++	// preservation and uniformity across snapshot kinds. Deckhouse fork extension.
++	// +optional
++	ChildrenSnapshotRefs []VolumeSnapshotChildReference `json:"childrenSnapshotRefs,omitempty" protobuf:"bytes,10,rep,name=childrenSnapshotRefs"`
++
++	// snapshotSource is the full reference to the captured live source object (the source PVC), written by
++	// the state-snapshotter domain controller (PublishSnapshotSource) and preserved here across the fork's
++	// status updates. Deckhouse fork extension.
++	// +optional
++	SnapshotSource *VolumeSnapshotSourceReference `json:"snapshotSource,omitempty" protobuf:"bytes,11,opt,name=snapshotSource"`
++
++	// conditions report the state-snapshotter protocol readiness (conditions[Ready] is the user-facing
++	// condition derived by the core), distinct from the CSI readyToUse binding signal. Written by the core
++	// and preserved here across the fork's status updates. Deckhouse fork extension.
++	// +optional
++	Conditions []metav1.Condition `json:"conditions,omitempty" protobuf:"bytes,12,rep,name=conditions"`
++}
++
++// VolumeSnapshotCaptureState mirrors the state-snapshotter captureState onto a domain VolumeSnapshot node.
++// The upstream snapshot-controller never sets it; it is typed only so the fork preserves it across its own
++// status round-trips (Get -> DeepCopy -> UpdateStatus). Deckhouse fork extension.
++type VolumeSnapshotCaptureState struct {
++	// +optional
++	CommonController *VolumeSnapshotCommonCaptureState `json:"commonController,omitempty" protobuf:"bytes,1,opt,name=commonController"`
++	// +optional
++	DomainSpecificController *VolumeSnapshotDomainCaptureState `json:"domainSpecificController,omitempty" protobuf:"bytes,2,opt,name=domainSpecificController"`
++}
++
++// VolumeSnapshotCommonCaptureState holds the state-snapshotter core-written capture-leg success latches.
++// Deckhouse fork extension.
++type VolumeSnapshotCommonCaptureState struct {
++	// +optional
++	ManifestCaptured *bool `json:"manifestCaptured,omitempty" protobuf:"varint,1,opt,name=manifestCaptured"`
++	// +optional
++	DataCaptured *bool `json:"dataCaptured,omitempty" protobuf:"varint,2,opt,name=dataCaptured"`
++	// +optional
++	SubtreeManifestsPersisted *bool `json:"subtreeManifestsPersisted,omitempty" protobuf:"varint,3,opt,name=subtreeManifestsPersisted"`
++}
++
++// VolumeSnapshotDomainCaptureState holds the state-snapshotter domain-written planning refs and lifecycle.
++// Deckhouse fork extension.
++type VolumeSnapshotDomainCaptureState struct {
++	// +optional
++	Phase string `json:"phase,omitempty" protobuf:"bytes,1,opt,name=phase"`
++	// +optional
++	Reason string `json:"reason,omitempty" protobuf:"bytes,2,opt,name=reason"`
++	// +optional
++	Message string `json:"message,omitempty" protobuf:"bytes,3,opt,name=message"`
++	// +optional
++	ManifestCaptureRequestName string `json:"manifestCaptureRequestName,omitempty" protobuf:"bytes,4,opt,name=manifestCaptureRequestName"`
++	// +optional
++	VolumeCaptureRequestName string `json:"volumeCaptureRequestName,omitempty" protobuf:"bytes,5,opt,name=volumeCaptureRequestName"`
++	// +optional
++	ExcludedRefs []VolumeSnapshotExcludedObjectReference `json:"excludedRefs,omitempty" protobuf:"bytes,6,rep,name=excludedRefs"`
++}
++
++// VolumeSnapshotChildReference is one direct child snapshot edge of a domain VolumeSnapshot node.
++// Deckhouse fork extension.
++type VolumeSnapshotChildReference struct {
++	APIVersion string `json:"apiVersion" protobuf:"bytes,1,opt,name=apiVersion"`
++	Kind       string `json:"kind" protobuf:"bytes,2,opt,name=kind"`
++	Name       string `json:"name" protobuf:"bytes,3,opt,name=name"`
++}
++
++// VolumeSnapshotExcludedObjectReference is one source object excluded from a domain VolumeSnapshot node.
++// Deckhouse fork extension.
++type VolumeSnapshotExcludedObjectReference struct {
++	APIVersion string `json:"apiVersion" protobuf:"bytes,1,opt,name=apiVersion"`
++	Kind       string `json:"kind" protobuf:"bytes,2,opt,name=kind"`
++	Name       string `json:"name" protobuf:"bytes,3,opt,name=name"`
++}
++
++// VolumeSnapshotSourceReference is the full reference to the captured live source object (the source PVC)
++// of a domain VolumeSnapshot node. Deckhouse fork extension.
++type VolumeSnapshotSourceReference struct {
++	APIVersion string `json:"apiVersion" protobuf:"bytes,1,opt,name=apiVersion"`
++	Kind       string `json:"kind" protobuf:"bytes,2,opt,name=kind"`
++	Name       string `json:"name" protobuf:"bytes,3,opt,name=name"`
++	// +optional
++	Namespace string `json:"namespace,omitempty" protobuf:"bytes,4,opt,name=namespace"`
++	// +optional
++	UID string `json:"uid,omitempty" protobuf:"bytes,5,opt,name=uid"`
  }
  
  // +genclient
 diff --git a/client/apis/volumesnapshot/v1/zz_generated.deepcopy.go b/client/apis/volumesnapshot/v1/zz_generated.deepcopy.go
-index a590aef..82aeaa3 100644
+index a590aef06..ba47cf21b 100644
 --- a/client/apis/volumesnapshot/v1/zz_generated.deepcopy.go
 +++ b/client/apis/volumesnapshot/v1/zz_generated.deepcopy.go
-@@ -360,6 +360,11 @@ func (in *VolumeSnapshotSource) DeepCopyInto(out *VolumeSnapshotSource) {
+@@ -23,6 +23,7 @@ package v1
+ 
+ import (
+ 	corev1 "k8s.io/api/core/v1"
++	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+ 	runtime "k8s.io/apimachinery/pkg/runtime"
+ )
+ 
+@@ -360,6 +361,11 @@ func (in *VolumeSnapshotSource) DeepCopyInto(out *VolumeSnapshotSource) {
  		*out = new(string)
  		**out = **in
  	}
@@ -137,7 +235,7 @@ index a590aef..82aeaa3 100644
  	return
  }
  
-@@ -427,6 +432,36 @@ func (in *VolumeSnapshotStatus) DeepCopyInto(out *VolumeSnapshotStatus) {
+@@ -427,9 +433,181 @@ func (in *VolumeSnapshotStatus) DeepCopyInto(out *VolumeSnapshotStatus) {
  		*out = new(string)
  		**out = **in
  	}
@@ -151,8 +249,150 @@ index a590aef..82aeaa3 100644
 +		*out = new(VolumeSnapshotDataBinding)
 +		(*in).DeepCopyInto(*out)
 +	}
++	if in.CaptureState != nil {
++		in, out := &in.CaptureState, &out.CaptureState
++		*out = new(VolumeSnapshotCaptureState)
++		(*in).DeepCopyInto(*out)
++	}
++	if in.ChildrenSnapshotRefs != nil {
++		in, out := &in.ChildrenSnapshotRefs, &out.ChildrenSnapshotRefs
++		*out = make([]VolumeSnapshotChildReference, len(*in))
++		copy(*out, *in)
++	}
++	if in.SnapshotSource != nil {
++		in, out := &in.SnapshotSource, &out.SnapshotSource
++		*out = new(VolumeSnapshotSourceReference)
++		**out = **in
++	}
++	if in.Conditions != nil {
++		in, out := &in.Conditions, &out.Conditions
++		*out = make([]metav1.Condition, len(*in))
++		for i := range *in {
++			(*in)[i].DeepCopyInto(&(*out)[i])
++		}
++	}
  	return
  }
+ 
++// DeepCopyInto is a deepcopy function, copying the receiver, writing into out. in must be non-nil.
++func (in *VolumeSnapshotCaptureState) DeepCopyInto(out *VolumeSnapshotCaptureState) {
++	*out = *in
++	if in.CommonController != nil {
++		in, out := &in.CommonController, &out.CommonController
++		*out = new(VolumeSnapshotCommonCaptureState)
++		(*in).DeepCopyInto(*out)
++	}
++	if in.DomainSpecificController != nil {
++		in, out := &in.DomainSpecificController, &out.DomainSpecificController
++		*out = new(VolumeSnapshotDomainCaptureState)
++		(*in).DeepCopyInto(*out)
++	}
++}
++
++// DeepCopy is a deepcopy function, copying the receiver, creating a new VolumeSnapshotCaptureState.
++func (in *VolumeSnapshotCaptureState) DeepCopy() *VolumeSnapshotCaptureState {
++	if in == nil {
++		return nil
++	}
++	out := new(VolumeSnapshotCaptureState)
++	in.DeepCopyInto(out)
++	return out
++}
++
++// DeepCopyInto is a deepcopy function, copying the receiver, writing into out. in must be non-nil.
++func (in *VolumeSnapshotCommonCaptureState) DeepCopyInto(out *VolumeSnapshotCommonCaptureState) {
++	*out = *in
++	if in.ManifestCaptured != nil {
++		in, out := &in.ManifestCaptured, &out.ManifestCaptured
++		*out = new(bool)
++		**out = **in
++	}
++	if in.DataCaptured != nil {
++		in, out := &in.DataCaptured, &out.DataCaptured
++		*out = new(bool)
++		**out = **in
++	}
++	if in.SubtreeManifestsPersisted != nil {
++		in, out := &in.SubtreeManifestsPersisted, &out.SubtreeManifestsPersisted
++		*out = new(bool)
++		**out = **in
++	}
++}
++
++// DeepCopy is a deepcopy function, copying the receiver, creating a new VolumeSnapshotCommonCaptureState.
++func (in *VolumeSnapshotCommonCaptureState) DeepCopy() *VolumeSnapshotCommonCaptureState {
++	if in == nil {
++		return nil
++	}
++	out := new(VolumeSnapshotCommonCaptureState)
++	in.DeepCopyInto(out)
++	return out
++}
++
++// DeepCopyInto is a deepcopy function, copying the receiver, writing into out. in must be non-nil.
++func (in *VolumeSnapshotDomainCaptureState) DeepCopyInto(out *VolumeSnapshotDomainCaptureState) {
++	*out = *in
++	if in.ExcludedRefs != nil {
++		in, out := &in.ExcludedRefs, &out.ExcludedRefs
++		*out = make([]VolumeSnapshotExcludedObjectReference, len(*in))
++		copy(*out, *in)
++	}
++}
++
++// DeepCopy is a deepcopy function, copying the receiver, creating a new VolumeSnapshotDomainCaptureState.
++func (in *VolumeSnapshotDomainCaptureState) DeepCopy() *VolumeSnapshotDomainCaptureState {
++	if in == nil {
++		return nil
++	}
++	out := new(VolumeSnapshotDomainCaptureState)
++	in.DeepCopyInto(out)
++	return out
++}
++
++// DeepCopyInto is a deepcopy function, copying the receiver, writing into out. in must be non-nil.
++func (in *VolumeSnapshotChildReference) DeepCopyInto(out *VolumeSnapshotChildReference) {
++	*out = *in
++}
++
++// DeepCopy is a deepcopy function, copying the receiver, creating a new VolumeSnapshotChildReference.
++func (in *VolumeSnapshotChildReference) DeepCopy() *VolumeSnapshotChildReference {
++	if in == nil {
++		return nil
++	}
++	out := new(VolumeSnapshotChildReference)
++	in.DeepCopyInto(out)
++	return out
++}
++
++// DeepCopyInto is a deepcopy function, copying the receiver, writing into out. in must be non-nil.
++func (in *VolumeSnapshotExcludedObjectReference) DeepCopyInto(out *VolumeSnapshotExcludedObjectReference) {
++	*out = *in
++}
++
++// DeepCopy is a deepcopy function, copying the receiver, creating a new VolumeSnapshotExcludedObjectReference.
++func (in *VolumeSnapshotExcludedObjectReference) DeepCopy() *VolumeSnapshotExcludedObjectReference {
++	if in == nil {
++		return nil
++	}
++	out := new(VolumeSnapshotExcludedObjectReference)
++	in.DeepCopyInto(out)
++	return out
++}
++
++// DeepCopyInto is a deepcopy function, copying the receiver, writing into out. in must be non-nil.
++func (in *VolumeSnapshotSourceReference) DeepCopyInto(out *VolumeSnapshotSourceReference) {
++	*out = *in
++}
++
++// DeepCopy is a deepcopy function, copying the receiver, creating a new VolumeSnapshotSourceReference.
++func (in *VolumeSnapshotSourceReference) DeepCopy() *VolumeSnapshotSourceReference {
++	if in == nil {
++		return nil
++	}
++	out := new(VolumeSnapshotSourceReference)
++	in.DeepCopyInto(out)
++	return out
++}
 +
 +// DeepCopyInto is a deepcopy function, copying the receiver, writing into out. in must be non-nil.
 +func (in *VolumeSnapshotDataBinding) DeepCopyInto(out *VolumeSnapshotDataBinding) {
@@ -173,9 +413,12 @@ index a590aef..82aeaa3 100644
 +	in.DeepCopyInto(out)
 +	return out
 +}
- 
++
+ // DeepCopy is an autogenerated deepcopy function, copying the receiver, creating a new VolumeSnapshotStatus.
+ func (in *VolumeSnapshotStatus) DeepCopy() *VolumeSnapshotStatus {
+ 	if in == nil {
 diff --git a/pkg/common-controller/snapshot_controller.go b/pkg/common-controller/snapshot_controller.go
-index 8c1ba60..510f39f 100644
+index 8c1ba60b5..ebbf506f6 100644
 --- a/pkg/common-controller/snapshot_controller.go
 +++ b/pkg/common-controller/snapshot_controller.go
 @@ -176,6 +176,15 @@ func (ctrl *csiSnapshotCommonController) syncContent(content *crdv1.VolumeSnapsh
@@ -194,8 +437,49 @@ index 8c1ba60..510f39f 100644
  	klog.V(5).Infof("syncSnapshot [%s]: check if we should remove finalizer on snapshot PVC source and remove it if we can", utils.SnapshotKey(snapshot))
  
  	// Check if we should remove finalizer on PVC and remove it if we can.
+@@ -469,6 +478,40 @@ func (ctrl *csiSnapshotCommonController) addVolumeGroupSnapshotOwnership(ctx con
+ func (ctrl *csiSnapshotCommonController) syncUnreadySnapshot(snapshot *crdv1.VolumeSnapshot) error {
+ 	uniqueSnapshotName := utils.SnapshotKey(snapshot)
+ 	klog.V(5).Infof("syncUnreadySnapshot %s", uniqueSnapshotName)
++
++	// Deckhouse fork: stamp the "taken into work" label so the state-snapshotter VolumeSnapshot domain
++	// controller can adopt this VolumeSnapshot (fork-label discriminator, state-snapshotter design §11.1/§11.3).
++	// This is the unready path (!ready || !bound); import VolumeSnapshots (spec.source.import) never reach here
++	// because syncSnapshot/syncSnapshotByKey already skip them upstream, so the label is never stamped on
++	// import VSs. Check-then-set is idempotent across resyncs; on conflict the sync just requeues and re-checks.
++	// The label lives on the object itself, so it survives module disable/enable with no missed windows.
++	const stateSnapshotterProcessedLabelKey = "storage-foundation.deckhouse.io/processed"
++	if snapshot.ObjectMeta.Labels[stateSnapshotterProcessedLabelKey] == "" {
++		var patches []utils.PatchOp
++		if snapshot.ObjectMeta.Labels == nil {
++			patches = append(patches, utils.PatchOp{
++				Op:    "add",
++				Path:  "/metadata/labels",
++				Value: map[string]string{stateSnapshotterProcessedLabelKey: "true"},
++			})
++		} else {
++			// JSON Pointer escaping of stateSnapshotterProcessedLabelKey: "/" -> "~1" (RFC 6901).
++			patches = append(patches, utils.PatchOp{
++				Op:    "add",
++				Path:  "/metadata/labels/storage-foundation.deckhouse.io~1processed",
++				Value: "true",
++			})
++		}
++		updatedSnapshot, patchErr := utils.PatchVolumeSnapshot(snapshot, patches, ctrl.clientset)
++		if patchErr != nil {
++			return newControllerUpdateError(uniqueSnapshotName, patchErr.Error())
++		}
++		if _, storeErr := ctrl.storeSnapshotUpdate(updatedSnapshot); storeErr != nil {
++			klog.Errorf("syncUnreadySnapshot[%s]: failed to update snapshot store after stamping processed label: %v", uniqueSnapshotName, storeErr)
++		}
++		snapshot = updatedSnapshot
++	}
++
+ 	driverName, err := ctrl.getSnapshotDriverName(snapshot)
+ 	if err != nil {
+ 		klog.Errorf("failed to getSnapshotDriverName while recording metrics for snapshot %q: %s", utils.SnapshotKey(snapshot), err)
 diff --git a/pkg/common-controller/snapshot_controller_base.go b/pkg/common-controller/snapshot_controller_base.go
-index a489b92..4adcd23 100644
+index a489b9241..4adcd2382 100644
 --- a/pkg/common-controller/snapshot_controller_base.go
 +++ b/pkg/common-controller/snapshot_controller_base.go
 @@ -386,6 +386,13 @@ func (ctrl *csiSnapshotCommonController) syncSnapshotByKey(key string) error {
@@ -213,7 +497,7 @@ index a489b92..4adcd23 100644
  		// been add/update/sync
  		newSnapshot, err := ctrl.checkAndUpdateSnapshotClass(snapshot)
 diff --git a/vendor/github.com/kubernetes-csi/external-snapshotter/client/v8/apis/volumesnapshot/v1/types.go b/vendor/github.com/kubernetes-csi/external-snapshotter/client/v8/apis/volumesnapshot/v1/types.go
-index 36f60dc..e865972 100644
+index 36f60dc95..2f26914f2 100644
 --- a/vendor/github.com/kubernetes-csi/external-snapshotter/client/v8/apis/volumesnapshot/v1/types.go
 +++ b/vendor/github.com/kubernetes-csi/external-snapshotter/client/v8/apis/volumesnapshot/v1/types.go
 @@ -96,13 +96,19 @@ type VolumeSnapshotSpec struct {
@@ -239,7 +523,7 @@ index 36f60dc..e865972 100644
  type VolumeSnapshotSource struct {
  	// persistentVolumeClaimName specifies the name of the PersistentVolumeClaim
  	// object representing the volume from which a snapshot should be created.
-@@ -122,8 +128,72 @@ type VolumeSnapshotSource struct {
+@@ -122,6 +128,70 @@ type VolumeSnapshotSource struct {
  	// +optional
  	// +kubebuilder:validation:XValidation:rule="self == oldSelf",message="volumeSnapshotContentName is immutable"
  	VolumeSnapshotContentName *string `json:"volumeSnapshotContentName,omitempty" protobuf:"bytes,2,opt,name=volumeSnapshotContentName"`
@@ -252,8 +536,8 @@ index 36f60dc..e865972 100644
 +	// Deckhouse fork extension.
 +	// +optional
 +	Import *VolumeSnapshotImportSource `json:"import,omitempty" protobuf:"bytes,3,opt,name=import"`
- }
- 
++}
++
 +// VolumeSnapshotImportSource is an empty marker selecting import mode for a VolumeSnapshot
 +// (spec.source.import: {}). Its mere presence means the data artifact is produced by a DataImport
 +// (storage-foundation.deckhouse.io) and the upstream snapshot-controller does NOT reconcile it.
@@ -307,12 +591,10 @@ index 36f60dc..e865972 100644
 +	Name       string `json:"name" protobuf:"bytes,3,opt,name=name"`
 +	// +optional
 +	UID string `json:"uid,omitempty" protobuf:"bytes,4,opt,name=uid"`
-+}
-+
+ }
+ 
  // VolumeSnapshotStatus is the status of the VolumeSnapshot
- // Note that CreationTime, RestoreSize, ReadyToUse, and Error are in both
- // VolumeSnapshotStatus and VolumeSnapshotContentStatus. Fields in VolumeSnapshotStatus
-@@ -194,6 +264,22 @@ type VolumeSnapshotStatus struct {
+@@ -194,6 +264,114 @@ type VolumeSnapshotStatus struct {
  	// VolumeSnapshot is a part of.
  	// +optional
  	VolumeGroupSnapshotName *string `json:"volumeGroupSnapshotName,omitempty" protobuf:"bytes,6,opt,name=volumeGroupSnapshotName"`
@@ -332,14 +614,114 @@ index 36f60dc..e865972 100644
 +	// alone. Written by the state-snapshotter common controller (import flow). Deckhouse fork extension.
 +	// +optional
 +	Data *VolumeSnapshotDataBinding `json:"data,omitempty" protobuf:"bytes,8,opt,name=data"`
++
++	// captureState collects the state-snapshotter capture signals mirrored onto this VolumeSnapshot when it
++	// is a domain snapshot node: commonController holds the core-written capture-leg latches, and
++	// domainSpecificController holds the domain-written planning refs and lifecycle. The upstream
++	// snapshot-controller never sets it, but MUST preserve it across its own status updates
++	// (Get -> DeepCopy -> UpdateStatus), so it is typed here. Deckhouse fork extension.
++	// +optional
++	CaptureState *VolumeSnapshotCaptureState `json:"captureState,omitempty" protobuf:"bytes,9,opt,name=captureState"`
++
++	// childrenSnapshotRefs are the direct child snapshot edges when this VolumeSnapshot participates in a
++	// snapshot tree. A VolumeSnapshot is a data leaf, so this is normally empty; it is typed for round-trip
++	// preservation and uniformity across snapshot kinds. Deckhouse fork extension.
++	// +optional
++	ChildrenSnapshotRefs []VolumeSnapshotChildReference `json:"childrenSnapshotRefs,omitempty" protobuf:"bytes,10,rep,name=childrenSnapshotRefs"`
++
++	// snapshotSource is the full reference to the captured live source object (the source PVC), written by
++	// the state-snapshotter domain controller (PublishSnapshotSource) and preserved here across the fork's
++	// status updates. Deckhouse fork extension.
++	// +optional
++	SnapshotSource *VolumeSnapshotSourceReference `json:"snapshotSource,omitempty" protobuf:"bytes,11,opt,name=snapshotSource"`
++
++	// conditions report the state-snapshotter protocol readiness (conditions[Ready] is the user-facing
++	// condition derived by the core), distinct from the CSI readyToUse binding signal. Written by the core
++	// and preserved here across the fork's status updates. Deckhouse fork extension.
++	// +optional
++	Conditions []metav1.Condition `json:"conditions,omitempty" protobuf:"bytes,12,rep,name=conditions"`
++}
++
++// VolumeSnapshotCaptureState mirrors the state-snapshotter captureState onto a domain VolumeSnapshot node.
++// The upstream snapshot-controller never sets it; it is typed only so the fork preserves it across its own
++// status round-trips (Get -> DeepCopy -> UpdateStatus). Deckhouse fork extension.
++type VolumeSnapshotCaptureState struct {
++	// +optional
++	CommonController *VolumeSnapshotCommonCaptureState `json:"commonController,omitempty" protobuf:"bytes,1,opt,name=commonController"`
++	// +optional
++	DomainSpecificController *VolumeSnapshotDomainCaptureState `json:"domainSpecificController,omitempty" protobuf:"bytes,2,opt,name=domainSpecificController"`
++}
++
++// VolumeSnapshotCommonCaptureState holds the state-snapshotter core-written capture-leg success latches.
++// Deckhouse fork extension.
++type VolumeSnapshotCommonCaptureState struct {
++	// +optional
++	ManifestCaptured *bool `json:"manifestCaptured,omitempty" protobuf:"varint,1,opt,name=manifestCaptured"`
++	// +optional
++	DataCaptured *bool `json:"dataCaptured,omitempty" protobuf:"varint,2,opt,name=dataCaptured"`
++	// +optional
++	SubtreeManifestsPersisted *bool `json:"subtreeManifestsPersisted,omitempty" protobuf:"varint,3,opt,name=subtreeManifestsPersisted"`
++}
++
++// VolumeSnapshotDomainCaptureState holds the state-snapshotter domain-written planning refs and lifecycle.
++// Deckhouse fork extension.
++type VolumeSnapshotDomainCaptureState struct {
++	// +optional
++	Phase string `json:"phase,omitempty" protobuf:"bytes,1,opt,name=phase"`
++	// +optional
++	Reason string `json:"reason,omitempty" protobuf:"bytes,2,opt,name=reason"`
++	// +optional
++	Message string `json:"message,omitempty" protobuf:"bytes,3,opt,name=message"`
++	// +optional
++	ManifestCaptureRequestName string `json:"manifestCaptureRequestName,omitempty" protobuf:"bytes,4,opt,name=manifestCaptureRequestName"`
++	// +optional
++	VolumeCaptureRequestName string `json:"volumeCaptureRequestName,omitempty" protobuf:"bytes,5,opt,name=volumeCaptureRequestName"`
++	// +optional
++	ExcludedRefs []VolumeSnapshotExcludedObjectReference `json:"excludedRefs,omitempty" protobuf:"bytes,6,rep,name=excludedRefs"`
++}
++
++// VolumeSnapshotChildReference is one direct child snapshot edge of a domain VolumeSnapshot node.
++// Deckhouse fork extension.
++type VolumeSnapshotChildReference struct {
++	APIVersion string `json:"apiVersion" protobuf:"bytes,1,opt,name=apiVersion"`
++	Kind       string `json:"kind" protobuf:"bytes,2,opt,name=kind"`
++	Name       string `json:"name" protobuf:"bytes,3,opt,name=name"`
++}
++
++// VolumeSnapshotExcludedObjectReference is one source object excluded from a domain VolumeSnapshot node.
++// Deckhouse fork extension.
++type VolumeSnapshotExcludedObjectReference struct {
++	APIVersion string `json:"apiVersion" protobuf:"bytes,1,opt,name=apiVersion"`
++	Kind       string `json:"kind" protobuf:"bytes,2,opt,name=kind"`
++	Name       string `json:"name" protobuf:"bytes,3,opt,name=name"`
++}
++
++// VolumeSnapshotSourceReference is the full reference to the captured live source object (the source PVC)
++// of a domain VolumeSnapshot node. Deckhouse fork extension.
++type VolumeSnapshotSourceReference struct {
++	APIVersion string `json:"apiVersion" protobuf:"bytes,1,opt,name=apiVersion"`
++	Kind       string `json:"kind" protobuf:"bytes,2,opt,name=kind"`
++	Name       string `json:"name" protobuf:"bytes,3,opt,name=name"`
++	// +optional
++	Namespace string `json:"namespace,omitempty" protobuf:"bytes,4,opt,name=namespace"`
++	// +optional
++	UID string `json:"uid,omitempty" protobuf:"bytes,5,opt,name=uid"`
  }
  
  // +genclient
 diff --git a/vendor/github.com/kubernetes-csi/external-snapshotter/client/v8/apis/volumesnapshot/v1/zz_generated.deepcopy.go b/vendor/github.com/kubernetes-csi/external-snapshotter/client/v8/apis/volumesnapshot/v1/zz_generated.deepcopy.go
-index a590aef..82aeaa3 100644
+index a590aef06..ba47cf21b 100644
 --- a/vendor/github.com/kubernetes-csi/external-snapshotter/client/v8/apis/volumesnapshot/v1/zz_generated.deepcopy.go
 +++ b/vendor/github.com/kubernetes-csi/external-snapshotter/client/v8/apis/volumesnapshot/v1/zz_generated.deepcopy.go
-@@ -360,6 +360,11 @@ func (in *VolumeSnapshotSource) DeepCopyInto(out *VolumeSnapshotSource) {
+@@ -23,6 +23,7 @@ package v1
+ 
+ import (
+ 	corev1 "k8s.io/api/core/v1"
++	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+ 	runtime "k8s.io/apimachinery/pkg/runtime"
+ )
+ 
+@@ -360,6 +361,11 @@ func (in *VolumeSnapshotSource) DeepCopyInto(out *VolumeSnapshotSource) {
  		*out = new(string)
  		**out = **in
  	}
@@ -351,7 +733,7 @@ index a590aef..82aeaa3 100644
  	return
  }
  
-@@ -427,6 +432,36 @@ func (in *VolumeSnapshotStatus) DeepCopyInto(out *VolumeSnapshotStatus) {
+@@ -427,9 +433,181 @@ func (in *VolumeSnapshotStatus) DeepCopyInto(out *VolumeSnapshotStatus) {
  		*out = new(string)
  		**out = **in
  	}
@@ -365,8 +747,150 @@ index a590aef..82aeaa3 100644
 +		*out = new(VolumeSnapshotDataBinding)
 +		(*in).DeepCopyInto(*out)
 +	}
++	if in.CaptureState != nil {
++		in, out := &in.CaptureState, &out.CaptureState
++		*out = new(VolumeSnapshotCaptureState)
++		(*in).DeepCopyInto(*out)
++	}
++	if in.ChildrenSnapshotRefs != nil {
++		in, out := &in.ChildrenSnapshotRefs, &out.ChildrenSnapshotRefs
++		*out = make([]VolumeSnapshotChildReference, len(*in))
++		copy(*out, *in)
++	}
++	if in.SnapshotSource != nil {
++		in, out := &in.SnapshotSource, &out.SnapshotSource
++		*out = new(VolumeSnapshotSourceReference)
++		**out = **in
++	}
++	if in.Conditions != nil {
++		in, out := &in.Conditions, &out.Conditions
++		*out = make([]metav1.Condition, len(*in))
++		for i := range *in {
++			(*in)[i].DeepCopyInto(&(*out)[i])
++		}
++	}
  	return
  }
+ 
++// DeepCopyInto is a deepcopy function, copying the receiver, writing into out. in must be non-nil.
++func (in *VolumeSnapshotCaptureState) DeepCopyInto(out *VolumeSnapshotCaptureState) {
++	*out = *in
++	if in.CommonController != nil {
++		in, out := &in.CommonController, &out.CommonController
++		*out = new(VolumeSnapshotCommonCaptureState)
++		(*in).DeepCopyInto(*out)
++	}
++	if in.DomainSpecificController != nil {
++		in, out := &in.DomainSpecificController, &out.DomainSpecificController
++		*out = new(VolumeSnapshotDomainCaptureState)
++		(*in).DeepCopyInto(*out)
++	}
++}
++
++// DeepCopy is a deepcopy function, copying the receiver, creating a new VolumeSnapshotCaptureState.
++func (in *VolumeSnapshotCaptureState) DeepCopy() *VolumeSnapshotCaptureState {
++	if in == nil {
++		return nil
++	}
++	out := new(VolumeSnapshotCaptureState)
++	in.DeepCopyInto(out)
++	return out
++}
++
++// DeepCopyInto is a deepcopy function, copying the receiver, writing into out. in must be non-nil.
++func (in *VolumeSnapshotCommonCaptureState) DeepCopyInto(out *VolumeSnapshotCommonCaptureState) {
++	*out = *in
++	if in.ManifestCaptured != nil {
++		in, out := &in.ManifestCaptured, &out.ManifestCaptured
++		*out = new(bool)
++		**out = **in
++	}
++	if in.DataCaptured != nil {
++		in, out := &in.DataCaptured, &out.DataCaptured
++		*out = new(bool)
++		**out = **in
++	}
++	if in.SubtreeManifestsPersisted != nil {
++		in, out := &in.SubtreeManifestsPersisted, &out.SubtreeManifestsPersisted
++		*out = new(bool)
++		**out = **in
++	}
++}
++
++// DeepCopy is a deepcopy function, copying the receiver, creating a new VolumeSnapshotCommonCaptureState.
++func (in *VolumeSnapshotCommonCaptureState) DeepCopy() *VolumeSnapshotCommonCaptureState {
++	if in == nil {
++		return nil
++	}
++	out := new(VolumeSnapshotCommonCaptureState)
++	in.DeepCopyInto(out)
++	return out
++}
++
++// DeepCopyInto is a deepcopy function, copying the receiver, writing into out. in must be non-nil.
++func (in *VolumeSnapshotDomainCaptureState) DeepCopyInto(out *VolumeSnapshotDomainCaptureState) {
++	*out = *in
++	if in.ExcludedRefs != nil {
++		in, out := &in.ExcludedRefs, &out.ExcludedRefs
++		*out = make([]VolumeSnapshotExcludedObjectReference, len(*in))
++		copy(*out, *in)
++	}
++}
++
++// DeepCopy is a deepcopy function, copying the receiver, creating a new VolumeSnapshotDomainCaptureState.
++func (in *VolumeSnapshotDomainCaptureState) DeepCopy() *VolumeSnapshotDomainCaptureState {
++	if in == nil {
++		return nil
++	}
++	out := new(VolumeSnapshotDomainCaptureState)
++	in.DeepCopyInto(out)
++	return out
++}
++
++// DeepCopyInto is a deepcopy function, copying the receiver, writing into out. in must be non-nil.
++func (in *VolumeSnapshotChildReference) DeepCopyInto(out *VolumeSnapshotChildReference) {
++	*out = *in
++}
++
++// DeepCopy is a deepcopy function, copying the receiver, creating a new VolumeSnapshotChildReference.
++func (in *VolumeSnapshotChildReference) DeepCopy() *VolumeSnapshotChildReference {
++	if in == nil {
++		return nil
++	}
++	out := new(VolumeSnapshotChildReference)
++	in.DeepCopyInto(out)
++	return out
++}
++
++// DeepCopyInto is a deepcopy function, copying the receiver, writing into out. in must be non-nil.
++func (in *VolumeSnapshotExcludedObjectReference) DeepCopyInto(out *VolumeSnapshotExcludedObjectReference) {
++	*out = *in
++}
++
++// DeepCopy is a deepcopy function, copying the receiver, creating a new VolumeSnapshotExcludedObjectReference.
++func (in *VolumeSnapshotExcludedObjectReference) DeepCopy() *VolumeSnapshotExcludedObjectReference {
++	if in == nil {
++		return nil
++	}
++	out := new(VolumeSnapshotExcludedObjectReference)
++	in.DeepCopyInto(out)
++	return out
++}
++
++// DeepCopyInto is a deepcopy function, copying the receiver, writing into out. in must be non-nil.
++func (in *VolumeSnapshotSourceReference) DeepCopyInto(out *VolumeSnapshotSourceReference) {
++	*out = *in
++}
++
++// DeepCopy is a deepcopy function, copying the receiver, creating a new VolumeSnapshotSourceReference.
++func (in *VolumeSnapshotSourceReference) DeepCopy() *VolumeSnapshotSourceReference {
++	if in == nil {
++		return nil
++	}
++	out := new(VolumeSnapshotSourceReference)
++	in.DeepCopyInto(out)
++	return out
++}
 +
 +// DeepCopyInto is a deepcopy function, copying the receiver, writing into out. in must be non-nil.
 +func (in *VolumeSnapshotDataBinding) DeepCopyInto(out *VolumeSnapshotDataBinding) {
@@ -387,4 +911,7 @@ index a590aef..82aeaa3 100644
 +	in.DeepCopyInto(out)
 +	return out
 +}
- 
++
+ // DeepCopy is an autogenerated deepcopy function, copying the receiver, creating a new VolumeSnapshotStatus.
+ func (in *VolumeSnapshotStatus) DeepCopy() *VolumeSnapshotStatus {
+ 	if in == nil {
