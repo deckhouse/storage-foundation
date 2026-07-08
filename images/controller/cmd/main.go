@@ -122,6 +122,15 @@ func main() {
 	}
 	log.Info("VolumeRestoreRequestController added to manager")
 
+	// Add VolumeSnapshot domain controller (state-snapshotter domain capture for module-managed CSI
+	// VolumeSnapshots). It builds its own dedicated scheme/client for the Deckhouse-extended VolumeSnapshot
+	// type, so the manager default scheme keeps mapping the GVK to the upstream external-snapshotter type.
+	if err = controllers.AddVolumeSnapshotDomainControllerToManager(mgr, cfgParams); err != nil {
+		log.Error(err, "unable to create controller", "controller", "VolumeSnapshotDomain")
+		os.Exit(1)
+	}
+	log.Info("VolumeSnapshotDomainController added to manager")
+
 	if err = mgr.AddHealthzCheck("healthz", healthz.Ping); err != nil {
 		log.Error(err, "[main] unable to mgr.AddHealthzCheck")
 		os.Exit(1)

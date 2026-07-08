@@ -92,6 +92,12 @@ rules:
   resources: ["volumesnapshots/status"]
   verbs: ["get", "update", "patch"]
 
+# ManifestCaptureRequest (namespaced) - created and owned by the VolumeSnapshot domain controller
+# (state-snapshotter domain capture: the manifest leg of a module-managed VolumeSnapshot).
+- apiGroups: ["state-snapshotter.deckhouse.io"]
+  resources: ["manifestcapturerequests"]
+  verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+
 # Events - emitted by controller-runtime EventRecorder
 - apiGroups: [""]
   resources: ["events"]
