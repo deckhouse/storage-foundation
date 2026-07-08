@@ -1,0 +1,34 @@
+name: E2E tests
+
+on:
+  pull_request:
+    types: [opened, reopened, labeled, synchronize, ready_for_review]
+
+concurrency:
+  group: "e2e-tests-${{ github.event.pull_request.number }}"
+  cancel-in-progress: true
+
+jobs:
+  build_dev:
+    if: ${{ contains(github.event.pull_request.labels.*.name, 'e2e-smoke-test') }}
+    uses: ./.github/workflows/build_dev.yml
+    secrets: inherit
+
+  e2e:
+    if: ${{ contains(github.event.pull_request.labels.*.name, 'e2e-smoke-test') }}
+    name: Run E2E Smoke Tests
+    needs: build_dev
+    uses: deckhouse/storage-e2e/.github/workflows/e2e-reusable.yml@main
+    secrets: inherit
+    with:
+      pipeline_mode: create-and-test
+      pr_number: ${{ github.event.pull_request.number }}
+      module_slug: ${{ vars.MODULE_NAME }}
+      module_path: e2e
+      cluster_provider: alwaysCreateNew
+      cluster_config: e2e/tests/cluster_config.yml
+      test_package: ./tests/
+      test_suite: TestStorageFoundation
+      label_filter: e2e-tests
+      test_timeout: 90m
+      storage_e2e_ref: main
