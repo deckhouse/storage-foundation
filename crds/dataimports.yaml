@@ -27,30 +27,27 @@ spec:
           # x-kubernetes-immutable): only spec.mode and spec.snapshotRef are locked after creation, via the
           # CEL transition rules (self == oldSelf) below. Other spec fields (e.g. ttl) may still change.
           description: |
-            Resource for importing data into a volume (PopulateVolume) or producing a durable data
-            artifact for an already-existing snapshot node (ProduceArtifact).
+            Resource for importing data into a newly created PVC (CreatePVC) or producing a durable data
+            artifact for an already-existing snapshot node (PopulateData).
           properties:
             spec:
               type: object
               required:
                 - ttl
               x-kubernetes-validations:
-                # ProduceArtifact materializes the data leg of an existing snapshot node: it needs the node
-                # ref (snapshotRef) and the transient scratch volume (scratchVolumeTemplate), and forbids the
-                # PopulateVolume fields.
-                - rule: "self.mode != 'ProduceArtifact' || (has(self.snapshotRef) && has(self.scratchVolumeTemplate))"
-                  message: "mode ProduceArtifact requires snapshotRef and scratchVolumeTemplate."
-                - rule: "self.mode != 'ProduceArtifact' || (!has(self.pvcTemplate) && !has(self.volumeRef) && !self.force)"
-                  message: "mode ProduceArtifact forbids pvcTemplate, volumeRef and force."
-                # PopulateVolume writes into a preserved volume: exactly one of pvcTemplate (create) or
-                # volumeRef (overwrite existing), and none of the ProduceArtifact fields.
-                - rule: "self.mode != 'PopulateVolume' || (has(self.pvcTemplate) != has(self.volumeRef))"
-                  message: "mode PopulateVolume requires exactly one of pvcTemplate or volumeRef."
-                - rule: "self.mode != 'PopulateVolume' || (!has(self.snapshotRef) && !has(self.scratchVolumeTemplate))"
-                  message: "mode PopulateVolume forbids snapshotRef and scratchVolumeTemplate."
-                # force acknowledges the destructive in-place overwrite and is only valid with volumeRef.
-                - rule: "!self.force || has(self.volumeRef)"
-                  message: "force is only allowed together with volumeRef."
+                # PopulateData materializes the data leg of an existing snapshot node: it needs the node
+                # ref (snapshotRef) and the transient scratch volume (storageParams), and forbids the
+                # CreatePVC fields.
+                - rule: "self.mode != 'PopulateData' || (has(self.snapshotRef) && has(self.storageParams))"
+                  message: "mode PopulateData requires snapshotRef and storageParams."
+                - rule: "self.mode != 'PopulateData' || !has(self.pvcTemplate)"
+                  message: "mode PopulateData forbids pvcTemplate."
+                # CreatePVC creates and populates a preserved PVC (pvcTemplate) and forbids the PopulateData
+                # fields.
+                - rule: "self.mode != 'CreatePVC' || has(self.pvcTemplate)"
+                  message: "mode CreatePVC requires pvcTemplate."
+                - rule: "self.mode != 'CreatePVC' || (!has(self.snapshotRef) && !has(self.storageParams))"
+                  message: "mode CreatePVC forbids snapshotRef and storageParams."
                 # pvcTemplate must name the PVC it creates.
                 - rule: "!has(self.pvcTemplate) || (has(self.pvcTemplate.metadata) && has(self.pvcTemplate.metadata.name) && size(self.pvcTemplate.metadata.name) > 0)"
                   message: "pvcTemplate requires metadata.name."
@@ -82,16 +79,16 @@ spec:
                   default: true
                 mode:
                   type: string
-                  enum: ["PopulateVolume", "ProduceArtifact"]
-                  default: PopulateVolume
+                  enum: ["CreatePVC", "PopulateData"]
+                  default: CreatePVC
                   description: |
                     Discriminator selecting what the import does with the bytes:
                     
-                    - `PopulateVolume`: write into a preserved volume — a created PVC (`pvcTemplate`) or an
-                      existing volume overwritten in place (`volumeRef` + `force`). No durable artifact.
-                    - `ProduceArtifact`: stage the bytes into a transient scratch volume
-                      (`scratchVolumeTemplate`) and capture them into a durable VolumeSnapshotContent for the
-                      already-existing snapshot node referenced by `snapshotRef`.
+                    - `CreatePVC`: write into a preserved, newly created PVC (`pvcTemplate`). No durable
+                      artifact.
+                    - `PopulateData`: stage the bytes into a transient scratch volume (`storageParams`) and
+                      capture them into a durable VolumeSnapshotContent for the already-existing snapshot node
+                      referenced by `snapshotRef`.
                 snapshotRef:
                   type: object
                   x-kubernetes-validations:
@@ -100,7 +97,7 @@ spec:
                     - rule: "self == oldSelf"
                       message: "snapshotRef is immutable"
                   description: |
-                    ProduceArtifact only. Reference to the already-existing xxxSnapshot node the produced
+                    PopulateData only. Reference to the already-existing xxxSnapshot node the produced
                     durable artifact belongs to (namespace implicit = the DataImport namespace). Set by the
                     external creator (d8/user/backup); the DataImport controller does not read it — it exists
                     so the state-snapshotter reverse-lookup can match the leaf against `spec.snapshotRef`.
@@ -117,13 +114,13 @@ spec:
                       type: string
                       minLength: 1
                       description: Name of the snapshot node.
-                scratchVolumeTemplate:
+                storageParams:
                   type: object
                   description: |
-                    ProduceArtifact only. Transient scratch volume the imported bytes are staged into before
-                    capture; it is destroyed after the durable VolumeSnapshotContent is produced. Its
-                    StorageClass must be snapshot-capable (it references a VolumeSnapshotClass via the
-                    `storage.deckhouse.io/volumesnapshotclass` annotation).
+                    PopulateData only. Parameters of the transient scratch volume the imported bytes are
+                    staged into before capture; it is destroyed after the durable VolumeSnapshotContent is
+                    produced. Its StorageClass must be snapshot-capable (it references a VolumeSnapshotClass
+                    via the `storage.deckhouse.io/volumesnapshotclass` annotation).
                   required: ["storageClassName", "size"]
                   properties:
                     storageClassName:
@@ -138,40 +135,11 @@ spec:
                       type: string
                       enum: ["Block", "Filesystem"]
                       description: Volume mode of the scratch PVC. Defaults to `Filesystem` when omitted.
-                volumeRef:
-                  type: object
-                  description: |
-                    PopulateVolume (overwrite) only. Reference to an existing volume
-                    (`kind: PersistentVolumeClaim`) to overwrite in place; `force` must be set. Mutually
-                    exclusive with `pvcTemplate`.
-                  required: ["kind", "name"]
-                  properties:
-                    apiVersion:
-                      type: string
-                      description: Group/version of the referenced volume (optional for core PersistentVolumeClaim).
-                    kind:
-                      type: string
-                      minLength: 1
-                      description: Kind of the referenced volume (currently `PersistentVolumeClaim`).
-                    name:
-                      type: string
-                      minLength: 1
-                      description: Name of the referenced volume.
-                    namespace:
-                      type: string
-                      description: Namespace of the referenced volume (optional; defaults to the DataImport namespace).
-                force:
-                  type: boolean
-                  default: false
-                  description: |
-                    PopulateVolume only. Acknowledges the destructive in-place overwrite of the existing
-                    volume referenced by `volumeRef`. Only valid together with `volumeRef`.
                 pvcTemplate:
                   type: object
                   description: |
-                    PopulateVolume (create) only. PersistentVolumeClaim template fully describing the target
-                    PVC the imported bytes are written into; the PVC is preserved after the import. Mutually
-                    exclusive with `volumeRef`.
+                    CreatePVC only. PersistentVolumeClaim template fully describing the target PVC the
+                    imported bytes are written into; the PVC is preserved after the import.
                   properties:
                     metadata:
                       type: object
@@ -359,7 +327,7 @@ spec:
           priority: 1
         - name: Storage Class
           type: string
-          jsonPath: .spec.scratchVolumeTemplate.storageClassName
+          jsonPath: .spec.storageParams.storageClassName
           priority: 1
         - name: Wait For Consumer
           type: boolean

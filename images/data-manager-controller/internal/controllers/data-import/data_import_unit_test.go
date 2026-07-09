@@ -39,7 +39,7 @@ import (
 
 func TestScratchVolumeParamsFromSpec(t *testing.T) {
 	svt := func(sc, size, mode string) dev1alpha1.DataImportSpec {
-		return dev1alpha1.DataImportSpec{ScratchVolumeTemplate: &dev1alpha1.ScratchVolumeSpec{
+		return dev1alpha1.DataImportSpec{StorageParams: &dev1alpha1.StorageParamsSpec{
 			StorageClassName: sc, Size: size, VolumeMode: mode,
 		}}
 	}
@@ -112,8 +112,8 @@ func TestResolveSnapshotCaptureMode(t *testing.T) {
 	}
 	specSC := func(name string) dev1alpha1.DataImportSpec {
 		return dev1alpha1.DataImportSpec{
-			Mode:                  dev1alpha1.DataImportModeProduceArtifact,
-			ScratchVolumeTemplate: &dev1alpha1.ScratchVolumeSpec{StorageClassName: name, Size: "1Gi"},
+			Mode:          dev1alpha1.DataImportModePopulateData,
+			StorageParams: &dev1alpha1.StorageParamsSpec{StorageClassName: name, Size: "1Gi"},
 		}
 	}
 
@@ -160,9 +160,9 @@ func TestResolveSnapshotCaptureMode(t *testing.T) {
 		assert.Error(t, err)
 	})
 
-	t.Run("missing scratchVolumeTemplate fails closed", func(t *testing.T) {
+	t.Run("missing storageParams fails closed", func(t *testing.T) {
 		r := build()
-		r.dataImport = &dev1alpha1.DataImport{Spec: dev1alpha1.DataImportSpec{Mode: dev1alpha1.DataImportModeProduceArtifact}}
+		r.dataImport = &dev1alpha1.DataImport{Spec: dev1alpha1.DataImportSpec{Mode: dev1alpha1.DataImportModePopulateData}}
 		_, _, err := r.resolveSnapshotCaptureMode(context.Background())
 		assert.Error(t, err)
 	})
@@ -286,21 +286,21 @@ func TestBuildVolumeCaptureRequestTargetsScratchPVC(t *testing.T) {
 	assert.True(t, *owners[0].Controller)
 }
 
-func TestIsPopulateVolumeMode(t *testing.T) {
+func TestIsCreatePVCMode(t *testing.T) {
 	cases := map[string]struct {
 		mode dev1alpha1.DataImportMode
 		want bool
 	}{
-		"PopulateVolume":                   {mode: dev1alpha1.DataImportModePopulateVolume, want: true},
-		"ProduceArtifact":                  {mode: dev1alpha1.DataImportModeProduceArtifact, want: false},
-		"empty defaults to PopulateVolume": {mode: "", want: true},
+		"CreatePVC":                   {mode: dev1alpha1.DataImportModeCreatePVC, want: true},
+		"PopulateData":                {mode: dev1alpha1.DataImportModePopulateData, want: false},
+		"empty defaults to CreatePVC": {mode: "", want: true},
 	}
 	for name, tc := range cases {
 		t.Run(name, func(t *testing.T) {
 			r := &DataImportReconciler{dataImport: &dev1alpha1.DataImport{
 				Spec: dev1alpha1.DataImportSpec{Mode: tc.mode},
 			}}
-			assert.Equal(t, tc.want, r.isPopulateVolumeMode())
+			assert.Equal(t, tc.want, r.isCreatePVCMode())
 		})
 	}
 }
@@ -308,28 +308,14 @@ func TestIsPopulateVolumeMode(t *testing.T) {
 func TestEnsurePVCImportTargetRequiresTemplate(t *testing.T) {
 	r := &DataImportReconciler{dataImport: &dev1alpha1.DataImport{
 		ObjectMeta: metav1.ObjectMeta{Name: "imp-b", Namespace: "ns"},
-		Spec:       dev1alpha1.DataImportSpec{Mode: dev1alpha1.DataImportModePopulateVolume},
+		Spec:       dev1alpha1.DataImportSpec{Mode: dev1alpha1.DataImportModeCreatePVC},
 	}}
 	_, err := r.ensurePVCImportTarget(context.Background())
 	require.Error(t, err)
 	assert.ErrorIs(t, err, ErrTargetFailed)
 }
 
-func TestEnsurePVCImportTargetVolumeRefNotImplemented(t *testing.T) {
-	r := &DataImportReconciler{dataImport: &dev1alpha1.DataImport{
-		ObjectMeta: metav1.ObjectMeta{Name: "imp-b", Namespace: "ns"},
-		Spec: dev1alpha1.DataImportSpec{
-			Mode:      dev1alpha1.DataImportModePopulateVolume,
-			VolumeRef: &dev1alpha1.ObjectReference{Kind: dev1alpha1.KindPVC, Name: "data"},
-			Force:     true,
-		},
-	}}
-	_, err := r.ensurePVCImportTarget(context.Background())
-	require.Error(t, err)
-	assert.ErrorIs(t, err, ErrTargetFailed)
-}
-
-// newModeBReconciler builds a PopulateVolume reconciler whose PVC import target is restored-pvc, with a
+// newModeBReconciler builds a CreatePVC reconciler whose PVC import target is restored-pvc, with a
 // fake client carrying only corev1/storagev1 (the populate path never touches snapshot machinery).
 func newModeBReconciler(objs ...runtime.Object) *DataImportReconciler {
 	scheme := runtime.NewScheme()
@@ -341,7 +327,7 @@ func newModeBReconciler(objs ...runtime.Object) *DataImportReconciler {
 		dataImport: &dev1alpha1.DataImport{
 			ObjectMeta: metav1.ObjectMeta{Name: "imp-b", Namespace: "ns"},
 			Spec: dev1alpha1.DataImportSpec{
-				Mode: dev1alpha1.DataImportModePopulateVolume,
+				Mode: dev1alpha1.DataImportModeCreatePVC,
 				PvcTemplate: &dev1alpha1.PersistentVolumeClaimTemplateSpec{
 					PersistentVolumeClaimTemplateMetadata: dev1alpha1.PersistentVolumeClaimTemplateMetadata{Name: "restored-pvc"},
 				},
@@ -370,7 +356,7 @@ func TestHandlePVCImportStatusCompletesWithoutArtifact(t *testing.T) {
 	require.NoError(t, err)
 	assert.Zero(t, res.RequeueAfter)
 	assert.True(t, meta.IsStatusConditionTrue(r.dataImport.Status.Conditions, string(common.ConditionCompleted)))
-	// The defining difference of Mode B: no durable artifact is produced.
+	// The defining difference of CreatePVC: no durable artifact is produced.
 	assert.Nil(t, r.dataImport.Status.Data)
 	assert.Equal(t, "Filesystem", r.dataImport.Status.VolumeMode)
 }

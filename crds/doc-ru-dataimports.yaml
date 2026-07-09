@@ -29,11 +29,11 @@ spec:
                   description: |
                     Дискриминатор, определяющий, что импорт делает с данными:
 
-                    - `PopulateVolume`: запись в сохраняемый том — в создаваемый PVC (`pvcTemplate`) либо в существующий том с перезаписью на месте (`volumeRef` + `force`). Долговечный артефакт не создаётся.
-                    - `ProduceArtifact`: данные заливаются во временный (scratch) том (`scratchVolumeTemplate`) и захватываются в долговечный VolumeSnapshotContent для уже существующего узла-снимка, указанного в `snapshotRef`.
+                    - `CreatePVC`: запись в сохраняемый, создаваемый PVC (`pvcTemplate`). Долговечный артефакт не создаётся.
+                    - `PopulateData`: данные заливаются во временный (scratch) том (`storageParams`) и захватываются в долговечный VolumeSnapshotContent для уже существующего узла-снимка, указанного в `snapshotRef`.
                 snapshotRef:
                   description: |
-                    Только для режима ProduceArtifact. Ссылка на уже существующий узел xxxSnapshot, которому принадлежит создаваемый долговечный артефакт (пространство имён неявно совпадает с пространством имён DataImport). Проставляется внешним создателем (d8/пользователь/система резервного копирования); контроллер DataImport её не читает — она нужна, чтобы обратный поиск state-snapshotter сопоставил лист по `spec.snapshotRef`.
+                    Только для режима PopulateData. Ссылка на уже существующий узел xxxSnapshot, которому принадлежит создаваемый долговечный артефакт (пространство имён неявно совпадает с пространством имён DataImport). Проставляется внешним создателем (d8/пользователь/система резервного копирования); контроллер DataImport её не читает — она нужна, чтобы обратный поиск state-snapshotter сопоставил лист по `spec.snapshotRef`.
                   properties:
                     apiVersion:
                       description: |
@@ -44,9 +44,9 @@ spec:
                     name:
                       description: |
                         Имя узла-снимка.
-                scratchVolumeTemplate:
+                storageParams:
                   description: |
-                    Только для режима ProduceArtifact. Временный (scratch) том, в который заливаются импортируемые данные до захвата; уничтожается после создания долговечного VolumeSnapshotContent. Его StorageClass должен поддерживать снимки (ссылается на VolumeSnapshotClass через аннотацию `storage.deckhouse.io/volumesnapshotclass`).
+                    Только для режима PopulateData. Параметры временного (scratch) тома, в который заливаются импортируемые данные до захвата; уничтожается после создания долговечного VolumeSnapshotContent. Его StorageClass должен поддерживать снимки (ссылается на VolumeSnapshotClass через аннотацию `storage.deckhouse.io/volumesnapshotclass`).
                   properties:
                     storageClassName:
                       description: |
@@ -57,28 +57,9 @@ spec:
                     volumeMode:
                       description: |
                         Режим тома временного (scratch) PVC. По умолчанию `Filesystem`.
-                volumeRef:
-                  description: |
-                    Только для режима PopulateVolume (перезапись). Ссылка на существующий том (`kind: PersistentVolumeClaim`) для перезаписи на месте; требуется `force`. Взаимоисключима с `pvcTemplate`.
-                  properties:
-                    apiVersion:
-                      description: |
-                        Группа/версия ссылаемого тома (необязательно для core PersistentVolumeClaim).
-                    kind:
-                      description: |
-                        Вид ссылаемого тома (сейчас `PersistentVolumeClaim`).
-                    name:
-                      description: |
-                        Имя ссылаемого тома.
-                    namespace:
-                      description: |
-                        Пространство имён ссылаемого тома (необязательно; по умолчанию — пространство имён DataImport).
-                force:
-                  description: |
-                    Только для режима PopulateVolume. Подтверждает деструктивную перезапись на месте существующего тома, указанного в `volumeRef`. Допустимо только вместе с `volumeRef`.
                 pvcTemplate:
                   description: |
-                    Только для режима PopulateVolume (создание). Шаблон PersistentVolumeClaim, полностью описывающий целевой PVC, в который записываются импортируемые данные; PVC сохраняется после импорта. Взаимоисключим с `volumeRef`.
+                    Только для режима CreatePVC. Шаблон PersistentVolumeClaim, полностью описывающий целевой PVC, в который записываются импортируемые данные; PVC сохраняется после импорта.
                   properties:
                     metadata:
                       description: |

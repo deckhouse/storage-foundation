@@ -241,8 +241,8 @@ func getDataImportAndNames(ctx context.Context, unstructured *unstructured.Unstr
 	}
 
 	// The scratch volume the populator fills is always a PVC named after the DataImport (in mode
-	// ProduceArtifact spec.snapshotRef references the snapshot leaf, not the scratch PVC; the scratch
-	// PVC spec comes from spec.scratchVolumeTemplate).
+	// PopulateData spec.snapshotRef references the snapshot leaf, not the scratch PVC; the scratch
+	// PVC spec comes from spec.storageParams).
 	return dataImport, common.NewNames(dev1alpha1.KindPVC, dataImport.Name, dataImport.Namespace, dataImport.Name), nil
 }
 

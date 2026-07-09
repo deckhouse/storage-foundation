@@ -35,9 +35,9 @@ const (
 	TargetStatusFailed                           // Target  failed
 )
 
-// GetScratchPVC fetches by name the PVC the imported bytes are written into. In mode ProduceArtifact
+// GetScratchPVC fetches by name the PVC the imported bytes are written into. In mode PopulateData
 // (snapshot leaf import) this is the internal scratch PVC named after the DataImport, with spec derived
-// from spec.scratchVolumeTemplate (storageClass/size/volumeMode). In mode PopulateVolume (standalone PVC
+// from spec.storageParams (storageClass/size/volumeMode). In mode CreatePVC (standalone PVC
 // import) it is the user-described PVC named by spec.pvcTemplate.metadata.name.
 func GetScratchPVC(ctx context.Context, c client.Client, namespace, name string) (*corev1.PersistentVolumeClaim, error) {
 	pvc := &corev1.PersistentVolumeClaim{}
