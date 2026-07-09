@@ -15,7 +15,27 @@ linters-settings:
         - kind: Deployment
           name: snapshot-validation-webhook
           container: snapshot-validation
+  module:
+    # The bundled CSI components are pinned to deliberately non-semver refs — a Deckhouse fork tag
+    # ("d8-63742164-vsc-only") for external-snapshotter/snapshot-controller and a commit SHA for
+    # data-source-validator — which the oss rule reports as "Invalid Semantic Version". Those refs are
+    # correct for this module, so the rule is disabled (matching sibling storage modules).
+    oss:
+      disable: true
+  templates:
+    exclude-rules:
+      # /csi and /registration are declared in mount-points.yaml so the csi-livenessprobe and
+      # csi-node-driver-registrar images pre-create them for containerd v2. The node-side DaemonSet that
+      # actually mounts them ships in consumer modules (e.g. sds-local-volume), not here, so they never
+      # appear as a mountPath in this module's own pod controllers.
+      mount-points:
+        - /csi
+        - /registration
   no-cyrillic:
     exclude-rules:
+      files:
+        # The fuzz seed corpus deliberately includes cyrillic (and other exotic unicode) as adversarial
+        # path/query input; it is test data, not human-readable code.
+        - images/data-exporter/cmd/handler_fuzz_test.go
       directories:
         - hack/

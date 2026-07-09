@@ -6,6 +6,12 @@ metadata:
   labels:
     heritage: deckhouse
     module: storage-foundation
+  annotations:
+    # Deploy the webhook only after its backing Service+Deployment are ready: with failurePolicy: Fail a
+    # partial rollout (network issue, OOM) must not leave the webhook without a backend, which would block
+    # every matching DataExport CREATE.
+    werf.io/deploy-dependency-deployment: state=ready,kind=Deployment,name=webhooks,namespace=d8-{{ .Chart.Name }}
+    werf.io/deploy-dependency-service: state=present,kind=Service,name=webhooks,namespace=d8-{{ .Chart.Name }}
 webhooks:
   - name: "d8-{{ .Chart.Name }}-dataexport-validation.storage-foundation.deckhouse.io"
     failurePolicy: Fail

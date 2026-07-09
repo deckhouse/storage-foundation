@@ -23,7 +23,7 @@ HEADER=./hack/boilerplate.txt
 
 if ! command -v "${CONTROLLER_GEN}" &>/dev/null; then
   echo "controller-gen not found. Installing..."
-  go install sigs.k8s.io/controller-tools/cmd/controller-gen@v0.14.0
+  go install sigs.k8s.io/controller-tools/cmd/controller-gen@v0.18.0
   export PATH="$(go env GOPATH)/bin:$PATH"
 fi
 

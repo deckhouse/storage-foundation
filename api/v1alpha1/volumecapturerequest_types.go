@@ -106,6 +106,7 @@ type VolumeCaptureRequestStatus struct {
 }
 
 // +kubebuilder:object:root=true
+// +kubebuilder:metadata:labels=module=storage-foundation
 // +kubebuilder:subresource:status
 // +kubebuilder:validation:XValidation:rule="self.spec.mode != 'Snapshot' || has(self.spec.target)",message="spec.target is required when mode is Snapshot"
 // +kubebuilder:printcolumn:name="Age",type="date",JSONPath=".metadata.creationTimestamp"

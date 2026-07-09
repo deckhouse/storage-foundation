@@ -54,6 +54,7 @@ type VolumeRestoreRequestStatus struct {
 }
 
 // +kubebuilder:object:root=true
+// +kubebuilder:metadata:labels=module=storage-foundation
 // +kubebuilder:subresource:status
 // +kubebuilder:printcolumn:name="Age",type="date",JSONPath=".metadata.creationTimestamp"
 
