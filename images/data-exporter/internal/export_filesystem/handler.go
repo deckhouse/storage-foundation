@@ -33,7 +33,7 @@ import (
 	"time"
 
 	"github.com/deckhouse/sds-common-lib/fs/fsext"
-	"github.com/deckhouse/storage-foundation/images/data-exporter/internal/utils"
+	"github.com/deckhouse/storage-foundation/images/data-exporter/internal/httpiohelpers"
 )
 
 const dirListChunkSize = 10
@@ -121,10 +121,10 @@ func (d *FilesystemExporter) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	case http.MethodHead:
 		err = d.HandleHeadMethod(w, r, requestedType)
 	default:
-		err = &utils.HTTPError{Err: errors.New("supports only methods GET and HEAD"), Status: http.StatusMethodNotAllowed}
+		err = &httpiohelpers.HTTPError{Err: errors.New("supports only methods GET and HEAD"), Status: http.StatusMethodNotAllowed}
 	}
 
-	var httpError *utils.HTTPError
+	var httpError *httpiohelpers.HTTPError
 	if errors.As(err, &httpError) {
 		http.Error(w, httpError.Error(), httpError.Status)
 	} else if err != nil {
@@ -178,7 +178,7 @@ func (d *FilesystemExporter) resolvePath(urlPath string) (string, fs.FileInfo, e
 
 		isLastSegment := i == len(segments)-1
 		if !isLastSegment && isSymlink(fi.Mode()) {
-			return "", nil, &utils.HTTPError{Err: fmt.Errorf("symlink is not allowed, symlink=%s, path=%s", prefix, urlPath), Status: http.StatusBadRequest}
+			return "", nil, &httpiohelpers.HTTPError{Err: fmt.Errorf("symlink is not allowed, symlink=%s, path=%s", prefix, urlPath), Status: http.StatusBadRequest}
 		}
 	}
 
@@ -189,13 +189,13 @@ func (d *FilesystemExporter) resolvePath(urlPath string) (string, fs.FileInfo, e
 // Common request processing for HEAD and GET
 func (d *FilesystemExporter) prepareHead(w http.ResponseWriter, r *http.Request, requestedType ItemType) (string, error) {
 	var pathErr *fs.PathError
-	var httpErr *utils.HTTPError
+	var httpErr *httpiohelpers.HTTPError
 
 	path, fi, err := d.resolvePath(r.URL.Path)
 
 	switch {
 	case errors.As(err, &pathErr):
-		return "", &utils.HTTPError{Err: fmt.Errorf("file not found %w", err), Status: http.StatusNotFound}
+		return "", &httpiohelpers.HTTPError{Err: fmt.Errorf("file not found %w", err), Status: http.StatusNotFound}
 	case errors.As(err, &httpErr):
 		return "", err
 	case err != nil:
@@ -223,13 +223,13 @@ func (d *FilesystemExporter) validateFileType(fi fs.FileInfo, requestedType Item
 	isLink := isSymlink(fi.Mode())
 
 	if isDir && requestedType == file {
-		return &utils.HTTPError{Err: errors.New("file is requested, but it's a directory"), Status: http.StatusBadRequest}
+		return &httpiohelpers.HTTPError{Err: errors.New("file is requested, but it's a directory"), Status: http.StatusBadRequest}
 	} else if (isFile || isLink) && requestedType == directory {
-		return &utils.HTTPError{Err: errors.New("directory is requested, but it's a file"), Status: http.StatusBadRequest}
+		return &httpiohelpers.HTTPError{Err: errors.New("directory is requested, but it's a file"), Status: http.StatusBadRequest}
 	}
 
 	if !isDir && !isFile && !isLink {
-		return &utils.HTTPError{Err: errors.New("requested file is not a regular file, directory or symlink"), Status: http.StatusBadRequest}
+		return &httpiohelpers.HTTPError{Err: errors.New("requested file is not a regular file, directory or symlink"), Status: http.StatusBadRequest}
 	}
 
 	return nil
@@ -346,7 +346,7 @@ func (d *FilesystemExporter) prepareAttributesMd5(attrs map[string]any, path str
 }
 
 func (d *FilesystemExporter) HandleHeadMethod(w http.ResponseWriter, r *http.Request, requestedType ItemType) error {
-	var httpErr *utils.HTTPError
+	var httpErr *httpiohelpers.HTTPError
 
 	_, err := d.prepareHead(w, r, requestedType)
 	if errors.As(err, &httpErr) {
@@ -360,7 +360,7 @@ func (d *FilesystemExporter) HandleHeadMethod(w http.ResponseWriter, r *http.Req
 }
 
 func (d *FilesystemExporter) HandleGetMethod(w http.ResponseWriter, r *http.Request, requestedType ItemType) error {
-	var httpErr *utils.HTTPError
+	var httpErr *httpiohelpers.HTTPError
 
 	path, err := d.prepareHead(w, r, requestedType)
 	if errors.As(err, &httpErr) {

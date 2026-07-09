@@ -30,8 +30,8 @@ import (
 
 	"github.com/deckhouse/sds-common-lib/fs/fsext"
 	"github.com/deckhouse/storage-foundation/images/data-exporter/internal/config"
+	"github.com/deckhouse/storage-foundation/images/data-exporter/internal/httpiohelpers"
 	"github.com/deckhouse/storage-foundation/images/data-exporter/internal/repository"
-	"github.com/deckhouse/storage-foundation/images/data-exporter/internal/utils"
 )
 
 var (
@@ -59,7 +59,7 @@ func NewImportBlockHandler(fsys fsext.FS, path string, logger *slog.Logger, clie
 		return nil, err
 	}
 
-	isBlock, err := utils.IsBlockDevice(fsys, path)
+	isBlock, err := httpiohelpers.IsBlockDevice(fsys, path)
 	if err != nil {
 		logger.Error("failed to get type of the file", "error", err)
 		return nil, err
@@ -77,7 +77,7 @@ func NewImportBlockHandler(fsys fsext.FS, path string, logger *slog.Logger, clie
 	}
 	defer file.Close()
 
-	size, err := utils.BlockDeviceSize(file)
+	size, err := httpiohelpers.BlockDeviceSize(file)
 	if err != nil {
 		logger.Error("failed to get block device file size", "error", err)
 		return nil, err
@@ -136,7 +136,7 @@ func (h *ImportBlockHandler) HandleHeadMethod(w http.ResponseWriter, _ *http.Req
 		http.Error(w, "failed to open block device", http.StatusInternalServerError)
 		return
 	}
-	size, err := utils.BlockDeviceSize(dev)
+	size, err := httpiohelpers.BlockDeviceSize(dev)
 	_ = dev.Close()
 	if err != nil {
 		h.logger.Error("failed to get size of the block device file", "error", err)
@@ -164,7 +164,7 @@ func (h *ImportBlockHandler) HandlePutMethod(w http.ResponseWriter, r *http.Requ
 		h.mu.Unlock()
 	}()
 
-	offset, expectedTotal, err := utils.ParseUploadHeaders(r)
+	offset, expectedTotal, err := httpiohelpers.ParseUploadHeaders(r)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
@@ -182,7 +182,7 @@ func (h *ImportBlockHandler) HandlePutMethod(w http.ResponseWriter, r *http.Requ
 	}
 	defer dev.Close()
 
-	size, err := utils.BlockDeviceSize(dev)
+	size, err := httpiohelpers.BlockDeviceSize(dev)
 	if err != nil {
 		h.logger.Error("failed to get size of the block device file", "error", err)
 		http.Error(w, "failed to get block device size", http.StatusInternalServerError)

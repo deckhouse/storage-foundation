@@ -30,8 +30,8 @@ import (
 
 	"github.com/deckhouse/sds-common-lib/fs/fsext"
 	"github.com/deckhouse/storage-foundation/images/data-exporter/internal/config"
+	"github.com/deckhouse/storage-foundation/images/data-exporter/internal/httpiohelpers"
 	"github.com/deckhouse/storage-foundation/images/data-exporter/internal/repository"
-	"github.com/deckhouse/storage-foundation/images/data-exporter/internal/utils"
 )
 
 var (
@@ -119,19 +119,19 @@ func (h *ImportFilesystemHandler) CreateFile(w http.ResponseWriter, r *http.Requ
 		h.mu.Unlock()
 	}()
 
-	perm, uid, gid, err := utils.ParseFileAttributes(r)
+	perm, uid, gid, err := httpiohelpers.ParseFileAttributes(r)
 	if err != nil {
 		h.logger.Error("failed to parse file attributes", "error", err)
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
-	modTime, _, err := utils.ParseExtraAttributes(r)
+	modTime, _, err := httpiohelpers.ParseExtraAttributes(r)
 	if err != nil {
 		h.logger.Error("failed to parse extra attributes", "error", err)
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
-	offset, expectedTotal, err := utils.ParseUploadHeaders(r)
+	offset, expectedTotal, err := httpiohelpers.ParseUploadHeaders(r)
 	if err != nil {
 		h.logger.Error("failed to parse upload headers", "error", err)
 		http.Error(w, err.Error(), http.StatusBadRequest)
@@ -254,7 +254,7 @@ func (h *ImportFilesystemHandler) CreateFile(w http.ResponseWriter, r *http.Requ
 		w.WriteHeader(http.StatusNoContent)
 	}
 
-	if err := utils.SetFileAttributes(absPath, filePerm, uid, gid, modTime); err != nil {
+	if err := httpiohelpers.SetFileAttributes(absPath, filePerm, uid, gid, modTime); err != nil {
 		h.logger.Error("failed to set file attributes", "path", absPath, "error", err)
 		http.Error(w, "error setting file attributes", http.StatusInternalServerError)
 		return

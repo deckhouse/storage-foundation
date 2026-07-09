@@ -22,6 +22,11 @@ linters-settings:
     # correct for this module, so the rule is disabled (matching sibling storage modules).
     oss:
       disable: true
+    exclude-rules:
+      license:
+        files:
+          # Checked-in prebuilt Go binary (release-notes tool); not a source file.
+          - hack/generate_release_notes
   templates:
     exclude-rules:
       # /csi and /registration are declared in mount-points.yaml so the csi-livenessprobe and
