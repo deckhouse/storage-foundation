@@ -52,7 +52,7 @@ const (
 	virtualDiskKind      = dev1alpha1.KindVirtualDisk
 	snapshotStorageGroup = dev1alpha1.GroupSnapshotStorage
 
-	// artifact kinds the SnapshotContent.dataRef may point at (the durable data leg). A VRR accepts
+	// artifact kinds the SnapshotContent.status.data may point at (the durable data leg). A VRR accepts
 	// either as its sourceRef. artifactKindVolumeSnapshotContent doubles as the forbidden bare-target kind.
 	artifactKindVolumeSnapshotContent = dev1alpha1.KindVolumeSnapshotContent
 	artifactKindPersistentVolume      = "PersistentVolume"
@@ -103,7 +103,7 @@ func classifyTargetRef(group, kind string) (targetCategory, string, error) {
 }
 
 // snapshotDataArtifact is the trusted view of a snapshot leaf's data leg, read from the leaf's bound
-// SnapshotContent.status.dataRef. Every field originates from the controller-written SnapshotContent
+// SnapshotContent.status.data. Every field originates from the controller-written SnapshotContent
 // (never from user input or annotations) — this is the C6 trust hardening: the artifact name and the
 // restore parameters are taken from the snapshot, not the request.
 type snapshotDataArtifact struct {
@@ -116,8 +116,8 @@ type snapshotDataArtifact struct {
 }
 
 // resolveSnapshotDataArtifact walks targetRef -> leaf.status.boundSnapshotContentName -> SnapshotContent
-// -> status.dataRef.artifact for any registered snapshot kind via the dynamic client (no domain types
-// compiled in). A not-yet-bound leaf / not-yet-populated dataRef is a transient ErrTargetNotReady (the
+// -> status.data.artifact for any registered snapshot kind via the dynamic client (no domain types
+// compiled in). A not-yet-bound leaf / not-yet-populated status.data is a transient ErrTargetNotReady (the
 // snapshot is still being captured or imported), distinct from a genuinely missing leaf
 // (ErrTargetNotFound).
 func (r *DataexportReconciler) resolveSnapshotDataArtifact(ctx context.Context, dataExport *dev1alpha1.DataExport) (*snapshotDataArtifact, error) {
@@ -175,43 +175,43 @@ func (r *DataexportReconciler) resolveSnapshotDataArtifact(ctx context.Context, 
 	// Verify the resolved content is anchored to the DataExport's own namespace via a controller-written,
 	// immutable back-reference before trusting its data artifact, so a forged leaf pointing at another
 	// tenant's SnapshotContent cannot exfiltrate its volume. The anchor is spec.snapshotRef.namespace
-	// (owning Snapshot, set at creation incl. import) with a fallback to status.dataRef.target.namespace
+	// (owning Snapshot, set at creation incl. import) with a fallback to status.data.source.namespace
 	// (captured PVC).
 	if err := verifySnapshotContentNamespace(content, contentName, dataExport.Namespace); err != nil {
 		return nil, err
 	}
 
-	dataRef, found, err := unstructured.NestedMap(content.Object, "status", "dataRef")
+	data, found, err := unstructured.NestedMap(content.Object, "status", "data")
 	if err != nil {
-		return nil, fmt.Errorf("read status.dataRef on SnapshotContent %s: %w", contentName, err)
+		return nil, fmt.Errorf("read status.data on SnapshotContent %s: %w", contentName, err)
 	}
-	if !found || dataRef == nil {
-		return nil, fmt.Errorf("SnapshotContent %s has no status.dataRef (no data leg) yet: %w", contentName, ErrTargetNotReady)
+	if !found || data == nil {
+		return nil, fmt.Errorf("SnapshotContent %s has no status.data (no data leg) yet: %w", contentName, ErrTargetNotReady)
 	}
 
-	artifactKind, _, _ := unstructured.NestedString(dataRef, "artifact", "kind")
-	artifactName, _, _ := unstructured.NestedString(dataRef, "artifact", "name")
+	artifactKind, _, _ := unstructured.NestedString(data, "artifact", "kind")
+	artifactName, _, _ := unstructured.NestedString(data, "artifact", "name")
 	if artifactName == "" {
-		return nil, fmt.Errorf("SnapshotContent %s dataRef has no artifact name yet: %w", contentName, ErrTargetNotReady)
+		return nil, fmt.Errorf("SnapshotContent %s data has no artifact name yet: %w", contentName, ErrTargetNotReady)
 	}
 	if artifactKind != artifactKindVolumeSnapshotContent && artifactKind != artifactKindPersistentVolume {
 		// Terminal (the data leg is recorded but not of an exportable kind): map to a visible
 		// Ready=False reason rather than letting it fall through to a silent infinite requeue.
-		return nil, fmt.Errorf("SnapshotContent %s dataRef artifact kind %q is not exportable (want %s or %s): %w",
+		return nil, fmt.Errorf("SnapshotContent %s data artifact kind %q is not exportable (want %s or %s): %w",
 			contentName, artifactKind, artifactKindVolumeSnapshotContent, artifactKindPersistentVolume, ErrTargetNotFound)
 	}
 
 	art := &snapshotDataArtifact{ArtifactKind: artifactKind, ArtifactName: artifactName}
-	// volumeMode is a controller-written, required-on-populated dataRef field. An empty value means the
-	// dataRef is not fully populated yet (transient), not "default to Filesystem" — guessing would
-	// restore a Block source as a filesystem and serve garbage. Treat empty as not-ready.
-	art.VolumeMode, _, _ = unstructured.NestedString(dataRef, "volumeMode")
+	// volumeMode is a controller-written, required-on-populated status.data field. An empty value means
+	// the data binding is not fully populated yet (transient), not "default to Filesystem" — guessing
+	// would restore a Block source as a filesystem and serve garbage. Treat empty as not-ready.
+	art.VolumeMode, _, _ = unstructured.NestedString(data, "volumeMode")
 	if art.VolumeMode == "" {
-		return nil, fmt.Errorf("SnapshotContent %s dataRef has no volumeMode yet: %w", contentName, ErrTargetNotReady)
+		return nil, fmt.Errorf("SnapshotContent %s data has no volumeMode yet: %w", contentName, ErrTargetNotReady)
 	}
-	art.StorageClassName, _, _ = unstructured.NestedString(dataRef, "storageClassName")
-	art.FsType, _, _ = unstructured.NestedString(dataRef, "fsType")
-	if modes, found, _ := unstructured.NestedStringSlice(dataRef, "accessModes"); found {
+	art.StorageClassName, _, _ = unstructured.NestedString(data, "storageClassName")
+	art.FsType, _, _ = unstructured.NestedString(data, "fsType")
+	if modes, found, _ := unstructured.NestedStringSlice(data, "accessModes"); found {
 		art.AccessModes = modes
 	}
 	return art, nil
@@ -224,7 +224,7 @@ func (r *DataexportReconciler) resolveSnapshotDataArtifact(ctx context.Context, 
 func verifySnapshotContentNamespace(content *unstructured.Unstructured, contentName, wantNamespace string) error {
 	anchorNS, _, _ := unstructured.NestedString(content.Object, "spec", "snapshotRef", "namespace")
 	if anchorNS == "" {
-		anchorNS, _, _ = unstructured.NestedString(content.Object, "status", "dataRef", "target", "namespace")
+		anchorNS, _, _ = unstructured.NestedString(content.Object, "status", "data", "source", "namespace")
 	}
 	if anchorNS != "" && anchorNS != wantNamespace {
 		return fmt.Errorf("SnapshotContent %s belongs to namespace %q, not %q: target does not belong to this namespace: %w",
@@ -257,7 +257,7 @@ func volumeRestoreRequestName(generatedNames common.Names) string {
 }
 
 // ensureVolumeRestoreRequest idempotently creates the VRR that restores the trusted artifact into the
-// export PVC. volumeMode is required by the VRR schema and is taken verbatim from the trusted dataRef
+// export PVC. volumeMode is required by the VRR schema and is taken verbatim from the trusted status.data
 // (resolveSnapshotDataArtifact guarantees it is non-empty). The VRR is created in the controller
 // namespace (where the export PVC lives) and is labeled so teardown/list can find it.
 func (r *DataexportReconciler) ensureVolumeRestoreRequest(ctx context.Context, dataExport *dev1alpha1.DataExport, generatedNames common.Names, art *snapshotDataArtifact) error {
@@ -271,7 +271,7 @@ func (r *DataexportReconciler) ensureVolumeRestoreRequest(ctx context.Context, d
 	}
 
 	// art.VolumeMode is guaranteed non-empty (resolveSnapshotDataArtifact rejects an empty one as
-	// not-ready), so the required pvcTemplate volumeMode comes straight from the trusted dataRef.
+	// not-ready), so the required pvcTemplate volumeMode comes straight from the trusted status.data.
 	// pvcTemplate describes the export PVC the restore creates; its namespace is implicit = the VRR
 	// namespace (restore is never cross-namespace), so metadata.namespace = ControllerNamespace applies.
 	pvcSpec := map[string]interface{}{

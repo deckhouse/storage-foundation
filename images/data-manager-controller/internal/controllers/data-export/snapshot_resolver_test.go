@@ -81,13 +81,13 @@ func TestVolumeRestoreRequestName(t *testing.T) {
 }
 
 func TestVerifySnapshotContentNamespace(t *testing.T) {
-	makeContent := func(snapshotRefNS, targetNS string) *unstructured.Unstructured {
+	makeContent := func(snapshotRefNS, sourceNS string) *unstructured.Unstructured {
 		c := &unstructured.Unstructured{Object: map[string]interface{}{}}
 		if snapshotRefNS != "" {
 			_ = unstructured.SetNestedField(c.Object, snapshotRefNS, "spec", "snapshotRef", "namespace")
 		}
-		if targetNS != "" {
-			_ = unstructured.SetNestedField(c.Object, targetNS, "status", "dataRef", "target", "namespace")
+		if sourceNS != "" {
+			_ = unstructured.SetNestedField(c.Object, sourceNS, "status", "data", "source", "namespace")
 		}
 		return c
 	}
@@ -95,21 +95,21 @@ func TestVerifySnapshotContentNamespace(t *testing.T) {
 	tests := []struct {
 		name          string
 		snapshotRefNS string
-		targetNS      string
+		sourceNS      string
 		wantNamespace string
 		wantErr       bool
 	}{
 		{name: "snapshotRef namespace matches", snapshotRefNS: "test-ns", wantNamespace: "test-ns"},
 		{name: "snapshotRef namespace mismatches -> rejected", snapshotRefNS: "victim-ns", wantNamespace: "test-ns", wantErr: true},
-		{name: "fallback to target namespace matches", targetNS: "test-ns", wantNamespace: "test-ns"},
-		{name: "fallback to target namespace mismatches -> rejected", targetNS: "victim-ns", wantNamespace: "test-ns", wantErr: true},
-		{name: "snapshotRef takes precedence over target", snapshotRefNS: "test-ns", targetNS: "victim-ns", wantNamespace: "test-ns"},
+		{name: "fallback to data.source namespace matches", sourceNS: "test-ns", wantNamespace: "test-ns"},
+		{name: "fallback to data.source namespace mismatches -> rejected", sourceNS: "victim-ns", wantNamespace: "test-ns", wantErr: true},
+		{name: "snapshotRef takes precedence over data.source", snapshotRefNS: "test-ns", sourceNS: "victim-ns", wantNamespace: "test-ns"},
 		{name: "no anchor recorded -> accepted", wantNamespace: "test-ns"},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			err := verifySnapshotContentNamespace(makeContent(tt.snapshotRefNS, tt.targetNS), "content1", tt.wantNamespace)
+			err := verifySnapshotContentNamespace(makeContent(tt.snapshotRefNS, tt.sourceNS), "content1", tt.wantNamespace)
 			if tt.wantErr {
 				require.Error(t, err)
 				assert.True(t, errors.Is(err, ErrTargetNotFound))
@@ -152,13 +152,13 @@ func newSnapshotContent(name, snapshotRefNS, artifactKind, artifactName, volumeM
 		_ = unstructured.SetNestedField(content.Object, snapshotRefNS, "spec", "snapshotRef", "namespace")
 	}
 	if artifactKind != "" {
-		_ = unstructured.SetNestedField(content.Object, artifactKind, "status", "dataRef", "artifact", "kind")
+		_ = unstructured.SetNestedField(content.Object, artifactKind, "status", "data", "artifact", "kind")
 	}
 	if artifactName != "" {
-		_ = unstructured.SetNestedField(content.Object, artifactName, "status", "dataRef", "artifact", "name")
+		_ = unstructured.SetNestedField(content.Object, artifactName, "status", "data", "artifact", "name")
 	}
 	if volumeMode != "" {
-		_ = unstructured.SetNestedField(content.Object, volumeMode, "status", "dataRef", "volumeMode")
+		_ = unstructured.SetNestedField(content.Object, volumeMode, "status", "data", "volumeMode")
 	}
 	return content
 }
@@ -234,7 +234,7 @@ func TestResolveSnapshotDataArtifact_Errors(t *testing.T) {
 			wantSentinel: ErrTargetNotFound,
 		},
 		{
-			name:         "dataRef without volumeMode is not-ready",
+			name:         "data without volumeMode is not-ready",
 			leaf:         newSnapshotLeaf("content1"),
 			content:      newSnapshotContent("content1", "test-ns", artifactKindVolumeSnapshotContent, "vsc1", ""),
 			targetGroup:  "snapshot.storage.k8s.io",
