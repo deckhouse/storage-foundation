@@ -23,6 +23,7 @@ import (
 	"fmt"
 	"time"
 
+	snapshotv1 "github.com/kubernetes-csi/external-snapshotter/client/v8/apis/volumesnapshot/v1"
 	corev1 "k8s.io/api/core/v1"
 	storagev1 "k8s.io/api/storage/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -35,7 +36,6 @@ import (
 
 	deckhousev1alpha1 "github.com/deckhouse/deckhouse/deckhouse-controller/pkg/apis/deckhouse.io/v1alpha1"
 	storagev1alpha1 "github.com/deckhouse/storage-foundation/api/v1alpha1"
-	snapshotv1 "github.com/kubernetes-csi/external-snapshotter/client/v8/apis/volumesnapshot/v1"
 )
 
 type snapshotTargetError struct {
@@ -162,7 +162,6 @@ func (r *VolumeCaptureRequestController) requeueIfObjectKeeperUIDEmpty(
 func (r *VolumeCaptureRequestController) processSnapshotTarget(
 	ctx context.Context,
 	vcr *storagev1alpha1.VolumeCaptureRequest,
-	objectKeeper *deckhousev1alpha1.ObjectKeeper,
 	retainerName string,
 	target storagev1alpha1.VolumeCaptureTarget,
 ) (snapshotTargetResult, ctrl.Result, error) {
@@ -279,7 +278,7 @@ func (r *VolumeCaptureRequestController) processSnapshotTarget(
 			l.Info("ObjectKeeper UID not assigned yet, requeue before creating VSC", "retainer", retainerName)
 			return snapshotTargetResult{pending: true}, requeueResult, nil
 		}
-		objectKeeper = freshKeeper
+		objectKeeper := freshKeeper
 
 		volumeHandle := pv.Spec.CSI.VolumeHandle
 		vscClassName := vscClass.Name
