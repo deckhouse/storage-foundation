@@ -315,9 +315,9 @@ func TestEnsurePVCImportTargetRequiresTemplate(t *testing.T) {
 	assert.ErrorIs(t, err, ErrTargetFailed)
 }
 
-// newModeBReconciler builds a CreatePVC reconciler whose PVC import target is restored-pvc, with a
+// newCreatePVCReconciler builds a CreatePVC reconciler whose PVC import target is restored-pvc, with a
 // fake client carrying only corev1/storagev1 (the populate path never touches snapshot machinery).
-func newModeBReconciler(objs ...runtime.Object) *DataImportReconciler {
+func newCreatePVCReconciler(objs ...runtime.Object) *DataImportReconciler {
 	scheme := runtime.NewScheme()
 	_ = corev1.AddToScheme(scheme)
 	_ = storagev1.AddToScheme(scheme)
@@ -345,7 +345,7 @@ func boundPVC(volumeMode corev1.PersistentVolumeMode) *corev1.PersistentVolumeCl
 }
 
 func TestHandlePVCImportStatusCompletesWithoutArtifact(t *testing.T) {
-	r := newModeBReconciler()
+	r := newCreatePVCReconciler()
 	meta.SetStatusCondition(&r.dataImport.Status.Conditions, metav1.Condition{
 		Type:   string(common.ConditionUploadFinished),
 		Status: metav1.ConditionTrue,
@@ -362,7 +362,7 @@ func TestHandlePVCImportStatusCompletesWithoutArtifact(t *testing.T) {
 }
 
 func TestHandlePVCImportStatusAwaitsUpload(t *testing.T) {
-	r := newModeBReconciler()
+	r := newCreatePVCReconciler()
 
 	res, err := r.handlePVCImportStatus(context.Background(), boundPVC(corev1.PersistentVolumeFilesystem))
 	require.NoError(t, err)
@@ -374,7 +374,7 @@ func TestHandlePVCImportStatusAwaitsUpload(t *testing.T) {
 }
 
 func TestEnsureImportPVCWiresDataSourceRefToDataImport(t *testing.T) {
-	r := newModeBReconciler()
+	r := newCreatePVCReconciler()
 
 	sc := "fast"
 	fs := dev1alpha1.PersistentVolumeFilesystem
