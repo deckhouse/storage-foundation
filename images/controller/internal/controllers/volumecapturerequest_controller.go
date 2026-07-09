@@ -669,6 +669,15 @@ func (r *VolumeCaptureRequestController) finalizeVCR(
 }
 
 func (r *VolumeCaptureRequestController) SetupWithManager(mgr ctrl.Manager) error {
+	// Default 4; overridable via STORAGE_FOUNDATION_VCR_MAX_CONCURRENT_RECONCILES (read once at start;
+	// changing requires a pod/rollout restart, not a hot reload). Used to probe whether the VCR/CSI data
+	// leg is the throughput ceiling of the snapshot Phase A (creation -> ChildrenSnapshotReady).
+	maxConcurrent, err := config.ParseMaxConcurrentReconciles(config.EnvVCRMaxConcurrentReconciles, 4)
+	if err != nil {
+		return fmt.Errorf("VolumeCaptureRequest controller: %w", err)
+	}
+	mgr.GetLogger().Info("VolumeCaptureRequest controller concurrency", "maxConcurrentReconciles", maxConcurrent)
+
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&storagev1alpha1.VolumeCaptureRequest{}).
 		// L1 latency fix: wake the owning VCR the moment the CSI VolumeSnapshotContent flips
@@ -686,7 +695,7 @@ func (r *VolumeCaptureRequestController) SetupWithManager(mgr ctrl.Manager) erro
 			// writes go through RetryOnConflict; controller-runtime still serializes reconciles of the
 			// same VCR. This parallelizes the capture leg that gated concurrent tree snapshots once the
 			// state-snapshotter manifest path (L2b-ssc) was no longer the bottleneck.
-			MaxConcurrentReconciles: 4,
+			MaxConcurrentReconciles: maxConcurrent,
 			// Bound the per-item retry backoff (200ms floor -> 10s ceiling) so transient
 			// apiserver/network requeues re-run quickly instead of backing off to the controller-runtime
 			// default (~16min), mirroring the state-snapshotter controllers.
