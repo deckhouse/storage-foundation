@@ -205,6 +205,13 @@ spec:
                           subtreeManifestsPersisted is a core-written mirror of the bound SnapshotContent's recursive
                           "this node and all descendants archived their manifests" latch. Monotonic (false -> true).
                         type: boolean
+                      subtreePlanned:
+                        description: |-
+                          subtreePlanned is a core-computed monotonic recursive latch: true once this node reached
+                          capture barrier 1 (domainSpecificController.phase >= Planned) and every direct child's own
+                          subtreePlanned is true (the whole subtree finished planning). Domains only read it.
+                          Monotonic (false -> true).
+                        type: boolean
                     type: object
                   domainSpecificController:
                     description: 'domainSpecificController holds the domain-written
