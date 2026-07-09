@@ -133,11 +133,11 @@ func testRESTMapper() meta.RESTMapper {
 	return rm
 }
 
-func newSnapshotLeaf(namespace, name, boundContentName string) *unstructured.Unstructured {
+func newSnapshotLeaf(boundContentName string) *unstructured.Unstructured {
 	leaf := &unstructured.Unstructured{}
 	leaf.SetGroupVersionKind(schema.GroupVersionKind{Group: "snapshot.storage.k8s.io", Version: "v1", Kind: "VolumeSnapshot"})
-	leaf.SetNamespace(namespace)
-	leaf.SetName(name)
+	leaf.SetNamespace("test-ns")
+	leaf.SetName("leaf1")
 	if boundContentName != "" {
 		_ = unstructured.SetNestedField(leaf.Object, boundContentName, "status", "boundSnapshotContentName")
 	}
@@ -187,7 +187,7 @@ func newSnapshotDataExport(group, kind, name string) *dev1alpha1.DataExport {
 }
 
 func TestResolveSnapshotDataArtifact_HappyPath(t *testing.T) {
-	leaf := newSnapshotLeaf("test-ns", "leaf1", "content1")
+	leaf := newSnapshotLeaf("content1")
 	content := newSnapshotContent("content1", "test-ns", artifactKindVolumeSnapshotContent, "vsc1", "Filesystem")
 	r := newResolverReconciler(leaf, content)
 
@@ -218,7 +218,7 @@ func TestResolveSnapshotDataArtifact_Errors(t *testing.T) {
 		},
 		{
 			name:         "unbound leaf is target-not-ready",
-			leaf:         newSnapshotLeaf("test-ns", "leaf1", ""),
+			leaf:         newSnapshotLeaf(""),
 			targetGroup:  "snapshot.storage.k8s.io",
 			targetKind:   "VolumeSnapshot",
 			targetName:   "leaf1",
@@ -226,7 +226,7 @@ func TestResolveSnapshotDataArtifact_Errors(t *testing.T) {
 		},
 		{
 			name:         "content in another namespace is rejected",
-			leaf:         newSnapshotLeaf("test-ns", "leaf1", "content-xns"),
+			leaf:         newSnapshotLeaf("content-xns"),
 			content:      newSnapshotContent("content-xns", "victim-ns", artifactKindVolumeSnapshotContent, "vsc1", "Filesystem"),
 			targetGroup:  "snapshot.storage.k8s.io",
 			targetKind:   "VolumeSnapshot",
@@ -235,7 +235,7 @@ func TestResolveSnapshotDataArtifact_Errors(t *testing.T) {
 		},
 		{
 			name:         "dataRef without volumeMode is not-ready",
-			leaf:         newSnapshotLeaf("test-ns", "leaf1", "content1"),
+			leaf:         newSnapshotLeaf("content1"),
 			content:      newSnapshotContent("content1", "test-ns", artifactKindVolumeSnapshotContent, "vsc1", ""),
 			targetGroup:  "snapshot.storage.k8s.io",
 			targetKind:   "VolumeSnapshot",
@@ -244,7 +244,7 @@ func TestResolveSnapshotDataArtifact_Errors(t *testing.T) {
 		},
 		{
 			name:         "non-exportable artifact kind is target-not-found",
-			leaf:         newSnapshotLeaf("test-ns", "leaf1", "content1"),
+			leaf:         newSnapshotLeaf("content1"),
 			content:      newSnapshotContent("content1", "test-ns", "ConfigMap", "cm1", "Filesystem"),
 			targetGroup:  "snapshot.storage.k8s.io",
 			targetKind:   "VolumeSnapshot",
