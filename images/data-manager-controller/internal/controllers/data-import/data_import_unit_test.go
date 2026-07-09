@@ -17,7 +17,9 @@ limitations under the License.
 package dataimport
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"testing"
 
 	snapv1 "github.com/kubernetes-csi/external-snapshotter/client/v8/apis/volumesnapshot/v1"
@@ -267,15 +269,21 @@ func TestBuildVolumeCaptureRequestTargetsScratchPVC(t *testing.T) {
 	mode, _, _ := unstructured.NestedString(vcr.Object, "spec", "mode")
 	assert.Equal(t, vcrModeSnapshot, mode)
 
-	targets, found, err := unstructured.NestedSlice(vcr.Object, "spec", "targets")
+	// Single-target VCR: spec.target is a single object (not a spec.targets[] list). The list shape is
+	// pruned by the CRD and leaves the VCR target-less, so guard against regressing to it.
+	_, found, err := unstructured.NestedSlice(vcr.Object, "spec", "targets")
+	require.NoError(t, err)
+	require.False(t, found, "spec.targets[] list must not be emitted (single-target VCR)")
+
+	target, found, err := unstructured.NestedMap(vcr.Object, "spec", "target")
 	require.NoError(t, err)
 	require.True(t, found)
-	require.Len(t, targets, 1)
-	target := targets[0].(map[string]interface{})
 	assert.Equal(t, "pvc-uid", target["uid"])
 	assert.Equal(t, "PersistentVolumeClaim", target["kind"])
 	assert.Equal(t, "imp-1", target["name"])
-	assert.Equal(t, "ns", target["namespace"])
+	// Namespace is intentionally omitted: the captured PVC lives in the VCR's own namespace.
+	_, hasNS := target["namespace"]
+	assert.False(t, hasNS, "spec.target.namespace must be omitted")
 
 	owners := vcr.GetOwnerReferences()
 	require.Len(t, owners, 1)
@@ -284,6 +292,46 @@ func TestBuildVolumeCaptureRequestTargetsScratchPVC(t *testing.T) {
 	assert.Equal(t, di.UID, owners[0].UID)
 	require.NotNil(t, owners[0].Controller)
 	assert.True(t, *owners[0].Controller)
+}
+
+// TestBuildVolumeCaptureRequest_ConformsToVCRAPIType guards against cross-repo shape drift between the
+// DataImport VCR writer (which talks to the VCR via unstructured maps) and the VolumeCaptureRequest API
+// type / CRD. A plain map-shape assertion (see TestBuildVolumeCaptureRequestTargetsScratchPVC) is
+// self-referential: it stays green even when the writer emits a field the CRD does not have (the legacy
+// spec.targets[]), because it just re-reads the same hand-built map. The API server, in contrast,
+// structurally prunes unknown fields, so such a writer silently produced a target-less VCR that never
+// captured -- a bug only the real-API e2e caught, never a unit test.
+//
+// This test closes that gap by decoding the writer's output into the real dev1alpha1.VolumeCaptureRequest
+// with DisallowUnknownFields: any field the API type (hence the CRD's structural schema) would prune is a
+// hard failure here, at unit level. It then mirrors the CRD's mode=Snapshot => spec.target CEL rule so a
+// writer that drops the required target also fails locally.
+func TestBuildVolumeCaptureRequest_ConformsToVCRAPIType(t *testing.T) {
+	di := &dev1alpha1.DataImport{
+		ObjectMeta: metav1.ObjectMeta{Name: "imp-1", Namespace: "ns", UID: "di-uid"},
+	}
+	pvc := &corev1.PersistentVolumeClaim{
+		ObjectMeta: metav1.ObjectMeta{Name: "imp-1", Namespace: "ns", UID: "pvc-uid"},
+	}
+	vcr := buildVolumeCaptureRequest(volumeCaptureRequestName(di.UID), di, pvc, vcrModeSnapshot)
+
+	raw, err := json.Marshal(vcr.Object)
+	require.NoError(t, err)
+
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	dec.DisallowUnknownFields()
+	var typed dev1alpha1.VolumeCaptureRequest
+	require.NoError(t, dec.Decode(&typed),
+		"writer emitted a field the VolumeCaptureRequest CRD would prune (e.g. legacy spec.targets[]); "+
+			"it must conform to dev1alpha1.VolumeCaptureRequest")
+
+	// Mirror the CRD CEL rule: mode=Snapshot requires spec.target carrying the captured PVC identity.
+	assert.Equal(t, dev1alpha1.VolumeCaptureModeSnapshot, typed.Spec.Mode)
+	require.NotNil(t, typed.Spec.Target, "spec.target is required when mode is Snapshot")
+	assert.Equal(t, "pvc-uid", typed.Spec.Target.UID)
+	assert.Equal(t, "v1", typed.Spec.Target.APIVersion)
+	assert.Equal(t, "PersistentVolumeClaim", typed.Spec.Target.Kind)
+	assert.Equal(t, "imp-1", typed.Spec.Target.Name)
 }
 
 func TestIsCreatePVCMode(t *testing.T) {

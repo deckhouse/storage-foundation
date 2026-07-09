@@ -136,14 +136,15 @@ func buildVolumeCaptureRequest(name string, di *dev1alpha1.DataImport, scratchPV
 		},
 		"spec": map[string]interface{}{
 			"mode": mode,
-			"targets": []interface{}{
-				map[string]interface{}{
-					"uid":        string(scratchPVC.UID),
-					"apiVersion": "v1",
-					"kind":       "PersistentVolumeClaim",
-					"name":       scratchPVC.Name,
-					"namespace":  scratchPVC.Namespace,
-				},
+			// Single-target VCR (wave1): spec.target is a single object, not a spec.targets[] list. The
+			// CRD prunes any unknown spec.targets and the mode=Snapshot CEL rule requires spec.target, so
+			// emitting the legacy list shape produces a target-less VCR that never captures. Namespace is
+			// omitted on purpose: the captured PVC always lives in the VCR's own namespace.
+			"target": map[string]interface{}{
+				"uid":        string(scratchPVC.UID),
+				"apiVersion": "v1",
+				"kind":       "PersistentVolumeClaim",
+				"name":       scratchPVC.Name,
 			},
 		},
 	}}
