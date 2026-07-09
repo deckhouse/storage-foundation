@@ -21,6 +21,10 @@ shell:
     - git clone $(cat /run/secrets/SOURCE_REPO)/kubernetes-csi/volume-data-source-validator.git .
     - git checkout {{ $upstreamCommit }}
     - for patchfile in /patches/*.patch ; do echo -n "Apply ${patchfile} ... "; git apply "${patchfile}" --verbose; done
+    # The 002 CVE patch bumps go.mod/go.sum; drop the upstream vendor dir so the
+    # golang stage builds in module mode from the patched modules (matches the
+    # csi-* sidecar images) instead of failing on inconsistent vendoring.
+    - rm -rf vendor
     - rm -rf /patches
     - rm -rf .git
 
