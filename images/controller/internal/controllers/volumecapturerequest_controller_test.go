@@ -22,6 +22,7 @@ import (
 	"testing"
 	"time"
 
+	snapshotv1 "github.com/kubernetes-csi/external-snapshotter/client/v8/apis/volumesnapshot/v1"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	corev1 "k8s.io/api/core/v1"
@@ -31,15 +32,13 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
-	"k8s.io/utils/pointer"
+	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	deckhousev1alpha1 "github.com/deckhouse/deckhouse/deckhouse-controller/pkg/apis/deckhouse.io/v1alpha1"
 	storagev1alpha1 "github.com/deckhouse/storage-foundation/api/v1alpha1"
-	snapshotv1 "github.com/kubernetes-csi/external-snapshotter/client/v8/apis/volumesnapshot/v1"
-
 	"github.com/deckhouse/storage-foundation/images/controller/pkg/config"
 )
 
@@ -92,7 +91,7 @@ var _ = Describe("VolumeCaptureRequest Controller", func() {
 	newBoundPVC := func(name, namespace, storageClass, volumeName string) *corev1.PersistentVolumeClaim {
 		var storageClassName *string
 		if storageClass != "" {
-			storageClassName = pointer.String(storageClass)
+			storageClassName = ptr.To(storageClass)
 		}
 		return &corev1.PersistentVolumeClaim{
 			ObjectMeta: metav1.ObjectMeta{
@@ -224,16 +223,16 @@ var _ = Describe("VolumeCaptureRequest Controller", func() {
 			},
 			Spec: snapshotv1.VolumeSnapshotContentSpec{
 				Driver:                  "test-driver",
-				VolumeSnapshotClassName: pointer.String("test-vsc-class"),
+				VolumeSnapshotClassName: ptr.To("test-vsc-class"),
 				DeletionPolicy:          snapshotv1.VolumeSnapshotContentDelete,
 				Source: snapshotv1.VolumeSnapshotContentSource{
-					VolumeHandle: pointer.String("test-volume-handle"),
+					VolumeHandle: ptr.To("test-volume-handle"),
 				},
 			},
 		}
 		if readyToUse || errorMsg != nil {
 			vsc.Status = &snapshotv1.VolumeSnapshotContentStatus{
-				ReadyToUse: pointer.Bool(readyToUse),
+				ReadyToUse: ptr.To(readyToUse),
 			}
 			if errorMsg != nil {
 				vsc.Status.Error = &snapshotv1.VolumeSnapshotError{
@@ -263,9 +262,10 @@ var _ = Describe("VolumeCaptureRequest Controller", func() {
 				return nil // Terminal state reached
 			}
 
-			if currentVCR.Spec.Mode == ModeSnapshot {
+			switch currentVCR.Spec.Mode {
+			case ModeSnapshot:
 				ensureSnapshotObjectKeeperUID(currentVCR.UID)
-			} else if currentVCR.Spec.Mode == ModeDetach {
+			case ModeDetach:
 				retainerName := NamePrefixRetainerPV + string(currentVCR.UID)
 				ok := &deckhousev1alpha1.ObjectKeeper{}
 				if err := client.Get(ctx, types.NamespacedName{Name: retainerName}, ok); err == nil && ok.UID == "" {
@@ -300,9 +300,10 @@ var _ = Describe("VolumeCaptureRequest Controller", func() {
 			// Workaround for fake client: ensure ObjectKeeper has UID AFTER reconcile
 			// ObjectKeeper might have been created during reconcile, so set UID if needed
 			// If UID was set, update VSC/PV ownerRef to use correct UID
-			if currentVCR.Spec.Mode == ModeSnapshot {
+			switch currentVCR.Spec.Mode {
+			case ModeSnapshot:
 				fixSnapshotVSCOwnerRefs(currentVCR)
-			} else if currentVCR.Spec.Mode == ModeDetach {
+			case ModeDetach:
 				retainerName := NamePrefixRetainerPV + string(currentVCR.UID)
 				ok := &deckhousev1alpha1.ObjectKeeper{}
 				if err := client.Get(ctx, types.NamespacedName{Name: retainerName}, ok); err == nil {
@@ -379,7 +380,7 @@ var _ = Describe("VolumeCaptureRequest Controller", func() {
 					Expect(client.Get(ctx, types.NamespacedName{Name: csiVSCName}, vsc)).To(Succeed())
 				}
 				vsc.Status = &snapshotv1.VolumeSnapshotContentStatus{
-					ReadyToUse: pointer.Bool(true),
+					ReadyToUse: ptr.To(true),
 				}
 				Expect(client.Status().Update(ctx, vsc)).To(Succeed())
 
@@ -448,7 +449,7 @@ var _ = Describe("VolumeCaptureRequest Controller", func() {
 				updatedVCR := &storagev1alpha1.VolumeCaptureRequest{}
 				Expect(client.Get(ctx, types.NamespacedName{Name: vcr.Name, Namespace: vcr.Namespace}, updatedVCR)).To(Succeed())
 
-				readyCondition := getCondition(updatedVCR.Status.Conditions, storagev1alpha1.ConditionTypeReady)
+				readyCondition := getReadyCondition(updatedVCR.Status.Conditions)
 				Expect(readyCondition).ToNot(BeNil())
 				Expect(readyCondition.Status).To(Equal(metav1.ConditionTrue))
 
@@ -510,7 +511,7 @@ var _ = Describe("VolumeCaptureRequest Controller", func() {
 						Kind:       KindObjectKeeper,
 						Name:       retainerName,
 						UID:        objectKeeper.UID,
-						Controller: pointer.Bool(true),
+						Controller: ptr.To(true),
 					},
 				}
 				Expect(client.Create(ctx, vsc)).To(Succeed())
@@ -531,7 +532,7 @@ var _ = Describe("VolumeCaptureRequest Controller", func() {
 				updatedVCR := &storagev1alpha1.VolumeCaptureRequest{}
 				Expect(client.Get(ctx, types.NamespacedName{Name: vcr.Name, Namespace: vcr.Namespace}, updatedVCR)).To(Succeed())
 
-				readyCondition := getCondition(updatedVCR.Status.Conditions, storagev1alpha1.ConditionTypeReady)
+				readyCondition := getReadyCondition(updatedVCR.Status.Conditions)
 				Expect(readyCondition).ToNot(BeNil())
 				Expect(readyCondition.Status).To(Equal(metav1.ConditionFalse))
 				Expect(readyCondition.Reason).To(Equal(storagev1alpha1.ConditionReasonSnapshotCreationFailed))
@@ -567,7 +568,7 @@ var _ = Describe("VolumeCaptureRequest Controller", func() {
 					updatedVCR := &storagev1alpha1.VolumeCaptureRequest{}
 					Expect(client.Get(ctx, types.NamespacedName{Name: vcr.Name, Namespace: vcr.Namespace}, updatedVCR)).To(Succeed())
 
-					readyCondition := getCondition(updatedVCR.Status.Conditions, storagev1alpha1.ConditionTypeReady)
+					readyCondition := getReadyCondition(updatedVCR.Status.Conditions)
 					Expect(readyCondition).ToNot(BeNil())
 					Expect(readyCondition.Status).To(Equal(metav1.ConditionFalse))
 					Expect(readyCondition.Reason).To(Equal(expectedReason))
@@ -586,7 +587,7 @@ var _ = Describe("VolumeCaptureRequest Controller", func() {
 								Namespace: "default",
 							},
 							Spec: corev1.PersistentVolumeClaimSpec{
-								StorageClassName: pointer.String("test-sc"),
+								StorageClassName: ptr.To("test-sc"),
 							},
 						}
 						Expect(client.Create(ctx, pvc)).To(Succeed())
@@ -734,7 +735,7 @@ var _ = Describe("VolumeCaptureRequest Controller", func() {
 				Expect(updatedVCR.Status.Data.Artifact.Name).To(Equal("test-pv-detach"))
 				Expect(updatedVCR.Status.Data.Artifact.UID).To(Equal("pv-uid-detach"))
 
-				readyCondition := getCondition(updatedVCR.Status.Conditions, storagev1alpha1.ConditionTypeReady)
+				readyCondition := getReadyCondition(updatedVCR.Status.Conditions)
 				Expect(readyCondition).ToNot(BeNil())
 				Expect(readyCondition.Status).To(Equal(metav1.ConditionTrue))
 			})
@@ -785,7 +786,7 @@ var _ = Describe("VolumeCaptureRequest Controller", func() {
 						Kind:       KindObjectKeeper,
 						Name:       retainerName,
 						UID:        objectKeeper.UID,
-						Controller: pointer.Bool(true),
+						Controller: ptr.To(true),
 					},
 				}
 				Expect(client.Update(ctx, pv)).To(Succeed())
@@ -846,7 +847,7 @@ var _ = Describe("VolumeCaptureRequest Controller", func() {
 			vsc := &snapshotv1.VolumeSnapshotContent{}
 			Expect(client.Get(ctx, types.NamespacedName{Name: csiVSCName}, vsc)).To(Succeed())
 			vsc.Status = &snapshotv1.VolumeSnapshotContentStatus{
-				ReadyToUse: pointer.Bool(true),
+				ReadyToUse: ptr.To(true),
 			}
 			Expect(client.Status().Update(ctx, vsc)).To(Succeed())
 
@@ -950,7 +951,7 @@ var _ = Describe("VolumeCaptureRequest Controller", func() {
 
 			updated := &storagev1alpha1.VolumeCaptureRequest{}
 			Expect(client.Get(ctx, types.NamespacedName{Name: vcr.Name, Namespace: vcr.Namespace}, updated)).To(Succeed())
-			ready := getCondition(updated.Status.Conditions, storagev1alpha1.ConditionTypeReady)
+			ready := getReadyCondition(updated.Status.Conditions)
 			Expect(ready).ToNot(BeNil())
 			Expect(ready.Status).To(Equal(metav1.ConditionFalse))
 			Expect(ready.Reason).To(Equal(storagev1alpha1.ConditionReasonTargetsPending))
@@ -1025,9 +1026,9 @@ var _ = Describe("VolumeCaptureRequest Controller", func() {
 })
 
 // Helper function to get condition by type
-func getCondition(conditions []metav1.Condition, conditionType string) *metav1.Condition {
+func getReadyCondition(conditions []metav1.Condition) *metav1.Condition {
 	for i := range conditions {
-		if conditions[i].Type == conditionType {
+		if conditions[i].Type == storagev1alpha1.ConditionTypeReady {
 			return &conditions[i]
 		}
 	}

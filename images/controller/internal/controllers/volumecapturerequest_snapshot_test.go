@@ -19,8 +19,9 @@ package controllers
 import (
 	"testing"
 
-	storagev1alpha1 "github.com/deckhouse/storage-foundation/api/v1alpha1"
 	"k8s.io/apimachinery/pkg/types"
+
+	storagev1alpha1 "github.com/deckhouse/storage-foundation/api/v1alpha1"
 )
 
 func TestSnapshotVSCName(t *testing.T) {
@@ -38,7 +39,7 @@ func TestSnapshotVSCName(t *testing.T) {
 
 func TestTargetUIDHashDeterministic(t *testing.T) {
 	uid := "11111111-2222-3333-4444-555555555555"
-	if targetUIDHash(uid) != targetUIDHash(uid) {
+	if got1, got2 := targetUIDHash(uid), targetUIDHash(uid); got1 != got2 {
 		t.Fatal("hash must be deterministic")
 	}
 	other := "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"

@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"time"
 
+	snapshotv1 "github.com/kubernetes-csi/external-snapshotter/client/v8/apis/volumesnapshot/v1"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -32,8 +33,6 @@ import (
 
 	deckhousev1alpha1 "github.com/deckhouse/deckhouse/deckhouse-controller/pkg/apis/deckhouse.io/v1alpha1"
 	storagev1alpha1 "github.com/deckhouse/storage-foundation/api/v1alpha1"
-	snapshotv1 "github.com/kubernetes-csi/external-snapshotter/client/v8/apis/volumesnapshot/v1"
-
 	"github.com/deckhouse/storage-foundation/images/controller/pkg/config"
 )
 
@@ -137,7 +136,7 @@ func (r *VolumeRestoreRequestController) Reconcile(ctx context.Context, req ctrl
 func (r *VolumeRestoreRequestController) ensureObjectKeeper(
 	ctx context.Context,
 	vrr *storagev1alpha1.VolumeRestoreRequest,
-) (*deckhousev1alpha1.ObjectKeeper, ctrl.Result, error) {
+) (ctrl.Result, error) {
 	l := log.FromContext(ctx).WithValues("vrr", fmt.Sprintf("%s/%s", vrr.Namespace, vrr.Name))
 
 	// Generate ObjectKeeper name based on VRR UID
@@ -145,7 +144,8 @@ func (r *VolumeRestoreRequestController) ensureObjectKeeper(
 	objectKeeper := &deckhousev1alpha1.ObjectKeeper{}
 	err := r.Get(ctx, client.ObjectKey{Name: retainerName}, objectKeeper)
 
-	if apierrors.IsNotFound(err) {
+	switch {
+	case apierrors.IsNotFound(err):
 		// Create ObjectKeeper
 		objectKeeper = &deckhousev1alpha1.ObjectKeeper{
 			TypeMeta: metav1.TypeMeta{
@@ -167,7 +167,7 @@ func (r *VolumeRestoreRequestController) ensureObjectKeeper(
 			},
 		}
 		if err := r.Create(ctx, objectKeeper); err != nil {
-			return nil, ctrl.Result{}, fmt.Errorf("failed to create ObjectKeeper: %w", err)
+			return ctrl.Result{}, fmt.Errorf("failed to create ObjectKeeper: %w", err)
 		}
 		l.Info("Created ObjectKeeper", "name", retainerName)
 		// HARD BARRIER: UID must exist before creating PVC with OwnerReference
@@ -175,52 +175,52 @@ func (r *VolumeRestoreRequestController) ensureObjectKeeper(
 		// but we cannot rely on it being populated immediately in the same reconcile.
 		// Re-read ObjectKeeper to get UID populated by apiserver/fake client
 		if err := r.Get(ctx, client.ObjectKey{Name: retainerName}, objectKeeper); err != nil {
-			return nil, ctrl.Result{}, fmt.Errorf("failed to re-read ObjectKeeper after Create: %w", err)
+			return ctrl.Result{}, fmt.Errorf("failed to re-read ObjectKeeper after Create: %w", err)
 		}
 		// If UID is still not populated (shouldn't happen with real apiserver, but possible with fake client), requeue
 		if objectKeeper.UID == "" {
 			l.Info("ObjectKeeper UID not assigned yet, requeue", "name", retainerName)
-			return nil, ctrl.Result{RequeueAfter: time.Second}, nil
+			return ctrl.Result{RequeueAfter: time.Second}, nil
 		}
-	} else if err != nil {
-		return nil, ctrl.Result{}, fmt.Errorf("failed to get ObjectKeeper: %w", err)
-	} else {
+	case err != nil:
+		return ctrl.Result{}, fmt.Errorf("failed to get ObjectKeeper: %w", err)
+	default:
 		// ObjectKeeper exists - validate it belongs to this VRR
 		// This protects against race conditions where VRR was deleted and recreated with same name
 		if objectKeeper.Spec.FollowObjectRef == nil {
-			return nil, ctrl.Result{}, fmt.Errorf("ObjectKeeper %s has no FollowObjectRef", retainerName)
+			return ctrl.Result{}, fmt.Errorf("ObjectKeeper %s has no FollowObjectRef", retainerName)
 		}
 		// Validate UID (primary check)
 		if objectKeeper.Spec.FollowObjectRef.UID != string(vrr.UID) {
-			return nil, ctrl.Result{}, fmt.Errorf("ObjectKeeper %s belongs to another VRR (UID mismatch: expected %s, got %s)",
+			return ctrl.Result{}, fmt.Errorf("ObjectKeeper %s belongs to another VRR (UID mismatch: expected %s, got %s)",
 				retainerName, string(vrr.UID), objectKeeper.Spec.FollowObjectRef.UID)
 		}
 		// Validate Mode (should be FollowObject)
 		if objectKeeper.Spec.Mode != "FollowObject" {
-			return nil, ctrl.Result{}, fmt.Errorf("ObjectKeeper %s has invalid mode: expected FollowObject, got %s", retainerName, objectKeeper.Spec.Mode)
+			return ctrl.Result{}, fmt.Errorf("ObjectKeeper %s has invalid mode: expected FollowObject, got %s", retainerName, objectKeeper.Spec.Mode)
 		}
 		// HARD BARRIER: UID must exist before creating PVC with OwnerReference
 		// If ObjectKeeper exists but UID is not populated (e.g., from fake client in tests), requeue
 		if objectKeeper.UID == "" {
 			l.Info("ObjectKeeper exists but UID not assigned yet, requeue", "name", retainerName)
-			return nil, ctrl.Result{RequeueAfter: time.Second}, nil
+			return ctrl.Result{RequeueAfter: time.Second}, nil
 		}
 		// Validate Kind, Namespace, and Name (additional cheap checks)
 		if objectKeeper.Spec.FollowObjectRef.Kind != KindVolumeRestoreRequest {
-			return nil, ctrl.Result{}, fmt.Errorf("ObjectKeeper %s FollowObjectRef.Kind mismatch: expected %s, got %s",
+			return ctrl.Result{}, fmt.Errorf("ObjectKeeper %s FollowObjectRef.Kind mismatch: expected %s, got %s",
 				retainerName, KindVolumeRestoreRequest, objectKeeper.Spec.FollowObjectRef.Kind)
 		}
 		if objectKeeper.Spec.FollowObjectRef.Namespace != vrr.Namespace {
-			return nil, ctrl.Result{}, fmt.Errorf("ObjectKeeper %s FollowObjectRef.Namespace mismatch: expected %s, got %s",
+			return ctrl.Result{}, fmt.Errorf("ObjectKeeper %s FollowObjectRef.Namespace mismatch: expected %s, got %s",
 				retainerName, vrr.Namespace, objectKeeper.Spec.FollowObjectRef.Namespace)
 		}
 		if objectKeeper.Spec.FollowObjectRef.Name != vrr.Name {
-			return nil, ctrl.Result{}, fmt.Errorf("ObjectKeeper %s FollowObjectRef.Name mismatch: expected %s, got %s",
+			return ctrl.Result{}, fmt.Errorf("ObjectKeeper %s FollowObjectRef.Name mismatch: expected %s, got %s",
 				retainerName, vrr.Name, objectKeeper.Spec.FollowObjectRef.Name)
 		}
 	}
 
-	return objectKeeper, ctrl.Result{}, nil
+	return ctrl.Result{}, nil
 }
 
 // processVolumeSnapshotContentRestore handles restore from VolumeSnapshotContent
@@ -270,7 +270,7 @@ func (r *VolumeRestoreRequestController) processVolumeSnapshotContentRestore(
 	}
 
 	// 2. Create ObjectKeeper (idempotent)
-	_, result, err := r.ensureObjectKeeper(ctx, vrr)
+	result, err := r.ensureObjectKeeper(ctx, vrr)
 	if err != nil {
 		return ctrl.Result{}, err
 	}
@@ -350,7 +350,7 @@ func (r *VolumeRestoreRequestController) processPersistentVolumeRestore(
 	}
 
 	// 2. Create ObjectKeeper (idempotent)
-	_, result, err := r.ensureObjectKeeper(ctx, vrr)
+	result, err := r.ensureObjectKeeper(ctx, vrr)
 	if err != nil {
 		return ctrl.Result{}, err
 	}

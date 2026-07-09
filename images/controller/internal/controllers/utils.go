@@ -17,9 +17,10 @@ limitations under the License.
 package controllers
 
 import (
-	storagev1alpha1 "github.com/deckhouse/storage-foundation/api/v1alpha1"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+
+	storagev1alpha1 "github.com/deckhouse/storage-foundation/api/v1alpha1"
 )
 
 // setSingleCondition sets a condition, removing any existing condition of the same type first

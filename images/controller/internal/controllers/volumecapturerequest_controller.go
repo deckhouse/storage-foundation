@@ -22,6 +22,7 @@ import (
 	"strings"
 	"time"
 
+	snapshotv1 "github.com/kubernetes-csi/external-snapshotter/client/v8/apis/volumesnapshot/v1"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
@@ -34,8 +35,6 @@ import (
 
 	deckhousev1alpha1 "github.com/deckhouse/deckhouse/deckhouse-controller/pkg/apis/deckhouse.io/v1alpha1"
 	storagev1alpha1 "github.com/deckhouse/storage-foundation/api/v1alpha1"
-	snapshotv1 "github.com/kubernetes-csi/external-snapshotter/client/v8/apis/volumesnapshot/v1"
-
 	"github.com/deckhouse/storage-foundation/images/controller/pkg/config"
 )
 
@@ -174,15 +173,15 @@ func (r *VolumeCaptureRequestController) processSnapshotMode(ctx context.Context
 	target.Namespace = vcr.Namespace
 
 	retainerName := objectKeeperNameForVCR(vcr.UID)
-	objectKeeper, result, err := r.ensureObjectKeeper(ctx, retainerName, vcr)
+	_, result, err := r.ensureObjectKeeper(ctx, retainerName, vcr)
 	if err != nil {
 		return ctrl.Result{}, err
 	}
-	if result.Requeue || result.RequeueAfter > 0 {
+	if result.RequeueAfter > 0 {
 		return result, nil
 	}
 
-	tr, targetResult, err := r.processSnapshotTarget(ctx, vcr, objectKeeper, retainerName, target)
+	tr, targetResult, err := r.processSnapshotTarget(ctx, vcr, retainerName, target)
 	if err != nil {
 		return ctrl.Result{}, err
 	}
@@ -242,7 +241,8 @@ func (r *VolumeCaptureRequestController) processDetachMode(ctx context.Context, 
 		Namespace: target.Namespace,
 		Name:      target.Name,
 	}, pvc); err != nil {
-		if apierrors.IsNotFound(err) {
+		switch {
+		case apierrors.IsNotFound(err):
 			// PVC already deleted - this is expected after first reconcile
 			pvcNotFound = true
 			l.Info("PVC already deleted, proceeding to detach PV", "pvc", fmt.Sprintf("%s/%s", target.Namespace, target.Name))
@@ -260,9 +260,9 @@ func (r *VolumeCaptureRequestController) processDetachMode(ctx context.Context, 
 			if err := r.Get(ctx, client.ObjectKey{Name: pvName}, pv); err != nil {
 				return ctrl.Result{}, fmt.Errorf("failed to get PV %s: %w", pvName, err)
 			}
-		} else if apierrors.IsForbidden(err) {
+		case apierrors.IsForbidden(err):
 			return r.markFailed(ctx, vcr, storagev1alpha1.ConditionReasonRBACDenied, fmt.Sprintf("Access denied to PVC %s/%s", target.Namespace, target.Name))
-		} else {
+		default:
 			return ctrl.Result{}, fmt.Errorf("failed to get PVC: %w", err)
 		}
 	}
@@ -369,7 +369,7 @@ func (r *VolumeCaptureRequestController) processDetachMode(ctx context.Context, 
 	if err != nil {
 		return ctrl.Result{}, err
 	}
-	if result.Requeue || result.RequeueAfter > 0 {
+	if result.RequeueAfter > 0 {
 		return result, nil
 	}
 
@@ -800,7 +800,7 @@ func (r *VolumeCaptureRequestController) cleanupArtifactsForVCR(ctx context.Cont
 	switch artifact.Kind {
 	case "VolumeSnapshotContent":
 		content := &snapshotv1.VolumeSnapshotContent{}
-		if err := r.Client.Get(ctx, client.ObjectKey{Name: artifact.Name}, content); err != nil {
+		if err := r.Get(ctx, client.ObjectKey{Name: artifact.Name}, content); err != nil {
 			if apierrors.IsNotFound(err) {
 				return nil
 			}
@@ -809,12 +809,12 @@ func (r *VolumeCaptureRequestController) cleanupArtifactsForVCR(ctx context.Cont
 		if hasSnapshotContentOwnerRef(content.OwnerReferences) {
 			return nil
 		}
-		if err := r.Client.Delete(ctx, content); err != nil && !apierrors.IsNotFound(err) {
+		if err := r.Delete(ctx, content); err != nil && !apierrors.IsNotFound(err) {
 			return err
 		}
 	case "PersistentVolume":
 		pv := &corev1.PersistentVolume{}
-		if err := r.Client.Get(ctx, client.ObjectKey{Name: artifact.Name}, pv); err != nil {
+		if err := r.Get(ctx, client.ObjectKey{Name: artifact.Name}, pv); err != nil {
 			if apierrors.IsNotFound(err) {
 				return nil
 			}
@@ -823,7 +823,7 @@ func (r *VolumeCaptureRequestController) cleanupArtifactsForVCR(ctx context.Cont
 		if hasSnapshotContentOwnerRef(pv.OwnerReferences) {
 			return nil
 		}
-		if err := r.Client.Delete(ctx, pv); err != nil && !apierrors.IsNotFound(err) {
+		if err := r.Delete(ctx, pv); err != nil && !apierrors.IsNotFound(err) {
 			return err
 		}
 	}

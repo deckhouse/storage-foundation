@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"time"
 
+	snapshotv1 "github.com/kubernetes-csi/external-snapshotter/client/v8/apis/volumesnapshot/v1"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	corev1 "k8s.io/api/core/v1"
@@ -29,7 +30,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
-	"k8s.io/utils/pointer"
+	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
@@ -37,7 +38,6 @@ import (
 	deckhousev1alpha1 "github.com/deckhouse/deckhouse/deckhouse-controller/pkg/apis/deckhouse.io/v1alpha1"
 	storagev1alpha1 "github.com/deckhouse/storage-foundation/api/v1alpha1"
 	"github.com/deckhouse/storage-foundation/images/controller/pkg/config"
-	snapshotv1 "github.com/kubernetes-csi/external-snapshotter/client/v8/apis/volumesnapshot/v1"
 )
 
 // TestVolumeRestoreRequest is part of the unified test suite
@@ -101,11 +101,11 @@ var _ = Describe("VolumeRestoreRequest", func() {
 			Spec: snapshotv1.VolumeSnapshotContentSpec{
 				Driver: "test-driver",
 				Source: snapshotv1.VolumeSnapshotContentSource{
-					VolumeHandle: pointer.String("test-volume-handle"),
+					VolumeHandle: ptr.To("test-volume-handle"),
 				},
 			},
 			Status: &snapshotv1.VolumeSnapshotContentStatus{
-				ReadyToUse: pointer.Bool(true),
+				ReadyToUse: ptr.To(true),
 			},
 		}
 		Expect(client.Create(ctx, vsc)).To(Succeed())
@@ -266,7 +266,7 @@ var _ = Describe("VolumeRestoreRequest", func() {
 			// When: Reconcile called again
 			result, err = ctrl.Reconcile(ctx, req)
 			Expect(err).ToNot(HaveOccurred())
-			Expect(result.Requeue).To(BeFalse())
+			Expect(result.RequeueAfter).To(BeZero())
 			Expect(result.RequeueAfter).To(BeZero())
 
 			// Then: VRR finalized
@@ -290,7 +290,7 @@ var _ = Describe("VolumeRestoreRequest", func() {
 			// Then: Terminal VRR not reconciled again
 			result, err = ctrl.Reconcile(ctx, req)
 			Expect(err).ToNot(HaveOccurred())
-			Expect(result.Requeue).To(BeFalse())
+			Expect(result.RequeueAfter).To(BeZero())
 			Expect(result.RequeueAfter).To(BeZero())
 
 			// Verify status unchanged
@@ -464,7 +464,7 @@ var _ = Describe("VolumeRestoreRequest", func() {
 			req := reconcile.Request{NamespacedName: types.NamespacedName{Name: "test-vrr-not-found", Namespace: "default"}}
 			result, err := ctrl.Reconcile(ctx, req)
 			Expect(err).ToNot(HaveOccurred())
-			Expect(result.Requeue).To(BeFalse())
+			Expect(result.RequeueAfter).To(BeZero())
 
 			// Then: VRR marked as failed
 			updatedVRR := &storagev1alpha1.VolumeRestoreRequest{}
@@ -485,7 +485,7 @@ var _ = Describe("VolumeRestoreRequest", func() {
 			// Then: Repeated reconcile is no-op
 			result, err = ctrl.Reconcile(ctx, req)
 			Expect(err).ToNot(HaveOccurred())
-			Expect(result.Requeue).To(BeFalse())
+			Expect(result.RequeueAfter).To(BeZero())
 		})
 
 		It("should mark VRR failed when PV is not found", func() {
@@ -512,7 +512,7 @@ var _ = Describe("VolumeRestoreRequest", func() {
 			req := reconcile.Request{NamespacedName: types.NamespacedName{Name: "test-vrr-pv-not-found", Namespace: "default"}}
 			result, err := ctrl.Reconcile(ctx, req)
 			Expect(err).ToNot(HaveOccurred())
-			Expect(result.Requeue).To(BeFalse())
+			Expect(result.RequeueAfter).To(BeZero())
 
 			// Then: VRR marked as failed
 			updatedVRR := &storagev1alpha1.VolumeRestoreRequest{}
@@ -535,7 +535,7 @@ var _ = Describe("VolumeRestoreRequest", func() {
 					Driver: "test-driver",
 				},
 				Status: &snapshotv1.VolumeSnapshotContentStatus{
-					ReadyToUse: pointer.Bool(false),
+					ReadyToUse: ptr.To(false),
 				},
 			}
 			Expect(client.Create(ctx, vsc)).To(Succeed())
@@ -580,7 +580,7 @@ var _ = Describe("VolumeRestoreRequest", func() {
 					Driver: "test-driver",
 				},
 				Status: &snapshotv1.VolumeSnapshotContentStatus{
-					ReadyToUse: pointer.Bool(false),
+					ReadyToUse: ptr.To(false),
 					Error: &snapshotv1.VolumeSnapshotError{
 						Message: &errorMsg,
 						Time:    &metav1.Time{Time: time.Now()},
@@ -612,7 +612,7 @@ var _ = Describe("VolumeRestoreRequest", func() {
 			req := reconcile.Request{NamespacedName: types.NamespacedName{Name: "test-vrr-vsc-error", Namespace: "default"}}
 			result, err := ctrl.Reconcile(ctx, req)
 			Expect(err).ToNot(HaveOccurred())
-			Expect(result.Requeue).To(BeFalse())
+			Expect(result.RequeueAfter).To(BeZero())
 
 			// Then: VRR marked as failed
 			updatedVRR := &storagev1alpha1.VolumeRestoreRequest{}
@@ -810,7 +810,7 @@ var _ = Describe("VolumeRestoreRequest", func() {
 			Expect(err).ToNot(HaveOccurred())
 
 			// Then: No requeue, no processing
-			Expect(result.Requeue).To(BeFalse())
+			Expect(result.RequeueAfter).To(BeZero())
 			Expect(result.RequeueAfter).To(BeZero())
 
 			// Then: Status unchanged (time may differ slightly, so check that it exists and Ready condition unchanged)
@@ -872,7 +872,7 @@ var _ = Describe("VolumeRestoreRequest", func() {
 			Expect(err).ToNot(HaveOccurred())
 
 			// Then: No-op (terminal VRR ignored)
-			Expect(result.Requeue).To(BeFalse())
+			Expect(result.RequeueAfter).To(BeZero())
 			Expect(result.RequeueAfter).To(BeZero())
 
 			// Then: Status unchanged (time may differ slightly, so check that it exists and Ready condition unchanged)
