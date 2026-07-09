@@ -96,7 +96,7 @@ index 36f60dc95..2f26914f2 100644
  }
  
  // VolumeSnapshotStatus is the status of the VolumeSnapshot
-@@ -194,6 +264,114 @@ type VolumeSnapshotStatus struct {
+@@ -194,6 +264,116 @@ type VolumeSnapshotStatus struct {
  	// VolumeSnapshot is a part of.
  	// +optional
  	VolumeGroupSnapshotName *string `json:"volumeGroupSnapshotName,omitempty" protobuf:"bytes,6,opt,name=volumeGroupSnapshotName"`
@@ -163,6 +163,8 @@ index 36f60dc95..2f26914f2 100644
 +	DataCaptured *bool `json:"dataCaptured,omitempty" protobuf:"varint,2,opt,name=dataCaptured"`
 +	// +optional
 +	SubtreeManifestsPersisted *bool `json:"subtreeManifestsPersisted,omitempty" protobuf:"varint,3,opt,name=subtreeManifestsPersisted"`
++	// +optional
++	SubtreePlanned *bool `json:"subtreePlanned,omitempty" protobuf:"varint,4,opt,name=subtreePlanned"`
 +}
 +
 +// VolumeSnapshotDomainCaptureState holds the state-snapshotter domain-written planning refs and lifecycle.
@@ -235,7 +237,7 @@ index a590aef06..ba47cf21b 100644
  	return
  }
  
-@@ -427,9 +433,181 @@ func (in *VolumeSnapshotStatus) DeepCopyInto(out *VolumeSnapshotStatus) {
+@@ -427,9 +433,186 @@ func (in *VolumeSnapshotStatus) DeepCopyInto(out *VolumeSnapshotStatus) {
  		*out = new(string)
  		**out = **in
  	}
@@ -314,6 +316,11 @@ index a590aef06..ba47cf21b 100644
 +	}
 +	if in.SubtreeManifestsPersisted != nil {
 +		in, out := &in.SubtreeManifestsPersisted, &out.SubtreeManifestsPersisted
++		*out = new(bool)
++		**out = **in
++	}
++	if in.SubtreePlanned != nil {
++		in, out := &in.SubtreePlanned, &out.SubtreePlanned
 +		*out = new(bool)
 +		**out = **in
 +	}
@@ -594,7 +601,7 @@ index 36f60dc95..2f26914f2 100644
  }
  
  // VolumeSnapshotStatus is the status of the VolumeSnapshot
-@@ -194,6 +264,114 @@ type VolumeSnapshotStatus struct {
+@@ -194,6 +264,116 @@ type VolumeSnapshotStatus struct {
  	// VolumeSnapshot is a part of.
  	// +optional
  	VolumeGroupSnapshotName *string `json:"volumeGroupSnapshotName,omitempty" protobuf:"bytes,6,opt,name=volumeGroupSnapshotName"`
@@ -661,6 +668,8 @@ index 36f60dc95..2f26914f2 100644
 +	DataCaptured *bool `json:"dataCaptured,omitempty" protobuf:"varint,2,opt,name=dataCaptured"`
 +	// +optional
 +	SubtreeManifestsPersisted *bool `json:"subtreeManifestsPersisted,omitempty" protobuf:"varint,3,opt,name=subtreeManifestsPersisted"`
++	// +optional
++	SubtreePlanned *bool `json:"subtreePlanned,omitempty" protobuf:"varint,4,opt,name=subtreePlanned"`
 +}
 +
 +// VolumeSnapshotDomainCaptureState holds the state-snapshotter domain-written planning refs and lifecycle.
@@ -733,7 +742,7 @@ index a590aef06..ba47cf21b 100644
  	return
  }
  
-@@ -427,9 +433,181 @@ func (in *VolumeSnapshotStatus) DeepCopyInto(out *VolumeSnapshotStatus) {
+@@ -427,9 +433,186 @@ func (in *VolumeSnapshotStatus) DeepCopyInto(out *VolumeSnapshotStatus) {
  		*out = new(string)
  		**out = **in
  	}
@@ -812,6 +821,11 @@ index a590aef06..ba47cf21b 100644
 +	}
 +	if in.SubtreeManifestsPersisted != nil {
 +		in, out := &in.SubtreeManifestsPersisted, &out.SubtreeManifestsPersisted
++		*out = new(bool)
++		**out = **in
++	}
++	if in.SubtreePlanned != nil {
++		in, out := &in.SubtreePlanned, &out.SubtreePlanned
 +		*out = new(bool)
 +		**out = **in
 +	}
