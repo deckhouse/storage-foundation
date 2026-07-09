@@ -33,7 +33,7 @@ import (
 //
 // Writer discipline (identical to the reference demo adapter): the SDK writes ONLY
 // status.captureState.domainSpecificController (Get/SetDomainCaptureState), status.childrenSnapshotRefs
-// (via the same — always empty for a leaf), and status.snapshotSource (Get/SetSnapshotSource). It NEVER
+// (via the same — always empty for a leaf), and status.sourceRef (Get/SetSnapshotSource). It NEVER
 // writes the Ready condition and NEVER writes the core-owned captureState.commonController — it only reads
 // them (CoreCaptureState, ReadyReason/ReadyMessage).
 type volumeSnapshotAdapter struct {
@@ -75,11 +75,11 @@ func (a volumeSnapshotAdapter) SetDomainCaptureState(st snapshotsdk.DomainCaptur
 }
 
 func (a volumeSnapshotAdapter) GetSnapshotSource() *snapshotsdk.SnapshotSource {
-	return a.snap.Status.SnapshotSource
+	return a.snap.Status.SourceRef
 }
 
 func (a volumeSnapshotAdapter) SetSnapshotSource(src *snapshotsdk.SnapshotSource) {
-	a.snap.Status.SnapshotSource = src
+	a.snap.Status.SourceRef = src
 }
 
 func (a volumeSnapshotAdapter) CoreCaptureState() snapshotsdk.CoreCaptureState {

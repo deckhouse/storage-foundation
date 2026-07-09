@@ -131,11 +131,11 @@ index 36f60dc95..2f26914f2 100644
 +	// +optional
 +	ChildrenSnapshotRefs []VolumeSnapshotChildReference `json:"childrenSnapshotRefs,omitempty" protobuf:"bytes,10,rep,name=childrenSnapshotRefs"`
 +
-+	// snapshotSource is the full reference to the captured live source object (the source PVC), written by
++	// sourceRef is the full reference to the captured live source object (the source PVC), written by
 +	// the state-snapshotter domain controller (PublishSnapshotSource) and preserved here across the fork's
 +	// status updates. Deckhouse fork extension.
 +	// +optional
-+	SnapshotSource *VolumeSnapshotSourceReference `json:"snapshotSource,omitempty" protobuf:"bytes,11,opt,name=snapshotSource"`
++	SourceRef *VolumeSnapshotSourceReference `json:"sourceRef,omitempty" protobuf:"bytes,11,opt,name=sourceRef"`
 +
 +	// conditions report the state-snapshotter protocol readiness (conditions[Ready] is the user-facing
 +	// condition derived by the core), distinct from the CSI readyToUse binding signal. Written by the core
@@ -261,8 +261,8 @@ index a590aef06..ba47cf21b 100644
 +		*out = make([]VolumeSnapshotChildReference, len(*in))
 +		copy(*out, *in)
 +	}
-+	if in.SnapshotSource != nil {
-+		in, out := &in.SnapshotSource, &out.SnapshotSource
++	if in.SourceRef != nil {
++		in, out := &in.SourceRef, &out.SourceRef
 +		*out = new(VolumeSnapshotSourceReference)
 +		**out = **in
 +	}
@@ -636,11 +636,11 @@ index 36f60dc95..2f26914f2 100644
 +	// +optional
 +	ChildrenSnapshotRefs []VolumeSnapshotChildReference `json:"childrenSnapshotRefs,omitempty" protobuf:"bytes,10,rep,name=childrenSnapshotRefs"`
 +
-+	// snapshotSource is the full reference to the captured live source object (the source PVC), written by
++	// sourceRef is the full reference to the captured live source object (the source PVC), written by
 +	// the state-snapshotter domain controller (PublishSnapshotSource) and preserved here across the fork's
 +	// status updates. Deckhouse fork extension.
 +	// +optional
-+	SnapshotSource *VolumeSnapshotSourceReference `json:"snapshotSource,omitempty" protobuf:"bytes,11,opt,name=snapshotSource"`
++	SourceRef *VolumeSnapshotSourceReference `json:"sourceRef,omitempty" protobuf:"bytes,11,opt,name=sourceRef"`
 +
 +	// conditions report the state-snapshotter protocol readiness (conditions[Ready] is the user-facing
 +	// condition derived by the core), distinct from the CSI readyToUse binding signal. Written by the core
@@ -766,8 +766,8 @@ index a590aef06..ba47cf21b 100644
 +		*out = make([]VolumeSnapshotChildReference, len(*in))
 +		copy(*out, *in)
 +	}
-+	if in.SnapshotSource != nil {
-+		in, out := &in.SnapshotSource, &out.SnapshotSource
++	if in.SourceRef != nil {
++		in, out := &in.SourceRef, &out.SourceRef
 +		*out = new(VolumeSnapshotSourceReference)
 +		**out = **in
 +	}

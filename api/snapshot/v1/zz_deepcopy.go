@@ -123,8 +123,8 @@ func (in *VolumeSnapshotStatus) DeepCopyInto(out *VolumeSnapshotStatus) {
 		copy(l, in.ChildrenSnapshotRefs)
 		out.ChildrenSnapshotRefs = l
 	}
-	if in.SnapshotSource != nil {
-		out.SnapshotSource = in.SnapshotSource.DeepCopy()
+	if in.SourceRef != nil {
+		out.SourceRef = in.SourceRef.DeepCopy()
 	}
 	if in.Conditions != nil {
 		l := make([]metav1.Condition, len(in.Conditions))

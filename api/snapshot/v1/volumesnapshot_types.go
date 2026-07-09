@@ -16,7 +16,7 @@ limitations under the License.
 
 // Package v1 defines a Deckhouse-owned client-side Go type for the CSI snapshot.storage.k8s.io/v1
 // VolumeSnapshot, EXTENDED with the state-snapshotter domain-capture protocol status fields
-// (captureState/childrenSnapshotRefs/snapshotSource/conditions — see design §11.1/§11.3).
+// (captureState/childrenSnapshotRefs/sourceRef/conditions — see design §11.1/§11.3).
 //
 // Rationale (design §11.3, wave8 Block 3c): the storage-foundation VolumeSnapshot domain reconciler needs
 // TYPED access to the protocol status fields the core writes/reads, but the CRD is the CSI VolumeSnapshot
@@ -26,7 +26,7 @@ limitations under the License.
 // VolumeSnapshot) that:
 //
 //   - models ONLY the fields the domain reconciler reads (spec.source.*) or the SDK writes/reads
-//     (status.captureState / childrenSnapshotRefs / snapshotSource / conditions), reusing the canonical
+//     (status.captureState / childrenSnapshotRefs / sourceRef / conditions), reusing the canonical
 //     state-snapshotter API types so there is a single source of truth for the wire shape; and
 //   - is registered in a DEDICATED scheme (never the manager's default scheme, which already maps this GVK
 //     to the upstream external-snapshotter type) used by a dedicated, cache-less client.
@@ -148,10 +148,10 @@ type VolumeSnapshotStatus struct {
 	// this is always empty; it is modeled only because the SDK adapter reads/writes it uniformly.
 	// +optional
 	ChildrenSnapshotRefs []storagev1alpha1.SnapshotChildRef `json:"childrenSnapshotRefs,omitempty"`
-	// SnapshotSource is the full reference to the captured live source (the PVC), published by the SDK
+	// SourceRef is the full reference to the captured live source (the PVC), published by the SDK
 	// (PublishSnapshotSource) for import-mode recreation.
 	// +optional
-	SnapshotSource *storagev1alpha1.SnapshotSourceObjectRef `json:"snapshotSource,omitempty"`
+	SourceRef *storagev1alpha1.SnapshotSourceObjectRef `json:"sourceRef,omitempty"`
 	// Conditions carries the single user-facing Ready condition, written by the core. The domain reconciler
 	// only READS it (the failure channel: a terminal Ready reason drives CoreCaptureOutcome=Failed).
 	// +optional

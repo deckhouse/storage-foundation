@@ -67,7 +67,7 @@ const (
 
 // VolumeSnapshotDomainReconciler drives state-snapshotter DOMAIN planning for module-managed CSI
 // VolumeSnapshots: source-PVC resolution, the exclude-veto adoption latch, the per-snapshot manifest
-// capture (MCR over the source PVC), snapshotSource publication, and the planning barrier. All Kubernetes
+// capture (MCR over the source PVC), sourceRef publication, and the planning barrier. All Kubernetes
 // transport (MCR, owner references, optimistic-locked status patches, the barrier phase) is delegated to
 // the snapshot SDK (pkg/snapshotsdk). It never touches the cluster-scoped SnapshotContent (owned by the
 // core GenericSnapshotBinderController) and never creates a VolumeCaptureRequest (the data leg is the
@@ -192,7 +192,7 @@ func (r *VolumeSnapshotDomainReconciler) Reconcile(ctx context.Context, req ctrl
 		return ctrl.Result{RequeueAfter: volumeSnapshotDomainArtifactRequeueAfter}, nil
 	}
 
-	// Publish the captured source PVC's full reference (top-level status.snapshotSource) so d8-cli can
+	// Publish the captured source PVC's full reference (top-level status.sourceRef) so d8-cli can
 	// rebuild the import-mode source. Not part of the readiness formula.
 	if err := sdk.PublishSnapshotSource(ctx, adapter, snapshotsdk.SnapshotSource{
 		APIVersion: corev1.SchemeGroupVersion.String(),
