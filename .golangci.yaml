@@ -1,6 +1,11 @@
 run:
   timeout: 10m
   allow-parallel-runners: true
+  # golangci-lint v2.9.0 (installed by deckhouse/modules-actions/go_linter) is built with
+  # go1.25 and refuses to lint modules whose go directive is higher. Pin the target language
+  # version so it does not read 1.26.5 from go.mod and fail with "the Go language version
+  # (go1.25) used to build golangci-lint is lower than the targeted Go version".
+  go: "1.25"
 
 issues:
   exclude:
@@ -8,6 +13,9 @@ issues:
     - "should not use dot imports"
     - "don't use an underscore in package name"
     - "exported: .*"
+    # QF1008 is a cosmetic staticcheck quickfix ("could remove embedded field");
+    # not a correctness issue, kept consistent with the other suppressed nits above.
+    - "QF1008.*"
 
 linters-settings:
   gci:

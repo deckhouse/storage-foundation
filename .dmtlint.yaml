@@ -19,3 +19,7 @@ linters-settings:
     exclude-rules:
       directories:
         - hack/
+      files:
+        # handler_fuzz_test.go seeds the fuzzer with intentional random Unicode
+        # (including Cyrillic) as adversarial input; it is test data, not prose.
+        - images/data-exporter/cmd/handler_fuzz_test.go
