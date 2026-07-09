@@ -12,8 +12,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# Based on deckhouse/storage-e2e/.github/templates/e2e-tests.yml
-# See https://github.com/deckhouse/storage-e2e#enabling-e2e-in-your-module
+# Copy of deckhouse/storage-e2e/.github/templates/e2e-tests.yml with module inputs adjusted.
+# Required: PR labels e2e/run, e2e/keep-cluster, e2e/label:* and the inherited
+# org/repo secrets (see storage-e2e README "Enabling e2e in your module").
 
 name: E2E
 
@@ -32,8 +33,4 @@ jobs:
       test_package: ./tests/
       cluster_config: e2e/tests/cluster_config.yml
       module_image_tag: pr${{ github.event.pull_request.number }}
-      # cluster_provider: dvp       # dvp (default) | commander
-      # label_filter: "!stress-test" # optional override when no e2e/label:* labels
-      # storage_e2e_ref: main        # optional
-      # test_timeout: 90m            # optional
     secrets: inherit
