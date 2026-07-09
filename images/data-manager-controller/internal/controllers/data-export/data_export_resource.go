@@ -1392,7 +1392,7 @@ func makeVolumeList(pvcName string) []corev1.Volume {
 }
 
 func (r *DataexportReconciler) getExportPVCFromUserPVC(ctx context.Context, userPVCNameSpace, userPVCName, exportPVCName, dataExportName string) (*corev1.PersistentVolumeClaim, *corev1.PersistentVolume, error) {
-	// Get user PVC // TODO: Проверить имя PV в Lost
+	// Get user PVC // TODO: check the PV name in Lost
 	userPVC := &corev1.PersistentVolumeClaim{}
 	err := r.Client.Get(ctx, types.NamespacedName{Namespace: userPVCNameSpace, Name: userPVCName}, userPVC)
 	if err != nil {
