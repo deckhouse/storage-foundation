@@ -116,6 +116,9 @@ func (r *VolumeRestoreRequestController) Reconcile(ctx context.Context, req ctrl
 		return ctrl.Result{}, nil
 	}
 
+	// The restore target is always a PersistentVolumeClaim created from spec.pvcTemplate; there is no
+	// polymorphic target kind to validate anymore.
+
 	// Process based on source type
 	switch vrr.Spec.SourceRef.Kind {
 	case SourceKindVolumeSnapshotContent:
@@ -133,7 +136,7 @@ func (r *VolumeRestoreRequestController) Reconcile(ctx context.Context, req ctrl
 func (r *VolumeRestoreRequestController) ensureObjectKeeper(
 	ctx context.Context,
 	vrr *storagev1alpha1.VolumeRestoreRequest,
-) (*deckhousev1alpha1.ObjectKeeper, ctrl.Result, error) {
+) (ctrl.Result, error) {
 	l := log.FromContext(ctx).WithValues("vrr", fmt.Sprintf("%s/%s", vrr.Namespace, vrr.Name))
 
 	// Generate ObjectKeeper name based on VRR UID
@@ -141,7 +144,8 @@ func (r *VolumeRestoreRequestController) ensureObjectKeeper(
 	objectKeeper := &deckhousev1alpha1.ObjectKeeper{}
 	err := r.Get(ctx, client.ObjectKey{Name: retainerName}, objectKeeper)
 
-	if apierrors.IsNotFound(err) {
+	switch {
+	case apierrors.IsNotFound(err):
 		// Create ObjectKeeper
 		objectKeeper = &deckhousev1alpha1.ObjectKeeper{
 			TypeMeta: metav1.TypeMeta{
@@ -163,7 +167,7 @@ func (r *VolumeRestoreRequestController) ensureObjectKeeper(
 			},
 		}
 		if err := r.Create(ctx, objectKeeper); err != nil {
-			return nil, ctrl.Result{}, fmt.Errorf("failed to create ObjectKeeper: %w", err)
+			return ctrl.Result{}, fmt.Errorf("failed to create ObjectKeeper: %w", err)
 		}
 		l.Info("Created ObjectKeeper", "name", retainerName)
 		// HARD BARRIER: UID must exist before creating PVC with OwnerReference
@@ -171,52 +175,52 @@ func (r *VolumeRestoreRequestController) ensureObjectKeeper(
 		// but we cannot rely on it being populated immediately in the same reconcile.
 		// Re-read ObjectKeeper to get UID populated by apiserver/fake client
 		if err := r.Get(ctx, client.ObjectKey{Name: retainerName}, objectKeeper); err != nil {
-			return nil, ctrl.Result{}, fmt.Errorf("failed to re-read ObjectKeeper after Create: %w", err)
+			return ctrl.Result{}, fmt.Errorf("failed to re-read ObjectKeeper after Create: %w", err)
 		}
 		// If UID is still not populated (shouldn't happen with real apiserver, but possible with fake client), requeue
 		if objectKeeper.UID == "" {
 			l.Info("ObjectKeeper UID not assigned yet, requeue", "name", retainerName)
-			return nil, ctrl.Result{RequeueAfter: time.Second}, nil
+			return ctrl.Result{RequeueAfter: time.Second}, nil
 		}
-	} else if err != nil {
-		return nil, ctrl.Result{}, fmt.Errorf("failed to get ObjectKeeper: %w", err)
-	} else {
+	case err != nil:
+		return ctrl.Result{}, fmt.Errorf("failed to get ObjectKeeper: %w", err)
+	default:
 		// ObjectKeeper exists - validate it belongs to this VRR
 		// This protects against race conditions where VRR was deleted and recreated with same name
 		if objectKeeper.Spec.FollowObjectRef == nil {
-			return nil, ctrl.Result{}, fmt.Errorf("ObjectKeeper %s has no FollowObjectRef", retainerName)
+			return ctrl.Result{}, fmt.Errorf("ObjectKeeper %s has no FollowObjectRef", retainerName)
 		}
 		// Validate UID (primary check)
 		if objectKeeper.Spec.FollowObjectRef.UID != string(vrr.UID) {
-			return nil, ctrl.Result{}, fmt.Errorf("ObjectKeeper %s belongs to another VRR (UID mismatch: expected %s, got %s)",
+			return ctrl.Result{}, fmt.Errorf("ObjectKeeper %s belongs to another VRR (UID mismatch: expected %s, got %s)",
 				retainerName, string(vrr.UID), objectKeeper.Spec.FollowObjectRef.UID)
 		}
 		// Validate Mode (should be FollowObject)
 		if objectKeeper.Spec.Mode != "FollowObject" {
-			return nil, ctrl.Result{}, fmt.Errorf("ObjectKeeper %s has invalid mode: expected FollowObject, got %s", retainerName, objectKeeper.Spec.Mode)
+			return ctrl.Result{}, fmt.Errorf("ObjectKeeper %s has invalid mode: expected FollowObject, got %s", retainerName, objectKeeper.Spec.Mode)
 		}
 		// HARD BARRIER: UID must exist before creating PVC with OwnerReference
 		// If ObjectKeeper exists but UID is not populated (e.g., from fake client in tests), requeue
 		if objectKeeper.UID == "" {
 			l.Info("ObjectKeeper exists but UID not assigned yet, requeue", "name", retainerName)
-			return nil, ctrl.Result{RequeueAfter: time.Second}, nil
+			return ctrl.Result{RequeueAfter: time.Second}, nil
 		}
 		// Validate Kind, Namespace, and Name (additional cheap checks)
 		if objectKeeper.Spec.FollowObjectRef.Kind != KindVolumeRestoreRequest {
-			return nil, ctrl.Result{}, fmt.Errorf("ObjectKeeper %s FollowObjectRef.Kind mismatch: expected %s, got %s",
+			return ctrl.Result{}, fmt.Errorf("ObjectKeeper %s FollowObjectRef.Kind mismatch: expected %s, got %s",
 				retainerName, KindVolumeRestoreRequest, objectKeeper.Spec.FollowObjectRef.Kind)
 		}
 		if objectKeeper.Spec.FollowObjectRef.Namespace != vrr.Namespace {
-			return nil, ctrl.Result{}, fmt.Errorf("ObjectKeeper %s FollowObjectRef.Namespace mismatch: expected %s, got %s",
+			return ctrl.Result{}, fmt.Errorf("ObjectKeeper %s FollowObjectRef.Namespace mismatch: expected %s, got %s",
 				retainerName, vrr.Namespace, objectKeeper.Spec.FollowObjectRef.Namespace)
 		}
 		if objectKeeper.Spec.FollowObjectRef.Name != vrr.Name {
-			return nil, ctrl.Result{}, fmt.Errorf("ObjectKeeper %s FollowObjectRef.Name mismatch: expected %s, got %s",
+			return ctrl.Result{}, fmt.Errorf("ObjectKeeper %s FollowObjectRef.Name mismatch: expected %s, got %s",
 				retainerName, vrr.Name, objectKeeper.Spec.FollowObjectRef.Name)
 		}
 	}
 
-	return objectKeeper, ctrl.Result{}, nil
+	return ctrl.Result{}, nil
 }
 
 // processVolumeSnapshotContentRestore handles restore from VolumeSnapshotContent
@@ -266,7 +270,7 @@ func (r *VolumeRestoreRequestController) processVolumeSnapshotContentRestore(
 	}
 
 	// 2. Create ObjectKeeper (idempotent)
-	_, result, err := r.ensureObjectKeeper(ctx, vrr)
+	result, err := r.ensureObjectKeeper(ctx, vrr)
 	if err != nil {
 		return ctrl.Result{}, err
 	}
@@ -279,11 +283,11 @@ func (r *VolumeRestoreRequestController) processVolumeSnapshotContentRestore(
 	// VRR controller MUST NOT create PVC under any circumstances.
 	// VRR controller only observes and finalizes status when PVC is Bound.
 	targetPVC := &corev1.PersistentVolumeClaim{}
-	if err := r.Get(ctx, client.ObjectKey{Namespace: vrr.Spec.TargetNamespace, Name: vrr.Spec.TargetPVCName}, targetPVC); err != nil {
+	if err := r.Get(ctx, client.ObjectKey{Namespace: vrr.Namespace, Name: vrr.Spec.PvcTemplate.Name}, targetPVC); err != nil {
 		if apierrors.IsNotFound(err) {
 			// Target PVC doesn't exist yet - external-provisioner hasn't created it
 			// Requeue to wait for external-provisioner
-			l.Info("Target PVC not found yet, waiting for external-provisioner", "namespace", vrr.Spec.TargetNamespace, "name", vrr.Spec.TargetPVCName)
+			l.Info("Target PVC not found yet, waiting for external-provisioner", "namespace", vrr.Namespace, "name", vrr.Spec.PvcTemplate.Name)
 			return ctrl.Result{RequeueAfter: restorePollInterval}, nil
 		}
 		return ctrl.Result{}, fmt.Errorf("failed to check target PVC: %w", err)
@@ -292,20 +296,22 @@ func (r *VolumeRestoreRequestController) processVolumeSnapshotContentRestore(
 	// 4. Check if PVC is Bound
 	if targetPVC.Status.Phase != corev1.ClaimBound {
 		// PVC exists but not Bound yet - external-provisioner is still working
-		l.Info("Target PVC exists but not Bound yet, waiting for external-provisioner", "namespace", vrr.Spec.TargetNamespace, "name", vrr.Spec.TargetPVCName, "phase", targetPVC.Status.Phase)
+		l.Info("Target PVC exists but not Bound yet, waiting for external-provisioner", "namespace", vrr.Namespace, "name", vrr.Spec.PvcTemplate.Name, "phase", targetPVC.Status.Phase)
 		return ctrl.Result{RequeueAfter: restorePollInterval}, nil
 	}
 
 	// 5. Success: PVC is Bound - finalize VRR
-	vrr.Status.TargetPVCRef = &storagev1alpha1.ObjectReference{
-		Name:      vrr.Spec.TargetPVCName,
-		Namespace: vrr.Spec.TargetNamespace,
+	vrr.Status.PvcRef = &storagev1alpha1.ObjectReference{
+		Kind:      KindPersistentVolumeClaim,
+		Name:      vrr.Spec.PvcTemplate.Name,
+		Namespace: vrr.Namespace,
+		UID:       string(targetPVC.UID),
 	}
-	if err := r.finalizeVRR(ctx, vrr, metav1.ConditionTrue, storagev1alpha1.ConditionReasonCompleted, fmt.Sprintf("PVC %s/%s restored successfully", vrr.Spec.TargetNamespace, vrr.Spec.TargetPVCName)); err != nil {
+	if err := r.finalizeVRR(ctx, vrr, metav1.ConditionTrue, storagev1alpha1.ConditionReasonCompleted, fmt.Sprintf("PVC %s/%s restored successfully", vrr.Namespace, vrr.Spec.PvcTemplate.Name)); err != nil {
 		return ctrl.Result{}, err
 	}
 
-	l.Info("VolumeRestoreRequest completed", "source", "VolumeSnapshotContent", "pvc", vrr.Spec.TargetPVCName)
+	l.Info("VolumeRestoreRequest completed", "source", "VolumeSnapshotContent", "pvc", vrr.Spec.PvcTemplate.Name)
 	return ctrl.Result{}, nil
 }
 
@@ -344,7 +350,7 @@ func (r *VolumeRestoreRequestController) processPersistentVolumeRestore(
 	}
 
 	// 2. Create ObjectKeeper (idempotent)
-	_, result, err := r.ensureObjectKeeper(ctx, vrr)
+	result, err := r.ensureObjectKeeper(ctx, vrr)
 	if err != nil {
 		return ctrl.Result{}, err
 	}
@@ -357,11 +363,11 @@ func (r *VolumeRestoreRequestController) processPersistentVolumeRestore(
 	// VRR controller MUST NOT create PVC under any circumstances.
 	// VRR controller only observes and finalizes status when PVC is Bound.
 	targetPVC := &corev1.PersistentVolumeClaim{}
-	if err := r.Get(ctx, client.ObjectKey{Namespace: vrr.Spec.TargetNamespace, Name: vrr.Spec.TargetPVCName}, targetPVC); err != nil {
+	if err := r.Get(ctx, client.ObjectKey{Namespace: vrr.Namespace, Name: vrr.Spec.PvcTemplate.Name}, targetPVC); err != nil {
 		if apierrors.IsNotFound(err) {
 			// Target PVC doesn't exist yet - external-provisioner hasn't created it
 			// Requeue to wait for external-provisioner
-			l.Info("Target PVC not found yet, waiting for external-provisioner", "namespace", vrr.Spec.TargetNamespace, "name", vrr.Spec.TargetPVCName)
+			l.Info("Target PVC not found yet, waiting for external-provisioner", "namespace", vrr.Namespace, "name", vrr.Spec.PvcTemplate.Name)
 			return ctrl.Result{RequeueAfter: restorePollInterval}, nil
 		}
 		return ctrl.Result{}, fmt.Errorf("failed to check target PVC: %w", err)
@@ -370,20 +376,22 @@ func (r *VolumeRestoreRequestController) processPersistentVolumeRestore(
 	// 4. Check if PVC is Bound
 	if targetPVC.Status.Phase != corev1.ClaimBound {
 		// PVC exists but not Bound yet - external-provisioner is still working
-		l.Info("Target PVC exists but not Bound yet, waiting for external-provisioner", "namespace", vrr.Spec.TargetNamespace, "name", vrr.Spec.TargetPVCName, "phase", targetPVC.Status.Phase)
+		l.Info("Target PVC exists but not Bound yet, waiting for external-provisioner", "namespace", vrr.Namespace, "name", vrr.Spec.PvcTemplate.Name, "phase", targetPVC.Status.Phase)
 		return ctrl.Result{RequeueAfter: restorePollInterval}, nil
 	}
 
 	// 5. Success: PVC is Bound - finalize VRR
-	vrr.Status.TargetPVCRef = &storagev1alpha1.ObjectReference{
-		Name:      vrr.Spec.TargetPVCName,
-		Namespace: vrr.Spec.TargetNamespace,
+	vrr.Status.PvcRef = &storagev1alpha1.ObjectReference{
+		Kind:      KindPersistentVolumeClaim,
+		Name:      vrr.Spec.PvcTemplate.Name,
+		Namespace: vrr.Namespace,
+		UID:       string(targetPVC.UID),
 	}
-	if err := r.finalizeVRR(ctx, vrr, metav1.ConditionTrue, storagev1alpha1.ConditionReasonCompleted, fmt.Sprintf("PVC %s/%s restored successfully from PV", vrr.Spec.TargetNamespace, vrr.Spec.TargetPVCName)); err != nil {
+	if err := r.finalizeVRR(ctx, vrr, metav1.ConditionTrue, storagev1alpha1.ConditionReasonCompleted, fmt.Sprintf("PVC %s/%s restored successfully from PV", vrr.Namespace, vrr.Spec.PvcTemplate.Name)); err != nil {
 		return ctrl.Result{}, err
 	}
 
-	l.Info("VolumeRestoreRequest completed", "source", "PersistentVolume", "pvc", vrr.Spec.TargetPVCName)
+	l.Info("VolumeRestoreRequest completed", "source", "PersistentVolume", "pvc", vrr.Spec.PvcTemplate.Name)
 	return ctrl.Result{}, nil
 }
 
@@ -450,7 +458,7 @@ func (r *VolumeRestoreRequestController) finalizeVRR(
 // setTTLAnnotation sets TTL annotation on the object.
 //
 // IMPORTANT TTL SEMANTICS:
-// - TTL annotation (storage.deckhouse.io/ttl) is INFORMATIONAL ONLY.
+// - TTL annotation (storage-foundation.deckhouse.io/ttl) is INFORMATIONAL ONLY.
 // - Actual TTL deletion timing is controlled by controller configuration (config.RequestTTL).
 // - TTL scanner uses config.RequestTTL, NOT the annotation value.
 // - Annotation is set for observability and post-mortem analysis, but does not affect deletion timing.
@@ -501,7 +509,7 @@ func (r *VolumeRestoreRequestController) SetupWithManager(mgr ctrl.Manager) erro
 //
 // 2. TTL source:
 //   - TTL is ALWAYS taken from controller configuration (config.RequestTTL), NOT from VRR annotations
-//   - TTL annotation (storage.deckhouse.io/ttl) is informational only and does not affect deletion timing
+//   - TTL annotation (storage-foundation.deckhouse.io/ttl) is informational only and does not affect deletion timing
 //   - This ensures predictable cluster-wide retention policy
 //
 // 3. TTL calculation:
@@ -545,13 +553,13 @@ func (r *VolumeRestoreRequestController) StartTTLScanner(ctx context.Context, cl
 // scanAndDeleteExpiredVRRs lists all VRRs and deletes those where completionTimestamp + TTL < now.
 //
 // IMPORTANT:
-// TTL annotation (storage.deckhouse.io/ttl) is informational only.
+// TTL annotation (storage-foundation.deckhouse.io/ttl) is informational only.
 // Actual TTL is controlled exclusively by controller configuration.
 // This ensures predictable cluster-wide retention policy.
 //
 // TTL SEMANTICS:
 // - TTL is ALWAYS taken from controller configuration (config.RequestTTL), NOT from VRR annotations.
-// - TTL annotation (storage.deckhouse.io/ttl) is informational only and is IGNORED by the scanner.
+// - TTL annotation (storage-foundation.deckhouse.io/ttl) is informational only and is IGNORED by the scanner.
 // - This ensures consistent cleanup behavior: all VRRs use the same TTL policy defined by controller config.
 // - TTL starts counting from CompletionTimestamp (when VRR reaches Ready=True or Ready=False).
 func (r *VolumeRestoreRequestController) scanAndDeleteExpiredVRRs(ctx context.Context, client client.Client) {

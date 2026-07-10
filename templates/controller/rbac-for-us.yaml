@@ -13,22 +13,22 @@ metadata:
   {{- include "helm_lib_module_labels" (list . (dict "app" "controller")) | nindent 2 }}
 rules:
 # VolumeCaptureRequest (namespaced)
-- apiGroups: ["storage.deckhouse.io"]
+- apiGroups: ["storage-foundation.deckhouse.io"]
   resources: ["volumecapturerequests"]
   verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
 
 # VolumeCaptureRequest status
-- apiGroups: ["storage.deckhouse.io"]
+- apiGroups: ["storage-foundation.deckhouse.io"]
   resources: ["volumecapturerequests/status"]
   verbs: ["get", "update", "patch"]
 
 # VolumeRestoreRequest (namespaced)
-- apiGroups: ["storage.deckhouse.io"]
+- apiGroups: ["storage-foundation.deckhouse.io"]
   resources: ["volumerestorerequests"]
   verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
 
 # VolumeRestoreRequest status
-- apiGroups: ["storage.deckhouse.io"]
+- apiGroups: ["storage-foundation.deckhouse.io"]
   resources: ["volumerestorerequests/status"]
   verbs: ["get", "update", "patch"]
 
@@ -91,6 +91,12 @@ rules:
 - apiGroups: ["snapshot.storage.k8s.io"]
   resources: ["volumesnapshots/status"]
   verbs: ["get", "update", "patch"]
+
+# ManifestCaptureRequest (namespaced) - created and owned by the VolumeSnapshot domain controller
+# (state-snapshotter domain capture: the manifest leg of a module-managed VolumeSnapshot).
+- apiGroups: ["state-snapshotter.deckhouse.io"]
+  resources: ["manifestcapturerequests"]
+  verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
 
 # Events - emitted by controller-runtime EventRecorder
 - apiGroups: [""]

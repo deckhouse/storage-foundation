@@ -19,11 +19,19 @@ package v1alpha1
 // +k8s:deepcopy-gen=true
 // ObjectReference references a Kubernetes object
 type ObjectReference struct {
+	// APIVersion is the group/version of the referenced object (e.g., "snapshot.storage.k8s.io/v1").
+	// Optional: kind-only refs (e.g. core PersistentVolumeClaim) leave it empty. It is required for
+	// snapshot-leaf refs (spec.snapshotRef) so the state-snapshotter reverse-lookup can derive the group.
+	// +optional
+	APIVersion string `json:"apiVersion,omitempty"`
 	// Name is the name of the referenced object
 	Name string `json:"name"`
 	// Namespace is the namespace of the referenced object (optional)
 	Namespace string `json:"namespace,omitempty"`
 	// Kind is the kind of the referenced object (e.g., "VolumeSnapshotContent", "PersistentVolume")
 	Kind string `json:"kind,omitempty"`
+	// UID is the unique identifier of the referenced object. It is populated in status references (e.g.
+	// VolumeRestoreRequest status.pvcRef) so consumers can detect recreation; spec refs may leave it empty.
+	// +optional
+	UID string `json:"uid,omitempty"`
 }
-

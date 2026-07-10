@@ -22,7 +22,7 @@ const (
 	storageFoundationCertsSecretName = "storage-foundation-certs"
 	DeleteReconcile                  = "Delete"
 	UpdateReconcile                  = "Update"
-	StorageManagedLabelKey           = "storage.deckhouse.io/managed-by"
+	StorageManagedLabelKey           = "storage-foundation.deckhouse.io/managed-by"
 
 	PhaseFailed  = "Failed"
 	PhaseCreated = "Created"

@@ -21,11 +21,12 @@
     #   002-vrr-executor.patch - VolumeRestoreRequest executor with Block/
     #                            Filesystem VolumeMode support (CSI
     #                            VolumeCapabilities built from VRR spec).
-    # Source of truth for the executor is the Deckhouse fork branch
-    # d8-63742164-vrr; 002 is the diff of that branch against v6.2.0 (excluding
-    # vendor). The storage-foundation/api dependency is pinned via a Go
-    # pseudo-version to commit b97b1e1 (extended VRR API: volumeMode/fsType/
-    # accessModes); switch to a published api/vX.Y.Z tag later.
+    # 002 is the source of truth for the executor (a plain diff applied to
+    # the v6.2.0 tag, excluding vendor; no long-lived fork branch). The
+    # storage-foundation/api dependency is pinned via a Go pseudo-version to
+    # commit 2c52550 (wave6 honest-refs VRR API: sourceRef + pvcTemplate,
+    # fsType at spec root); switch to a published api/vX.Y.Z tag later. The
+    # patch bumps the go directive to 1.26.4 (required by the api module).
     - condition:
         k8s: ["1.20"]
       version: v6.2.0
@@ -49,14 +50,14 @@
 
 - name: external-snapshotter (csi-snapshotter sidecar)
   link: https://github.com/kubernetes-csi/external-snapshotter
-  description: CSI external-snapshotter sidecar (csi-snapshotter binary). Built by cloning the upstream tag and applying CVE patches under images/csi-external-snapshotter/patches/<version>/.
+  description: CSI external-snapshotter sidecar (csi-snapshotter binary). Built by cloning the upstream tag and applying the Deckhouse vsc-only fork patch + CVE patches under images/csi-external-snapshotter/patches/<version>/.
   logo: https://avatars.githubusercontent.com/u/52698954?s=200&v=4
   license: Apache License 2.0
   id: csi-external-snapshotter
   versions:
     - condition:
         k8s: ["1.20"]
-      version: d8-63742164-vsc-only
+      version: v8.5.0
 
 - name: livenessprobe
   link: https://github.com/kubernetes-csi/livenessprobe
@@ -82,11 +83,11 @@
 
 - name: snapshot-controller
   link: https://github.com/kubernetes-csi/external-snapshotter
-  description: The controller is required for CSI snapshotting to work and is not specific to any CSI driver. Built by cloning the upstream tag and applying CVE patches under images/snapshot-controller/patches/.
+  description: The controller is required for CSI snapshotting to work and is not specific to any CSI driver. Built by cloning the upstream tag and applying the Deckhouse fork patches (vsc-only mode, VolumeSnapshot dataimport) + CVE patches under images/snapshot-controller/patches/.
   logo: https://avatars.githubusercontent.com/u/52698954?s=200&v=4
   license: Apache License 2.0
   id: snapshot-controller
-  version: d8-63742164-vsc-only
+  version: v8.5.0
 
 - name: volume-data-source-validator
   link: https://github.com/kubernetes-csi/volume-data-source-validator

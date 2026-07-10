@@ -32,11 +32,11 @@ import (
 	dev1alpha1 "github.com/deckhouse/storage-foundation/api/v1alpha1"
 )
 
-// makeAdmissionReview builds a minimal AdmissionReview for a given operation and namespace.
-func makeAdmissionReview(op model.AdmissionReviewOp, namespace string) *model.AdmissionReview {
+// makeAdmissionReview builds a minimal AdmissionReview for a given operation in the fixed test namespace.
+func makeAdmissionReview(op model.AdmissionReviewOp) *model.AdmissionReview {
 	return &model.AdmissionReview{
 		Operation: op,
-		Namespace: namespace,
+		Namespace: "test-ns",
 	}
 }
 
@@ -91,7 +91,7 @@ func TestDataExportValidateFunc_NonCreateOperations(t *testing.T) {
 			t.Parallel()
 
 			validateFunc := DataExportValidateFunc()
-			ar := makeAdmissionReview(tt.operation, "test-ns")
+			ar := makeAdmissionReview(tt.operation)
 			// Even a forbidden bare VSC must pass on non-CREATE, proving no validation runs.
 			de := makeDataExport(snapshotStorageGroup, volumeSnapshotContentKind, "anything")
 
@@ -125,7 +125,7 @@ func TestDataExportValidateFunc_EmptyTargetRef(t *testing.T) {
 			t.Parallel()
 
 			validateFunc := DataExportValidateFunc()
-			ar := makeAdmissionReview(model.OperationCreate, "test-ns")
+			ar := makeAdmissionReview(model.OperationCreate)
 			de := makeDataExport(tt.group, tt.kind, tt.target)
 
 			got, err := validateFunc(context.Background(), ar, de)
@@ -144,7 +144,7 @@ func TestDataExportValidateFunc_BareVolumeSnapshotContentDenied(t *testing.T) {
 	t.Parallel()
 
 	validateFunc := DataExportValidateFunc()
-	ar := makeAdmissionReview(model.OperationCreate, "test-ns")
+	ar := makeAdmissionReview(model.OperationCreate)
 	de := makeDataExport(snapshotStorageGroup, volumeSnapshotContentKind, "leaked-content")
 
 	got, err := validateFunc(context.Background(), ar, de)
@@ -178,7 +178,7 @@ func TestDataExportValidateFunc_ValidTargets(t *testing.T) {
 			t.Parallel()
 
 			validateFunc := DataExportValidateFunc()
-			ar := makeAdmissionReview(model.OperationCreate, "test-ns")
+			ar := makeAdmissionReview(model.OperationCreate)
 			de := makeDataExport(tt.group, tt.kind, tt.target)
 
 			got, err := validateFunc(context.Background(), ar, de)
@@ -196,7 +196,7 @@ func TestDataExportValidateFunc_ObjectNotDataExport(t *testing.T) {
 	t.Parallel()
 
 	validateFunc := DataExportValidateFunc()
-	ar := makeAdmissionReview(model.OperationCreate, "test-ns")
+	ar := makeAdmissionReview(model.OperationCreate)
 
 	notADataExport := &metav1.ObjectMeta{Name: "not-a-dataexport"}
 
@@ -250,7 +250,7 @@ func TestNewValidatingWebhookHandler_ServeHTTP(t *testing.T) {
 	makeAdmissionReviewBody := func(t *testing.T) []byte {
 		t.Helper()
 		de := makeDataExport("", "PersistentVolumeClaim", "my-pvc")
-		de.TypeMeta = metav1.TypeMeta{APIVersion: "storage.deckhouse.io/v1alpha1", Kind: "DataExport"}
+		de.TypeMeta = metav1.TypeMeta{APIVersion: "storage-foundation.deckhouse.io/v1alpha1", Kind: "DataExport"}
 		objJSON, err := json.Marshal(de)
 		if err != nil {
 			t.Fatalf("marshal DataExport: %v", err)
@@ -264,12 +264,12 @@ func TestNewValidatingWebhookHandler_ServeHTTP(t *testing.T) {
 				"namespace": "test-ns",
 				"operation": "CREATE",
 				"resource": map[string]interface{}{
-					"group":    "storage.deckhouse.io",
+					"group":    "storage-foundation.deckhouse.io",
 					"version":  "v1alpha1",
 					"resource": "dataexports",
 				},
 				"kind": map[string]interface{}{
-					"group":   "storage.deckhouse.io",
+					"group":   "storage-foundation.deckhouse.io",
 					"version": "v1alpha1",
 					"kind":    "DataExport",
 				},

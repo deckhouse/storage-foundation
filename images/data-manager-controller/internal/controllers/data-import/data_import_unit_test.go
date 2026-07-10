@@ -17,7 +17,9 @@ limitations under the License.
 package dataimport
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"testing"
 
 	snapv1 "github.com/kubernetes-csi/external-snapshotter/client/v8/apis/volumesnapshot/v1"
@@ -38,27 +40,30 @@ import (
 )
 
 func TestScratchVolumeParamsFromSpec(t *testing.T) {
-	params, err := scratchVolumeParamsFromSpec(dev1alpha1.DataImportSpec{
-		StorageClassName: "fast",
-		Size:             "10Gi",
-		VolumeMode:       "Block",
-	})
+	svt := func(sc, size, mode string) dev1alpha1.DataImportSpec {
+		return dev1alpha1.DataImportSpec{StorageParams: &dev1alpha1.StorageParamsSpec{
+			StorageClassName: sc, Size: size, VolumeMode: mode,
+		}}
+	}
+
+	params, err := scratchVolumeParamsFromSpec(svt("fast", "10Gi", "Block"))
 	require.NoError(t, err)
 	assert.Equal(t, "fast", params.StorageClassName)
 	assert.Equal(t, "Block", params.VolumeMode)
 	assert.Equal(t, "10Gi", params.Size.String())
 
 	// volumeMode is optional.
-	params, err = scratchVolumeParamsFromSpec(dev1alpha1.DataImportSpec{StorageClassName: "fast", Size: "3Gi"})
+	params, err = scratchVolumeParamsFromSpec(svt("fast", "3Gi", ""))
 	require.NoError(t, err)
 	assert.Equal(t, "", params.VolumeMode)
 	assert.Equal(t, "3Gi", params.Size.String())
 
-	// storageClass and size are required, size must parse.
+	// the scratch template, its storageClass and its size are required, and size must parse.
 	errCases := map[string]dev1alpha1.DataImportSpec{
-		"no storageclass": {Size: "3Gi"},
-		"no size":         {StorageClassName: "fast"},
-		"bad size":        {StorageClassName: "fast", Size: "not-a-quantity"},
+		"no template":     {},
+		"no storageclass": svt("", "3Gi", ""),
+		"no size":         svt("fast", "", ""),
+		"bad size":        svt("fast", "not-a-quantity", ""),
 	}
 	for name, spec := range errCases {
 		t.Run(name, func(t *testing.T) {
@@ -107,13 +112,19 @@ func TestResolveSnapshotCaptureMode(t *testing.T) {
 		fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithRuntimeObjects(objs...).Build()
 		return &DataImportReconciler{Client: fakeClient}
 	}
+	specSC := func(name string) dev1alpha1.DataImportSpec {
+		return dev1alpha1.DataImportSpec{
+			Mode:          dev1alpha1.DataImportModePopulateData,
+			StorageParams: &dev1alpha1.StorageParamsSpec{StorageClassName: name, Size: "1Gi"},
+		}
+	}
 
 	t.Run("snapshot capable", func(t *testing.T) {
 		r := build(
 			sc("fast", "csi.example.com", map[string]string{storageClassVSCAnnotation: "fast-vsc"}),
 			vsc("fast-vsc", "csi.example.com"),
 		)
-		r.dataImport = &dev1alpha1.DataImport{Spec: dev1alpha1.DataImportSpec{StorageClassName: "fast"}}
+		r.dataImport = &dev1alpha1.DataImport{Spec: specSC("fast")}
 		mode, kind, err := r.resolveSnapshotCaptureMode(context.Background())
 		require.NoError(t, err)
 		assert.Equal(t, vcrModeSnapshot, mode)
@@ -122,21 +133,21 @@ func TestResolveSnapshotCaptureMode(t *testing.T) {
 
 	t.Run("storage class not found fails closed", func(t *testing.T) {
 		r := build()
-		r.dataImport = &dev1alpha1.DataImport{Spec: dev1alpha1.DataImportSpec{StorageClassName: "missing"}}
+		r.dataImport = &dev1alpha1.DataImport{Spec: specSC("missing")}
 		_, _, err := r.resolveSnapshotCaptureMode(context.Background())
 		assert.Error(t, err)
 	})
 
 	t.Run("missing annotation fails closed", func(t *testing.T) {
 		r := build(sc("plain", "csi.example.com", nil))
-		r.dataImport = &dev1alpha1.DataImport{Spec: dev1alpha1.DataImportSpec{StorageClassName: "plain"}}
+		r.dataImport = &dev1alpha1.DataImport{Spec: specSC("plain")}
 		_, _, err := r.resolveSnapshotCaptureMode(context.Background())
 		assert.Error(t, err)
 	})
 
 	t.Run("referenced VolumeSnapshotClass not found fails closed", func(t *testing.T) {
 		r := build(sc("fast", "csi.example.com", map[string]string{storageClassVSCAnnotation: "ghost-vsc"}))
-		r.dataImport = &dev1alpha1.DataImport{Spec: dev1alpha1.DataImportSpec{StorageClassName: "fast"}}
+		r.dataImport = &dev1alpha1.DataImport{Spec: specSC("fast")}
 		_, _, err := r.resolveSnapshotCaptureMode(context.Background())
 		assert.Error(t, err)
 	})
@@ -146,14 +157,14 @@ func TestResolveSnapshotCaptureMode(t *testing.T) {
 			sc("fast", "csi.example.com", map[string]string{storageClassVSCAnnotation: "other-vsc"}),
 			vsc("other-vsc", "csi.other.com"),
 		)
-		r.dataImport = &dev1alpha1.DataImport{Spec: dev1alpha1.DataImportSpec{StorageClassName: "fast"}}
+		r.dataImport = &dev1alpha1.DataImport{Spec: specSC("fast")}
 		_, _, err := r.resolveSnapshotCaptureMode(context.Background())
 		assert.Error(t, err)
 	})
 
-	t.Run("empty storageClassName fails closed", func(t *testing.T) {
+	t.Run("missing storageParams fails closed", func(t *testing.T) {
 		r := build()
-		r.dataImport = &dev1alpha1.DataImport{Spec: dev1alpha1.DataImportSpec{}}
+		r.dataImport = &dev1alpha1.DataImport{Spec: dev1alpha1.DataImportSpec{Mode: dev1alpha1.DataImportModePopulateData}}
 		_, _, err := r.resolveSnapshotCaptureMode(context.Background())
 		assert.Error(t, err)
 	})
@@ -180,36 +191,31 @@ func TestVolumeCaptureRequestReadyAndFailed(t *testing.T) {
 func TestVolumeCaptureArtifact(t *testing.T) {
 	vcr := &unstructured.Unstructured{Object: map[string]interface{}{
 		"status": map[string]interface{}{
-			"dataRefs": []interface{}{
-				map[string]interface{}{
-					"targetUID": "uid-1",
-					"artifact": map[string]interface{}{
-						"apiVersion": "snapshot.storage.k8s.io/v1",
-						"kind":       artifactKindVolumeSnapshotContent,
-						"name":       "snapcontent-x",
-					},
+			"data": map[string]interface{}{
+				"artifact": map[string]interface{}{
+					"apiVersion": "snapshot.storage.k8s.io/v1",
+					"kind":       artifactKindVolumeSnapshotContent,
+					"name":       "snapcontent-x",
+					"uid":        "8d7c6b5a-4e3f-4a2b-9c1d-0f1e2d3c4b5a",
 				},
 			},
 		},
 	}}
 
-	art, err := volumeCaptureArtifact(vcr, "uid-1", artifactKindVolumeSnapshotContent)
+	art, err := volumeCaptureArtifact(vcr, artifactKindVolumeSnapshotContent)
 	require.NoError(t, err)
 	assert.Equal(t, "snapcontent-x", art.Name)
 	assert.Equal(t, artifactKindVolumeSnapshotContent, art.Kind)
+	// The artifact uid is carried through from VCR status.data.artifact.uid.
+	assert.Equal(t, "8d7c6b5a-4e3f-4a2b-9c1d-0f1e2d3c4b5a", art.UID)
 
 	// Kind mismatch is rejected.
-	_, err = volumeCaptureArtifact(vcr, "uid-1", artifactKindPersistentVolume)
+	_, err = volumeCaptureArtifact(vcr, artifactKindPersistentVolume)
 	assert.Error(t, err)
 
-	// Missing targetUID match with a single binding falls back to the only entry.
-	art, err = volumeCaptureArtifact(vcr, "other-uid", artifactKindVolumeSnapshotContent)
-	require.NoError(t, err)
-	assert.Equal(t, "snapcontent-x", art.Name)
-
-	// No dataRefs at all errors.
+	// No status.data at all errors.
 	empty := &unstructured.Unstructured{Object: map[string]interface{}{"status": map[string]interface{}{}}}
-	_, err = volumeCaptureArtifact(empty, "uid-1", artifactKindVolumeSnapshotContent)
+	_, err = volumeCaptureArtifact(empty, artifactKindVolumeSnapshotContent)
 	assert.Error(t, err)
 }
 
@@ -263,15 +269,21 @@ func TestBuildVolumeCaptureRequestTargetsScratchPVC(t *testing.T) {
 	mode, _, _ := unstructured.NestedString(vcr.Object, "spec", "mode")
 	assert.Equal(t, vcrModeSnapshot, mode)
 
-	targets, found, err := unstructured.NestedSlice(vcr.Object, "spec", "targets")
+	// Single-target VCR: spec.target is a single object (not a spec.targets[] list). The list shape is
+	// pruned by the CRD and leaves the VCR target-less, so guard against regressing to it.
+	_, found, err := unstructured.NestedSlice(vcr.Object, "spec", "targets")
+	require.NoError(t, err)
+	require.False(t, found, "spec.targets[] list must not be emitted (single-target VCR)")
+
+	target, found, err := unstructured.NestedMap(vcr.Object, "spec", "target")
 	require.NoError(t, err)
 	require.True(t, found)
-	require.Len(t, targets, 1)
-	target := targets[0].(map[string]interface{})
 	assert.Equal(t, "pvc-uid", target["uid"])
 	assert.Equal(t, "PersistentVolumeClaim", target["kind"])
 	assert.Equal(t, "imp-1", target["name"])
-	assert.Equal(t, "ns", target["namespace"])
+	// Namespace is intentionally omitted: the captured PVC lives in the VCR's own namespace.
+	_, hasNS := target["namespace"]
+	assert.False(t, hasNS, "spec.target.namespace must be omitted")
 
 	owners := vcr.GetOwnerReferences()
 	require.Len(t, owners, 1)
@@ -282,22 +294,61 @@ func TestBuildVolumeCaptureRequestTargetsScratchPVC(t *testing.T) {
 	assert.True(t, *owners[0].Controller)
 }
 
-func TestIsStandalonePVCImport(t *testing.T) {
+// TestBuildVolumeCaptureRequest_ConformsToVCRAPIType guards against cross-repo shape drift between the
+// DataImport VCR writer (which talks to the VCR via unstructured maps) and the VolumeCaptureRequest API
+// type / CRD. A plain map-shape assertion (see TestBuildVolumeCaptureRequestTargetsScratchPVC) is
+// self-referential: it stays green even when the writer emits a field the CRD does not have (the legacy
+// spec.targets[]), because it just re-reads the same hand-built map. The API server, in contrast,
+// structurally prunes unknown fields, so such a writer silently produced a target-less VCR that never
+// captured -- a bug only the real-API e2e caught, never a unit test.
+//
+// This test closes that gap by decoding the writer's output into the real dev1alpha1.VolumeCaptureRequest
+// with DisallowUnknownFields: any field the API type (hence the CRD's structural schema) would prune is a
+// hard failure here, at unit level. It then mirrors the CRD's mode=Snapshot => spec.target CEL rule so a
+// writer that drops the required target also fails locally.
+func TestBuildVolumeCaptureRequest_ConformsToVCRAPIType(t *testing.T) {
+	di := &dev1alpha1.DataImport{
+		ObjectMeta: metav1.ObjectMeta{Name: "imp-1", Namespace: "ns", UID: "di-uid"},
+	}
+	pvc := &corev1.PersistentVolumeClaim{
+		ObjectMeta: metav1.ObjectMeta{Name: "imp-1", Namespace: "ns", UID: "pvc-uid"},
+	}
+	vcr := buildVolumeCaptureRequest(volumeCaptureRequestName(di.UID), di, pvc, vcrModeSnapshot)
+
+	raw, err := json.Marshal(vcr.Object)
+	require.NoError(t, err)
+
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	dec.DisallowUnknownFields()
+	var typed dev1alpha1.VolumeCaptureRequest
+	require.NoError(t, dec.Decode(&typed),
+		"writer emitted a field the VolumeCaptureRequest CRD would prune (e.g. legacy spec.targets[]); "+
+			"it must conform to dev1alpha1.VolumeCaptureRequest")
+
+	// Mirror the CRD CEL rule: mode=Snapshot requires spec.target carrying the captured PVC identity.
+	assert.Equal(t, dev1alpha1.VolumeCaptureModeSnapshot, typed.Spec.Mode)
+	require.NotNil(t, typed.Spec.Target, "spec.target is required when mode is Snapshot")
+	assert.Equal(t, "pvc-uid", typed.Spec.Target.UID)
+	assert.Equal(t, "v1", typed.Spec.Target.APIVersion)
+	assert.Equal(t, "PersistentVolumeClaim", typed.Spec.Target.Kind)
+	assert.Equal(t, "imp-1", typed.Spec.Target.Name)
+}
+
+func TestIsCreatePVCMode(t *testing.T) {
 	cases := map[string]struct {
-		kind string
+		mode dev1alpha1.DataImportMode
 		want bool
 	}{
-		"PersistentVolumeClaim is Mode B":    {kind: dev1alpha1.KindPVC, want: true},
-		"VolumeSnapshot leaf is Mode A":      {kind: dev1alpha1.KindVolumeSnapshot, want: false},
-		"VirtualDiskSnapshot leaf is Mode A": {kind: "VirtualDiskSnapshot", want: false},
-		"empty kind is not Mode B":           {kind: "", want: false},
+		"CreatePVC":                   {mode: dev1alpha1.DataImportModeCreatePVC, want: true},
+		"PopulateData":                {mode: dev1alpha1.DataImportModePopulateData, want: false},
+		"empty defaults to CreatePVC": {mode: "", want: true},
 	}
 	for name, tc := range cases {
 		t.Run(name, func(t *testing.T) {
 			r := &DataImportReconciler{dataImport: &dev1alpha1.DataImport{
-				Spec: dev1alpha1.DataImportSpec{TargetRef: dev1alpha1.DataImportTargetRefSpec{Kind: tc.kind}},
+				Spec: dev1alpha1.DataImportSpec{Mode: tc.mode},
 			}}
-			assert.Equal(t, tc.want, r.isStandalonePVCImport())
+			assert.Equal(t, tc.want, r.isCreatePVCMode())
 		})
 	}
 }
@@ -305,16 +356,16 @@ func TestIsStandalonePVCImport(t *testing.T) {
 func TestEnsurePVCImportTargetRequiresTemplate(t *testing.T) {
 	r := &DataImportReconciler{dataImport: &dev1alpha1.DataImport{
 		ObjectMeta: metav1.ObjectMeta{Name: "imp-b", Namespace: "ns"},
-		Spec:       dev1alpha1.DataImportSpec{TargetRef: dev1alpha1.DataImportTargetRefSpec{Kind: dev1alpha1.KindPVC}},
+		Spec:       dev1alpha1.DataImportSpec{Mode: dev1alpha1.DataImportModeCreatePVC},
 	}}
 	_, err := r.ensurePVCImportTarget(context.Background())
 	require.Error(t, err)
 	assert.ErrorIs(t, err, ErrTargetFailed)
 }
 
-// newModeBReconciler builds a Mode B reconciler whose PVC import target is restored-pvc, with a fake
-// client carrying only corev1/storagev1 (the standalone path never touches snapshot machinery).
-func newModeBReconciler(objs ...runtime.Object) *DataImportReconciler {
+// newCreatePVCReconciler builds a CreatePVC reconciler whose PVC import target is restored-pvc, with a
+// fake client carrying only corev1/storagev1 (the populate path never touches snapshot machinery).
+func newCreatePVCReconciler(objs ...runtime.Object) *DataImportReconciler {
 	scheme := runtime.NewScheme()
 	_ = corev1.AddToScheme(scheme)
 	_ = storagev1.AddToScheme(scheme)
@@ -324,11 +375,9 @@ func newModeBReconciler(objs ...runtime.Object) *DataImportReconciler {
 		dataImport: &dev1alpha1.DataImport{
 			ObjectMeta: metav1.ObjectMeta{Name: "imp-b", Namespace: "ns"},
 			Spec: dev1alpha1.DataImportSpec{
-				TargetRef: dev1alpha1.DataImportTargetRefSpec{
-					Kind: dev1alpha1.KindPVC,
-					PvcTemplate: &dev1alpha1.PersistentVolumeClaimTemplateSpec{
-						DataImportTargetRefMetaSpec: dev1alpha1.DataImportTargetRefMetaSpec{Name: "restored-pvc"},
-					},
+				Mode: dev1alpha1.DataImportModeCreatePVC,
+				PvcTemplate: &dev1alpha1.PersistentVolumeClaimTemplateSpec{
+					PersistentVolumeClaimTemplateMetadata: dev1alpha1.PersistentVolumeClaimTemplateMetadata{Name: "restored-pvc"},
 				},
 			},
 		},
@@ -344,7 +393,7 @@ func boundPVC(volumeMode corev1.PersistentVolumeMode) *corev1.PersistentVolumeCl
 }
 
 func TestHandlePVCImportStatusCompletesWithoutArtifact(t *testing.T) {
-	r := newModeBReconciler()
+	r := newCreatePVCReconciler()
 	meta.SetStatusCondition(&r.dataImport.Status.Conditions, metav1.Condition{
 		Type:   string(common.ConditionUploadFinished),
 		Status: metav1.ConditionTrue,
@@ -355,13 +404,13 @@ func TestHandlePVCImportStatusCompletesWithoutArtifact(t *testing.T) {
 	require.NoError(t, err)
 	assert.Zero(t, res.RequeueAfter)
 	assert.True(t, meta.IsStatusConditionTrue(r.dataImport.Status.Conditions, string(common.ConditionCompleted)))
-	// The defining difference of Mode B: no durable artifact is produced.
-	assert.Nil(t, r.dataImport.Status.DataArtifactRef)
+	// The defining difference of CreatePVC: no durable artifact is produced.
+	assert.Nil(t, r.dataImport.Status.Data)
 	assert.Equal(t, "Filesystem", r.dataImport.Status.VolumeMode)
 }
 
 func TestHandlePVCImportStatusAwaitsUpload(t *testing.T) {
-	r := newModeBReconciler()
+	r := newCreatePVCReconciler()
 
 	res, err := r.handlePVCImportStatus(context.Background(), boundPVC(corev1.PersistentVolumeFilesystem))
 	require.NoError(t, err)
@@ -373,12 +422,12 @@ func TestHandlePVCImportStatusAwaitsUpload(t *testing.T) {
 }
 
 func TestEnsureImportPVCWiresDataSourceRefToDataImport(t *testing.T) {
-	r := newModeBReconciler()
+	r := newCreatePVCReconciler()
 
 	sc := "fast"
 	fs := dev1alpha1.PersistentVolumeFilesystem
 	tmpl := &dev1alpha1.PersistentVolumeClaimTemplateSpec{
-		DataImportTargetRefMetaSpec: dev1alpha1.DataImportTargetRefMetaSpec{
+		PersistentVolumeClaimTemplateMetadata: dev1alpha1.PersistentVolumeClaimTemplateMetadata{
 			Name:   "restored-pvc",
 			Labels: map[string]string{"app": "my-app"},
 		},

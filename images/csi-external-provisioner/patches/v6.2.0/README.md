@@ -32,30 +32,34 @@ via `git: add: patches/<version>` with `stageDependencies: install:
 '**/*'`, so editing any patch file reliably busts the cache. This is the
 same pattern `csi-external-snapshotter` uses.
 
-Source of truth for the executor remains the Deckhouse fork branch
-`d8-63742164-vrr`; `002-vrr-executor.patch` is the diff of that branch
-against `v6.2.0` (excluding `vendor/`). To regenerate after a branch
-change:
+`002-vrr-executor.patch` is the source of truth for the executor; it is a
+plain diff against `v6.2.0` (excluding `vendor/`) applied directly to the
+tag at build time. There is no long-lived fork branch in the build path —
+the patch was developed on the throwaway branch `d8-63742164-vrr`. To
+re-derive the diff from such a branch:
 
 ```
-git -C <external-provisioner-fork> diff v6.2.0 d8-63742164-vrr \
+git -C <external-provisioner-checkout> diff v6.2.0 <branch> \
     -- . ':(exclude)vendor' > 002-vrr-executor.patch
 ```
 
 API dependency: the executor imports
-`github.com/deckhouse/storage-foundation/api`. The extended VRR API
-(`volumeMode`/`fsType`/`accessModes`, commit `b97b1e1`) is **not yet**
-released as a module tag (`api/v0.1.0` predates it), so `002` pins the
-module via a Go **pseudo-version**
-(`v0.0.0-20260614235316-b97b1e188226`) that resolves to that commit on
-the module proxy. The standard pipeline
-(`rm -rf vendor && go mod download && go mod vendor`) resolves it
-normally — no `-mod=vendor` special case, no shadow API. The patch also
-bumps the `go` directive to `1.25.10` (required by the `api` module).
+`github.com/deckhouse/storage-foundation/api`. As of wave6 the executor
+reads the **honest-refs** VRR API — `spec.sourceRef` + `spec.pvcTemplate`
+(`metadata.name` + `spec.storageClassName`/`volumeMode`/`accessModes`)
+with `fsType` at the spec root — and never writes status. It is pinned to
+the wave6 API pseudo-version `v0.0.0-20260706134706-2c525506f13c` (commit
+`2c52550`), which carries the `pvcTemplate`/`pvcRef` schema. The patch
+also bumps the `go` directive to `1.26.4` because the `api` module
+requires it.
 
-FOLLOW-UP: publish a real `api/vX.Y.Z` tag at the extended-API commit and
-replace the pseudo-version in `002` with the tag (one `go.mod`/`go.sum`
-line change).
+Verified (wave6): applying `001` + `002` to a clean `v6.2.0` checkout
+compiles and the executor test suite passes —
+`CGO_ENABLED=0 go build -mod=mod ./cmd/csi-provisioner` and
+`go test -mod=mod ./pkg/controller/` (VRR tests) are both green against
+the pinned wave6 API. When the API gets a published `api/vX.Y.Z` tag,
+replace the pseudo-version with that tag (one `go.mod` line plus matching
+`go.sum` lines).
 
 Note: the `api` module is a Go submodule (`module .../api` in `api/`), so
 its version tag is subdirectory-prefixed (`api/vX.Y.Z`); the plain
@@ -85,7 +89,7 @@ the VRR lifecycle controller (CR lifecycle, ObjectKeeper, TTL,
 finalizers, status/conditions) lives in `images/controller` of this
 module. The executor only:
 
-- watches `storage.deckhouse.io/v1alpha1 VolumeRestoreRequest` and
+- watches `storage-foundation.deckhouse.io/v1alpha1 VolumeRestoreRequest` and
   enqueues work on a rate-limited workqueue;
 - filters by CSI driver (via the target `StorageClass.provisioner`);
 - validates the restore source (`VolumeSnapshotContent` ready-to-use, or
@@ -111,36 +115,36 @@ freshly-started worker never sees an existing StorageClass as NotFound),
 types) but does **not** vendor it — the dependency is resolved from the
 module proxy (see below).
 
-Source of truth for the executor code is the development branch
-`d8-63742164-vrr` in the `external-provisioner` fork; this patch is the
-diff of that branch against upstream v6.2.0 (excluding `vendor/`).
-Verified end-to-end on a clean `v6.2.0` checkout with `001` + `002`
-applied: `rm -rf vendor && go mod download && go mod vendor &&
-go build ./cmd/csi-provisioner` (CGO_ENABLED=0, linux/amd64) succeeds.
+This patch is the source of truth for the executor code (developed on the
+throwaway branch `d8-63742164-vrr`, then diffed against upstream v6.2.0
+excluding `vendor/`). Verified end-to-end on a clean `v6.2.0` checkout
+with `001` + `002` applied: `go build ./cmd/csi-provisioner`
+(CGO_ENABLED=0) and `go test ./pkg/controller/` (VRR tests) both succeed
+against the pinned wave6 API. The build pipeline itself does
+`rm -rf vendor && go mod download && go mod vendor` before `make build`.
 
 ### API dependency — pinned via Go pseudo-version
 
-The executor needs the **extended** VRR API
-(`spec.volumeMode`/`fsType`/`accessModes`, storage-foundation commit
-`b97b1e1`). That extension is **not** in the published `api/v0.1.0` tag
-(commit `bc90a730`, which predates it), so pinning `api v0.1.0` would not
-compile.
+As of wave6 the executor needs the **honest-refs** VRR API:
+`spec.sourceRef` + `spec.pvcTemplate` (with `metadata.name` and
+`spec.storageClassName`/`volumeMode`/`accessModes`), `fsType` at the spec
+root, and `status.pvcRef`. `pvcTemplate` uses the storage-foundation
+string-alias mirror types (`PersistentVolumeMode`,
+`PersistentVolumeAccessMode`), so the executor converts them to core `v1`
+before building CSI capabilities / the PV+PVC (see `convertAccessModes`,
+`vrrVolumeMode`, `vrrStorageClassName`, `vrrTargetPVCName/Namespace`).
 
-Instead `002` pins the module via a Go **pseudo-version**:
+The pinned pseudo-version:
 
 ```
-require github.com/deckhouse/storage-foundation/api v0.0.0-20260614235316-b97b1e188226
+require github.com/deckhouse/storage-foundation/api v0.0.0-20260706134706-2c525506f13c
 ```
 
-which the module proxy resolves to commit `b97b1e1`. The standard
-pipeline (`rm -rf vendor && go mod download && go mod vendor`) fetches it
-over the network — no `-mod=vendor` special case, no shadow API. The
-patch also bumps the `go` directive to `1.25.10` because the `api`
-module requires it.
-
-FOLLOW-UP: publish a real `api/vX.Y.Z` tag at (or after) `b97b1e1` and
-replace the pseudo-version in `002` with that tag (one `go.mod` line plus
-matching `go.sum` lines).
+resolves to commit `2c52550` (wave6 `pvcTemplate`/`pvcRef` schema). The
+patch also bumps the `go` directive to `1.26.4` because the `api` module
+requires it. When the API gets a published `api/vX.Y.Z` tag, replace the
+pseudo-version with that tag (one `go.mod` line plus matching `go.sum`
+lines).
 
 ### RBAC for the provisioner ServiceAccount
 

@@ -2,13 +2,13 @@
 apiVersion: apiextensions.k8s.io/v1
 kind: CustomResourceDefinition
 metadata:
-  labels:
-    module: storage-foundation
   annotations:
     controller-gen.kubebuilder.io/version: v0.18.0
-  name: volumecapturerequests.storage.deckhouse.io
+  labels:
+    module: storage-foundation
+  name: volumecapturerequests.storage-foundation.deckhouse.io
 spec:
-  group: storage.deckhouse.io
+  group: storage-foundation.deckhouse.io
   names:
     kind: VolumeCaptureRequest
     listKind: VolumeCaptureRequestList
@@ -52,41 +52,34 @@ spec:
                 - Snapshot
                 - Detach
                 type: string
-              targets:
-                description: Targets lists PVC/volume targets to capture in this request
-                  (bulk, one VCR per logical snapshot node).
-                items:
-                  description: VolumeCaptureTarget identifies a PVC (or future volume
-                    target) to capture.
-                  properties:
-                    apiVersion:
-                      minLength: 1
-                      type: string
-                    kind:
-                      minLength: 1
-                      type: string
-                    name:
-                      minLength: 1
-                      type: string
-                    namespace:
-                      minLength: 1
-                      type: string
-                    uid:
-                      description: UID is the map key for spec.targets (PersistentVolumeClaim
-                        UID).
-                      minLength: 1
-                      type: string
-                  required:
-                  - apiVersion
-                  - kind
-                  - name
-                  - namespace
-                  - uid
-                  type: object
-                type: array
-                x-kubernetes-list-map-keys:
+              target:
+                description: Target is the single PVC/volume target to capture (one
+                  VCR per logical snapshot node, ≤1 volume).
+                properties:
+                  apiVersion:
+                    minLength: 1
+                    type: string
+                  kind:
+                    minLength: 1
+                    type: string
+                  name:
+                    minLength: 1
+                    type: string
+                  namespace:
+                    description: |-
+                      Namespace is intentionally empty in spec.target (the PVC always lives in the VCR namespace).
+                      The captured PVC identity is carried by spec.target (immutable); status.data no longer duplicates it.
+                    type: string
+                  uid:
+                    description: UID is the captured PersistentVolumeClaim UID.
+                    minLength: 1
+                    type: string
+                required:
+                - apiVersion
+                - kind
+                - name
                 - uid
-                x-kubernetes-list-type: map
+                type: object
             required:
             - mode
             type: object
@@ -157,79 +150,43 @@ spec:
                   - type
                   type: object
                 type: array
-              dataRefs:
-                description: DataRefs lists per-target durable data artifacts (for
-                  example VolumeSnapshotContent).
-                items:
-                  description: VolumeDataBinding associates a capture target with
-                    its durable data artifact on one VCR.
-                  properties:
-                    artifact:
-                      description: Artifact references the cluster-scoped durable
-                        data artifact.
-                      properties:
-                        apiVersion:
-                          minLength: 1
-                          type: string
-                        kind:
-                          minLength: 1
-                          type: string
-                        name:
-                          minLength: 1
-                          type: string
-                      required:
-                      - apiVersion
-                      - kind
-                      - name
-                      type: object
-                    target:
-                      description: Target identifies the PVC target captured in this
-                        binding.
-                      properties:
-                        apiVersion:
-                          minLength: 1
-                          type: string
-                        kind:
-                          minLength: 1
-                          type: string
-                        name:
-                          minLength: 1
-                          type: string
-                        namespace:
-                          minLength: 1
-                          type: string
-                        uid:
-                          description: UID is the map key for spec.targets (PersistentVolumeClaim
-                            UID).
-                          minLength: 1
-                          type: string
-                      required:
-                      - apiVersion
-                      - kind
-                      - name
-                      - namespace
-                      - uid
-                      type: object
-                    targetUID:
-                      description: TargetUID is the map key for status.dataRefs (matches
-                        spec.targets[].uid).
-                      minLength: 1
-                      type: string
-                  required:
-                  - artifact
-                  - target
-                  - targetUID
-                  type: object
-                type: array
-                x-kubernetes-list-map-keys:
-                - targetUID
-                x-kubernetes-list-type: map
+              data:
+                description: |-
+                  Data is the durable data artifact for the captured target (for example VolumeSnapshotContent).
+                  The captured PVC identity comes from spec.target (immutable); data carries only the artifact.
+                properties:
+                  artifact:
+                    description: Artifact references the cluster-scoped durable data
+                      artifact.
+                    properties:
+                      apiVersion:
+                        minLength: 1
+                        type: string
+                      kind:
+                        minLength: 1
+                        type: string
+                      name:
+                        minLength: 1
+                        type: string
+                      uid:
+                        description: |-
+                          UID is the durable data artifact UID (for example the VolumeSnapshotContent UID). It makes the
+                          artifact reference self-contained, symmetric with target.uid. Optional: the artifact may be
+                          referenced before its UID is known, so producers fill it best-effort.
+                        type: string
+                    required:
+                    - apiVersion
+                    - kind
+                    - name
+                    type: object
+                required:
+                - artifact
+                type: object
             type: object
         type: object
         x-kubernetes-validations:
-        - message: spec.targets must not be empty when mode is Snapshot
-          rule: self.spec.mode != 'Snapshot' || (has(self.spec.targets) && size(self.spec.targets)
-            > 0)
+        - message: spec.target is required when mode is Snapshot
+          rule: self.spec.mode != 'Snapshot' || has(self.spec.target)
     served: true
     storage: true
     subresources:

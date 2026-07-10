@@ -1,13 +1,13 @@
 apiVersion: apiextensions.k8s.io/v1
 kind: CustomResourceDefinition
 metadata:
-  name: dataimports.storage.deckhouse.io
+  name: dataimports.storage-foundation.deckhouse.io
   labels:
     heritage: deckhouse
     module: storage-foundation
     backup.deckhouse.io/cluster-config: "true"
 spec:
-  group: storage.deckhouse.io
+  group: storage-foundation.deckhouse.io
   scope: Namespaced
   names:
     kind: DataImport
@@ -24,29 +24,37 @@ spec:
         openAPIV3Schema:
           type: object
           # NOTE: the whole DataImport object is intentionally NOT immutable (unlike DataExport, which uses
-          # x-kubernetes-immutable): only spec.targetRef is locked after creation, via the CEL transition
-          # rule (self == oldSelf) on targetRef below. Other spec fields (e.g. ttl) may still change.
+          # x-kubernetes-immutable): only spec.mode and spec.snapshotRef are locked after creation, via the
+          # CEL transition rules (self == oldSelf) below. Other spec fields (e.g. ttl) may still change.
           description: |
-            Resource for importing data to PV, VolumeSnapshot, VirtualDisk, or VirtualDiskSnapshot.
+            Resource for importing data into a newly created PVC (CreatePVC) or producing a durable data
+            artifact for an already-existing snapshot node (PopulateData).
           properties:
             spec:
               type: object
               required:
                 - ttl
-                - targetRef
               x-kubernetes-validations:
-                # Mode B (targetRef.kind == PersistentVolumeClaim): pvcTemplate with a PVC name is mandatory.
-                - rule: "self.targetRef.kind != 'PersistentVolumeClaim' || (has(self.targetRef.pvcTemplate) && has(self.targetRef.pvcTemplate.metadata) && has(self.targetRef.pvcTemplate.metadata.name) && size(self.targetRef.pvcTemplate.metadata.name) > 0)"
-                  message: "targetRef.pvcTemplate (with metadata.name) is required when targetRef.kind is PersistentVolumeClaim (Mode B, standalone PVC import)."
-                # Mode B forbids the Mode A fields (the PVC is fully described by targetRef.pvcTemplate).
-                - rule: "self.targetRef.kind != 'PersistentVolumeClaim' || (!has(self.targetRef.group) && !has(self.targetRef.name) && !has(self.storageClassName) && !has(self.size) && !has(self.volumeMode))"
-                  message: "when targetRef.kind is PersistentVolumeClaim, targetRef.group/targetRef.name and spec.storageClassName/size/volumeMode must not be set."
-                # Mode A (snapshot leaf kind) forbids pvcTemplate.
-                - rule: "self.targetRef.kind == 'PersistentVolumeClaim' || !has(self.targetRef.pvcTemplate)"
-                  message: "targetRef.pvcTemplate is only allowed when targetRef.kind is PersistentVolumeClaim (Mode A imports a snapshot leaf, not a PVC)."
-                # Mode A requires the snapshot-leaf reference and the scratch-PVC volume parameters.
-                - rule: "self.targetRef.kind == 'PersistentVolumeClaim' || (has(self.targetRef.group) && has(self.targetRef.name) && has(self.storageClassName) && size(self.storageClassName) > 0 && has(self.size) && size(self.size) > 0)"
-                  message: "when targetRef.kind is a snapshot leaf kind (Mode A), targetRef.group, targetRef.name, spec.storageClassName and spec.size are required."
+                # PopulateData materializes the data leg of an existing snapshot node: it needs the node
+                # ref (snapshotRef) and the transient scratch volume (storageParams), and forbids the
+                # CreatePVC fields.
+                - rule: "self.mode != 'PopulateData' || (has(self.snapshotRef) && has(self.storageParams))"
+                  message: "mode PopulateData requires snapshotRef and storageParams."
+                - rule: "self.mode != 'PopulateData' || !has(self.pvcTemplate)"
+                  message: "mode PopulateData forbids pvcTemplate."
+                # CreatePVC creates and populates a preserved PVC (pvcTemplate) and forbids the PopulateData
+                # fields.
+                - rule: "self.mode != 'CreatePVC' || has(self.pvcTemplate)"
+                  message: "mode CreatePVC requires pvcTemplate."
+                - rule: "self.mode != 'CreatePVC' || (!has(self.snapshotRef) && !has(self.storageParams))"
+                  message: "mode CreatePVC forbids snapshotRef and storageParams."
+                # pvcTemplate must name the PVC it creates.
+                - rule: "!has(self.pvcTemplate) || (has(self.pvcTemplate.metadata) && has(self.pvcTemplate.metadata.name) && size(self.pvcTemplate.metadata.name) > 0)"
+                  message: "pvcTemplate requires metadata.name."
+                # mode is set once at creation and never changes (controllers and the state-snapshotter
+                # reverse-lookup assume a stable mode for the object's lifetime).
+                - rule: "self.mode == oldSelf.mode"
+                  message: "mode is immutable"
               properties:
                 ttl:
                   type: string
@@ -69,118 +77,123 @@ spec:
                   type: boolean
                   description: If set to `false`, a load pod is created to trigger volume population when the StorageClass has `volumeBindingMode` set to `WaitForFirstConsumer`.
                   default: true
-                storageClassName:
+                mode:
                   type: string
+                  enum: ["CreatePVC", "PopulateData"]
+                  default: CreatePVC
                   description: |
-                    Mode A only. StorageClass for the scratch PVC the imported bytes are written into. Its
-                    driver must be snapshot-capable (the StorageClass references a VolumeSnapshotClass via the
-                    `storage.deckhouse.io/volumesnapshotclass` annotation); the produced durable artifact is
-                    always a VolumeSnapshotContent. Provided directly by the caller (mirrored from the source
-                    snapshot status), not read from a captured manifest. Must not be set in Mode B.
-                size:
-                  type: string
-                  description: |
-                    Mode A only. Requested size of the scratch PVC (a Kubernetes quantity, e.g. `10Gi`).
-                    Must not be set in Mode B.
-                volumeMode:
-                  type: string
-                  enum: ["Block", "Filesystem"]
-                  description: |
-                    Mode A only. Volume mode of the scratch PVC. Defaults to `Filesystem` when omitted. Must
-                    not be set in Mode B.
-                targetRef:
+                    Discriminator selecting what the import does with the bytes:
+                    
+                    - `CreatePVC`: write into a preserved, newly created PVC (`pvcTemplate`). No durable
+                      artifact.
+                    - `PopulateData`: stage the bytes into a transient scratch volume (`storageParams`) and
+                      capture them into a durable VolumeSnapshotContent for the already-existing snapshot node
+                      referenced by `snapshotRef`.
+                snapshotRef:
                   type: object
                   x-kubernetes-validations:
-                    # targetRef selects the import target and its mode; it is set once at creation and must
-                    # never change afterwards (the DataImport controller and the state-snapshotter
-                    # reverse-lookup both assume a stable target for the object's lifetime). Reject any
-                    # mutation after creation.
+                    # snapshotRef binds the produced artifact to an existing snapshot node; the
+                    # state-snapshotter reverse-lookup assumes a stable ref for the object's lifetime.
                     - rule: "self == oldSelf"
-                      message: "targetRef is immutable"
+                      message: "snapshotRef is immutable"
                   description: |
-                    Polymorphic import target. `kind` selects the import mode:
-                    
-                    - Mode A (snapshot leaf import): `kind` is a snapshot leaf kind (e.g. `VolumeSnapshot`,
-                      `VirtualDiskSnapshot`). `group` and `name` identify the namespaced leaf CR (namespace is
-                      implicit = the DataImport's own namespace); the scratch-PVC parameters
-                      (`spec.storageClassName/size/volumeMode`) describe the volume. This ref exists so the
-                      state-snapshotter common controller can reverse-lookup this DataImport from the leaf; the
-                      DataImport controller itself does not read the leaf. The produced durable artifact is a
-                      VolumeSnapshotContent.
-                    - Mode B (standalone PVC import): `kind` is `PersistentVolumeClaim`. `pvcTemplate` fully
-                      describes the target PVC the imported bytes are written into; the PVC is preserved after
-                      the import. No durable artifact is produced.
+                    PopulateData only. Reference to the already-existing xxxSnapshot node the produced
+                    durable artifact belongs to (namespace implicit = the DataImport namespace). Set by the
+                    external creator (d8/user/backup); the DataImport controller does not read it — it exists
+                    so the state-snapshotter reverse-lookup can match the leaf against `spec.snapshotRef`.
+                  required: ["kind", "name"]
                   properties:
+                    apiVersion:
+                      type: string
+                      description: Group/version of the snapshot node (e.g. `snapshot.storage.k8s.io/v1`).
                     kind:
                       type: string
                       minLength: 1
-                      description: |
-                        Import mode selector. `PersistentVolumeClaim` selects Mode B (standalone PVC import via
-                        `pvcTemplate`); any other value is treated as a snapshot leaf kind and selects Mode A.
-                    group:
-                      type: string
-                      description: Mode A only. API group of the leaf snapshot resource (e.g. `snapshot.storage.k8s.io`).
+                      description: Kind of the snapshot node (e.g. `VolumeSnapshot`, `VirtualDiskSnapshot`).
                     name:
                       type: string
-                      description: Mode A only. Leaf object name.
-                    pvcTemplate:
+                      minLength: 1
+                      description: Name of the snapshot node.
+                storageParams:
+                  type: object
+                  description: |
+                    PopulateData only. Parameters of the transient scratch volume the imported bytes are
+                    staged into before capture; it is destroyed after the durable VolumeSnapshotContent is
+                    produced. Its StorageClass must be snapshot-capable (it references a VolumeSnapshotClass
+                    via the `storage.deckhouse.io/volumesnapshotclass` annotation).
+                  required: ["storageClassName", "size"]
+                  properties:
+                    storageClassName:
+                      type: string
+                      minLength: 1
+                      description: StorageClass of the scratch PVC (must be snapshot-capable).
+                    size:
+                      type: string
+                      minLength: 1
+                      description: Requested size of the scratch PVC (a Kubernetes quantity, e.g. `10Gi`).
+                    volumeMode:
+                      type: string
+                      enum: ["Block", "Filesystem"]
+                      description: Volume mode of the scratch PVC. Defaults to `Filesystem` when omitted.
+                pvcTemplate:
+                  type: object
+                  description: |
+                    CreatePVC only. PersistentVolumeClaim template fully describing the target PVC the
+                    imported bytes are written into; the PVC is preserved after the import.
+                  properties:
+                    metadata:
                       type: object
-                      description: Mode B only. PersistentVolumeClaim template fully describing the target PVC.
+                      description: PersistentVolumeClaim metadata.
                       properties:
-                        metadata:
+                        name:
+                          type: string
+                          description: PersistentVolumeClaim name.
+                        labels:
                           type: object
-                          description: PersistentVolumeClaim metadata.
-                          properties:
-                            name:
-                              type: string
-                              description: PersistentVolumeClaim name.
-                            labels:
-                              type: object
-                              description: PersistentVolumeClaim labels.
-                              additionalProperties:
-                                type: string
-                            annotations:
-                              type: object
-                              description: PersistentVolumeClaim annotations.
-                              additionalProperties:
-                                type: string
-                        spec:
+                          description: PersistentVolumeClaim labels.
+                          additionalProperties:
+                            type: string
+                        annotations:
                           type: object
-                          description: PersistentVolumeClaim specification.
+                          description: PersistentVolumeClaim annotations.
+                          additionalProperties:
+                            type: string
+                    spec:
+                      type: object
+                      description: PersistentVolumeClaim specification.
+                      properties:
+                        accessModes:
+                          type: array
+                          description: Desired access modes for the volume.
+                          items:
+                            type: string
+                            enum:
+                              [
+                                "ReadWriteOnce",
+                                "ReadOnlyMany",
+                                "ReadWriteMany",
+                                "ReadWriteOncePod",
+                              ]
+                        resources:
+                          type: object
+                          description: Minimum resource requirements for the volume.
                           properties:
-                            accessModes:
-                              type: array
-                              description: Desired access modes for the volume.
-                              items:
-                                type: string
-                                enum:
-                                  [
-                                    "ReadWriteOnce",
-                                    "ReadOnlyMany",
-                                    "ReadWriteMany",
-                                    "ReadWriteOncePod",
-                                  ]
-                            resources:
+                            requests:
                               type: object
-                              description: Minimum resource requirements for the volume.
-                              properties:
-                                requests:
-                                  type: object
-                                  description: Minimum amount of compute resources required.
-                                  additionalProperties:
-                                    anyOf:
-                                      - type: integer
-                                      - type: string
-                                    pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
-                                    x-kubernetes-int-or-string: true
-                            storageClassName:
-                              type: string
-                              description: Name of the StorageClass required by the PersistentVolumeClaim.
-                            volumeMode:
-                              type: string
-                              description: Volume mode required by the PersistentVolumeClaim.
-                              enum: ["Block", "Filesystem"]
-                  required: ["kind"]
+                              description: Minimum amount of compute resources required.
+                              additionalProperties:
+                                anyOf:
+                                  - type: integer
+                                  - type: string
+                                pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                                x-kubernetes-int-or-string: true
+                        storageClassName:
+                          type: string
+                          description: Name of the StorageClass required by the PersistentVolumeClaim.
+                        volumeMode:
+                          type: string
+                          description: Volume mode required by the PersistentVolumeClaim.
+                          enum: ["Block", "Filesystem"]
             status:
               type: object
               description: DataImport resource status details.
@@ -203,18 +216,30 @@ spec:
                   enum: ["Block", "Filesystem"]
                   description: |
                     Volume mode of the exported data.
-                dataArtifactRef:
+                data:
                   type: object
                   description: |
-                    Reference to the durable cluster-scoped data artifact produced by this import
-                    (a VolumeSnapshotContent). Populated once the backing VolumeCaptureRequest completes.
+                    Captured-data block for this import. Carries the durable cluster-scoped data artifact
+                    under data.artifact (a VolumeSnapshotContent). Populated once the backing
+                    VolumeCaptureRequest completes.
                   properties:
-                    apiVersion:
-                      type: string
-                    kind:
-                      type: string
-                    name:
-                      type: string
+                    artifact:
+                      type: object
+                      description: |
+                        Reference to the durable cluster-scoped data artifact produced by this import
+                        (a VolumeSnapshotContent).
+                      properties:
+                        apiVersion:
+                          type: string
+                        kind:
+                          type: string
+                        name:
+                          type: string
+                        uid:
+                          type: string
+                          description: |
+                            UID of the durable data artifact (for example the VolumeSnapshotContent UID),
+                            making the reference self-contained. Optional; producers fill it best-effort.
                 conditions:
                   type: array
                   items:
@@ -296,13 +321,13 @@ spec:
           type: string
           jsonPath: .spec.ttl
           priority: 1
-        - name: Target Kind
+        - name: Mode
           type: string
-          jsonPath: .spec.targetRef.kind
+          jsonPath: .spec.mode
           priority: 1
         - name: Storage Class
           type: string
-          jsonPath: .spec.storageClassName
+          jsonPath: .spec.storageParams.storageClassName
           priority: 1
         - name: Wait For Consumer
           type: boolean

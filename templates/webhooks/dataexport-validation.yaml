@@ -3,17 +3,20 @@ apiVersion: admissionregistration.k8s.io/v1
 kind: ValidatingWebhookConfiguration
 metadata:
   name: "d8-{{ .Chart.Name }}-dataexport-validation"
-  annotations:
-    werf.io/deploy-dependency-webhooks: state=ready,kind=Deployment,name=webhooks,namespace=d8-{{ .Chart.Name }}
-    werf.io/deploy-dependency-service: state=present,kind=Service,name=webhooks,namespace=d8-{{ .Chart.Name }}
   labels:
     heritage: deckhouse
     module: storage-foundation
+  annotations:
+    # Deploy the webhook only after its backing Service+Deployment are ready: with failurePolicy: Fail a
+    # partial rollout (network issue, OOM) must not leave the webhook without a backend, which would block
+    # every matching DataExport CREATE.
+    werf.io/deploy-dependency-deployment: state=ready,kind=Deployment,name=webhooks,namespace=d8-{{ .Chart.Name }}
+    werf.io/deploy-dependency-service: state=present,kind=Service,name=webhooks,namespace=d8-{{ .Chart.Name }}
 webhooks:
-  - name: "d8-{{ .Chart.Name }}-dataexport-validation.storage.deckhouse.io"
+  - name: "d8-{{ .Chart.Name }}-dataexport-validation.storage-foundation.deckhouse.io"
     failurePolicy: Fail
     rules:
-      - apiGroups: ["storage.deckhouse.io"]
+      - apiGroups: ["storage-foundation.deckhouse.io"]
         apiVersions: ["v1alpha1"]
         operations: ["CREATE"]
         resources: ["dataexports"]

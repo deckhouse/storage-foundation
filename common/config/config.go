@@ -34,7 +34,7 @@ const (
 	DefaultHealthProbeBindAddress        = ":8081"
 	DefaultRequeueStorageClassInterval   = 10
 	HAModeEnvName                        = "HA_MODE"
-	LeaderElectionID                     = "storage-foundation.storage.deckhouse.io"
+	LeaderElectionID                     = "storage-foundation.deckhouse.io"
 	OriginIngressNamespaceEnv            = "ORIGIN_INGRESS_NAMESPACE"
 )
 

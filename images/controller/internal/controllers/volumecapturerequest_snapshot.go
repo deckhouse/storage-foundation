@@ -43,6 +43,7 @@ type snapshotTargetError struct {
 	reason  string
 	message string
 	vscName string
+	vscUID  string
 }
 
 type snapshotTargetResult struct {
@@ -68,66 +69,30 @@ func snapshotVSCName(vcrUID types.UID, targetUID string) string {
 	return fmt.Sprintf("snapshot-%s-%s", string(vcrUID), targetUIDHash(targetUID))
 }
 
-func mergeVolumeDataBindings(existing, updates []storagev1alpha1.VolumeDataBinding) []storagev1alpha1.VolumeDataBinding {
-	out := append([]storagev1alpha1.VolumeDataBinding(nil), existing...)
-	for _, binding := range updates {
-		out = upsertVolumeDataBinding(out, binding)
-	}
-	return out
-}
-
-func validateSnapshotTargets(targets []storagev1alpha1.VolumeCaptureTarget) error {
-	if len(targets) == 0 {
-		return fmt.Errorf("spec.targets must not be empty for Snapshot mode")
-	}
-	seen := make(map[string]struct{}, len(targets))
-	for _, t := range targets {
-		if t.UID == "" {
-			return fmt.Errorf("target uid must not be empty")
-		}
-		if _, dup := seen[t.UID]; dup {
-			return fmt.Errorf("duplicate target uid %q", t.UID)
-		}
-		seen[t.UID] = struct{}{}
-	}
-	return nil
-}
-
-func volumeSnapshotBinding(target storagev1alpha1.VolumeCaptureTarget, vscName string) storagev1alpha1.VolumeDataBinding {
+func volumeSnapshotBinding(_ storagev1alpha1.VolumeCaptureTarget, vscName, vscUID string) storagev1alpha1.VolumeDataBinding {
 	return storagev1alpha1.VolumeDataBinding{
-		TargetUID: target.UID,
-		Target:    target,
 		Artifact: storagev1alpha1.VolumeDataArtifactRef{
 			APIVersion: "snapshot.storage.k8s.io/v1",
 			Kind:       "VolumeSnapshotContent",
 			Name:       vscName,
+			// UID is best-effort: empty when the artifact is referenced before its object is known.
+			UID: vscUID,
 		},
 	}
 }
 
-func upsertVolumeDataBinding(bindings []storagev1alpha1.VolumeDataBinding, binding storagev1alpha1.VolumeDataBinding) []storagev1alpha1.VolumeDataBinding {
-	for i := range bindings {
-		if bindings[i].TargetUID == binding.TargetUID {
-			bindings[i] = binding
-			return bindings
-		}
-	}
-	return append(bindings, binding)
-}
-
-func (r *VolumeCaptureRequestController) patchVCRSnapshotProgress(
+// patchVCRSnapshotPending surfaces a non-terminal "capture in progress" Ready=False/TargetsPending
+// condition while the single target is still being captured. It never sets dataRef (only success does).
+func (r *VolumeCaptureRequestController) patchVCRSnapshotPending(
 	ctx context.Context,
 	vcr *storagev1alpha1.VolumeCaptureRequest,
-	dataRefUpdates []storagev1alpha1.VolumeDataBinding,
-	readyCount, total int,
 ) error {
-	message := fmt.Sprintf("%d of %d targets ready", readyCount, total)
 	now := metav1.Now()
 	pendingCondition := metav1.Condition{
 		Type:               storagev1alpha1.ConditionTypeReady,
 		Status:             metav1.ConditionFalse,
 		Reason:             storagev1alpha1.ConditionReasonTargetsPending,
-		Message:            message,
+		Message:            "target capture in progress",
 		LastTransitionTime: now,
 	}
 
@@ -137,7 +102,6 @@ func (r *VolumeCaptureRequestController) patchVCRSnapshotProgress(
 			return err
 		}
 		base := current.DeepCopy()
-		current.Status.DataRefs = mergeVolumeDataBindings(current.Status.DataRefs, dataRefUpdates)
 		setSingleCondition(&current.Status.Conditions, pendingCondition)
 		current.Status.CompletionTimestamp = nil
 		return r.Status().Patch(ctx, current, client.MergeFrom(base))
@@ -274,7 +238,7 @@ func (r *VolumeCaptureRequestController) processSnapshotTarget(
 		if err != nil {
 			return snapshotTargetResult{}, ctrl.Result{}, err
 		}
-		if requeueResult.Requeue || requeueResult.RequeueAfter > 0 {
+		if requeueResult.RequeueAfter > 0 {
 			l.Info("ObjectKeeper UID not assigned yet, requeue before creating VSC", "retainer", retainerName)
 			return snapshotTargetResult{pending: true}, requeueResult, nil
 		}
@@ -326,6 +290,7 @@ func (r *VolumeCaptureRequestController) processSnapshotTarget(
 			target: target, reason: storagev1alpha1.ConditionReasonSnapshotCreationFailed,
 			message: fmt.Sprintf("CSI snapshot creation failed: %s", errorDetails),
 			vscName: csiVSCName,
+			vscUID:  string(csiVSC.UID),
 		}}, ctrl.Result{}, nil
 	}
 
@@ -334,7 +299,7 @@ func (r *VolumeCaptureRequestController) processSnapshotTarget(
 		return snapshotTargetResult{pending: true}, ctrl.Result{RequeueAfter: 5 * time.Second}, nil
 	}
 
-	binding := volumeSnapshotBinding(target, csiVSCName)
+	binding := volumeSnapshotBinding(target, csiVSCName, string(csiVSC.UID))
 	return snapshotTargetResult{
 		ready:   true,
 		binding: &binding,
@@ -345,11 +310,11 @@ func (r *VolumeCaptureRequestController) markFailedSnapshotForTarget(
 	ctx context.Context,
 	vcr *storagev1alpha1.VolumeCaptureRequest,
 	target storagev1alpha1.VolumeCaptureTarget,
-	vscName, reason, message string,
+	vscName, vscUID, reason, message string,
 ) (ctrl.Result, error) {
 	if vscName != "" {
-		binding := volumeSnapshotBinding(target, vscName)
-		vcr.Status.DataRefs = upsertVolumeDataBinding(vcr.Status.DataRefs, binding)
+		binding := volumeSnapshotBinding(target, vscName, vscUID)
+		vcr.Status.Data = &binding
 	}
 	if err := r.finalizeVCR(ctx, vcr, metav1.ConditionFalse, reason, message); err != nil {
 		return ctrl.Result{}, err

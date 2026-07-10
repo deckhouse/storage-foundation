@@ -81,13 +81,13 @@ func TestVolumeRestoreRequestName(t *testing.T) {
 }
 
 func TestVerifySnapshotContentNamespace(t *testing.T) {
-	makeContent := func(snapshotRefNS, targetNS string) *unstructured.Unstructured {
+	makeContent := func(snapshotRefNS, sourceNS string) *unstructured.Unstructured {
 		c := &unstructured.Unstructured{Object: map[string]interface{}{}}
 		if snapshotRefNS != "" {
 			_ = unstructured.SetNestedField(c.Object, snapshotRefNS, "spec", "snapshotRef", "namespace")
 		}
-		if targetNS != "" {
-			_ = unstructured.SetNestedField(c.Object, targetNS, "status", "dataRef", "target", "namespace")
+		if sourceNS != "" {
+			_ = unstructured.SetNestedField(c.Object, sourceNS, "status", "data", "source", "namespace")
 		}
 		return c
 	}
@@ -95,21 +95,21 @@ func TestVerifySnapshotContentNamespace(t *testing.T) {
 	tests := []struct {
 		name          string
 		snapshotRefNS string
-		targetNS      string
+		sourceNS      string
 		wantNamespace string
 		wantErr       bool
 	}{
 		{name: "snapshotRef namespace matches", snapshotRefNS: "test-ns", wantNamespace: "test-ns"},
 		{name: "snapshotRef namespace mismatches -> rejected", snapshotRefNS: "victim-ns", wantNamespace: "test-ns", wantErr: true},
-		{name: "fallback to target namespace matches", targetNS: "test-ns", wantNamespace: "test-ns"},
-		{name: "fallback to target namespace mismatches -> rejected", targetNS: "victim-ns", wantNamespace: "test-ns", wantErr: true},
-		{name: "snapshotRef takes precedence over target", snapshotRefNS: "test-ns", targetNS: "victim-ns", wantNamespace: "test-ns"},
+		{name: "fallback to data.source namespace matches", sourceNS: "test-ns", wantNamespace: "test-ns"},
+		{name: "fallback to data.source namespace mismatches -> rejected", sourceNS: "victim-ns", wantNamespace: "test-ns", wantErr: true},
+		{name: "snapshotRef takes precedence over data.source", snapshotRefNS: "test-ns", sourceNS: "victim-ns", wantNamespace: "test-ns"},
 		{name: "no anchor recorded -> accepted", wantNamespace: "test-ns"},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			err := verifySnapshotContentNamespace(makeContent(tt.snapshotRefNS, tt.targetNS), "content1", tt.wantNamespace)
+			err := verifySnapshotContentNamespace(makeContent(tt.snapshotRefNS, tt.sourceNS), "content1", tt.wantNamespace)
 			if tt.wantErr {
 				require.Error(t, err)
 				assert.True(t, errors.Is(err, ErrTargetNotFound))
@@ -133,11 +133,11 @@ func testRESTMapper() meta.RESTMapper {
 	return rm
 }
 
-func newSnapshotLeaf(namespace, name, boundContentName string) *unstructured.Unstructured {
+func newSnapshotLeaf(boundContentName string) *unstructured.Unstructured {
 	leaf := &unstructured.Unstructured{}
 	leaf.SetGroupVersionKind(schema.GroupVersionKind{Group: "snapshot.storage.k8s.io", Version: "v1", Kind: "VolumeSnapshot"})
-	leaf.SetNamespace(namespace)
-	leaf.SetName(name)
+	leaf.SetNamespace("test-ns")
+	leaf.SetName("leaf1")
 	if boundContentName != "" {
 		_ = unstructured.SetNestedField(leaf.Object, boundContentName, "status", "boundSnapshotContentName")
 	}
@@ -146,19 +146,19 @@ func newSnapshotLeaf(namespace, name, boundContentName string) *unstructured.Uns
 
 func newSnapshotContent(name, snapshotRefNS, artifactKind, artifactName, volumeMode string) *unstructured.Unstructured {
 	content := &unstructured.Unstructured{}
-	content.SetGroupVersionKind(schema.GroupVersionKind{Group: "storage.deckhouse.io", Version: "v1alpha1", Kind: "SnapshotContent"})
+	content.SetGroupVersionKind(schema.GroupVersionKind{Group: "state-snapshotter.deckhouse.io", Version: "v1alpha1", Kind: "SnapshotContent"})
 	content.SetName(name)
 	if snapshotRefNS != "" {
 		_ = unstructured.SetNestedField(content.Object, snapshotRefNS, "spec", "snapshotRef", "namespace")
 	}
 	if artifactKind != "" {
-		_ = unstructured.SetNestedField(content.Object, artifactKind, "status", "dataRef", "artifact", "kind")
+		_ = unstructured.SetNestedField(content.Object, artifactKind, "status", "data", "artifact", "kind")
 	}
 	if artifactName != "" {
-		_ = unstructured.SetNestedField(content.Object, artifactName, "status", "dataRef", "artifact", "name")
+		_ = unstructured.SetNestedField(content.Object, artifactName, "status", "data", "artifact", "name")
 	}
 	if volumeMode != "" {
-		_ = unstructured.SetNestedField(content.Object, volumeMode, "status", "dataRef", "volumeMode")
+		_ = unstructured.SetNestedField(content.Object, volumeMode, "status", "data", "volumeMode")
 	}
 	return content
 }
@@ -187,7 +187,7 @@ func newSnapshotDataExport(group, kind, name string) *dev1alpha1.DataExport {
 }
 
 func TestResolveSnapshotDataArtifact_HappyPath(t *testing.T) {
-	leaf := newSnapshotLeaf("test-ns", "leaf1", "content1")
+	leaf := newSnapshotLeaf("content1")
 	content := newSnapshotContent("content1", "test-ns", artifactKindVolumeSnapshotContent, "vsc1", "Filesystem")
 	r := newResolverReconciler(leaf, content)
 
@@ -218,7 +218,7 @@ func TestResolveSnapshotDataArtifact_Errors(t *testing.T) {
 		},
 		{
 			name:         "unbound leaf is target-not-ready",
-			leaf:         newSnapshotLeaf("test-ns", "leaf1", ""),
+			leaf:         newSnapshotLeaf(""),
 			targetGroup:  "snapshot.storage.k8s.io",
 			targetKind:   "VolumeSnapshot",
 			targetName:   "leaf1",
@@ -226,7 +226,7 @@ func TestResolveSnapshotDataArtifact_Errors(t *testing.T) {
 		},
 		{
 			name:         "content in another namespace is rejected",
-			leaf:         newSnapshotLeaf("test-ns", "leaf1", "content-xns"),
+			leaf:         newSnapshotLeaf("content-xns"),
 			content:      newSnapshotContent("content-xns", "victim-ns", artifactKindVolumeSnapshotContent, "vsc1", "Filesystem"),
 			targetGroup:  "snapshot.storage.k8s.io",
 			targetKind:   "VolumeSnapshot",
@@ -234,8 +234,8 @@ func TestResolveSnapshotDataArtifact_Errors(t *testing.T) {
 			wantSentinel: ErrTargetNotFound,
 		},
 		{
-			name:         "dataRef without volumeMode is not-ready",
-			leaf:         newSnapshotLeaf("test-ns", "leaf1", "content1"),
+			name:         "data without volumeMode is not-ready",
+			leaf:         newSnapshotLeaf("content1"),
 			content:      newSnapshotContent("content1", "test-ns", artifactKindVolumeSnapshotContent, "vsc1", ""),
 			targetGroup:  "snapshot.storage.k8s.io",
 			targetKind:   "VolumeSnapshot",
@@ -244,7 +244,7 @@ func TestResolveSnapshotDataArtifact_Errors(t *testing.T) {
 		},
 		{
 			name:         "non-exportable artifact kind is target-not-found",
-			leaf:         newSnapshotLeaf("test-ns", "leaf1", "content1"),
+			leaf:         newSnapshotLeaf("content1"),
 			content:      newSnapshotContent("content1", "test-ns", "ConfigMap", "cm1", "Filesystem"),
 			targetGroup:  "snapshot.storage.k8s.io",
 			targetKind:   "VolumeSnapshot",
@@ -304,13 +304,19 @@ func TestEnsureVolumeRestoreRequest_CreatesAndIsIdempotent(t *testing.T) {
 
 	sourceKind, _, _ := unstructured.NestedString(vrr.Object, "spec", "sourceRef", "kind")
 	sourceName, _, _ := unstructured.NestedString(vrr.Object, "spec", "sourceRef", "name")
-	targetPVC, _, _ := unstructured.NestedString(vrr.Object, "spec", "targetPVCName")
-	targetNS, _, _ := unstructured.NestedString(vrr.Object, "spec", "targetNamespace")
-	volumeMode, _, _ := unstructured.NestedString(vrr.Object, "spec", "volumeMode")
+	targetPVC, _, _ := unstructured.NestedString(vrr.Object, "spec", "pvcTemplate", "metadata", "name")
+	_, hasTargetNS, _ := unstructured.NestedString(vrr.Object, "spec", "pvcTemplate", "metadata", "namespace")
+	volumeMode, _, _ := unstructured.NestedString(vrr.Object, "spec", "pvcTemplate", "spec", "volumeMode")
+	_, hasLegacyTargetRef, _ := unstructured.NestedMap(vrr.Object, "spec", "targetRef")
+	metaNS := vrr.GetNamespace()
 	assert.Equal(t, artifactKindVolumeSnapshotContent, sourceKind)
 	assert.Equal(t, "vsc1", sourceName)
+	assert.False(t, hasLegacyTargetRef, "spec.targetRef must not be set (replaced by pvcTemplate)")
 	assert.Equal(t, names.ExportPVCName, targetPVC)
-	assert.Equal(t, testControllerNamespace, targetNS)
+	// Restore is never cross-namespace: pvcTemplate.metadata carries no namespace; the target lives in
+	// the VRR namespace.
+	assert.False(t, hasTargetNS, "spec.pvcTemplate.metadata.namespace must not be set")
+	assert.Equal(t, testControllerNamespace, metaNS)
 	assert.Equal(t, "Block", volumeMode)
 
 	// Second call must be a no-op (Get-before-Create), not an error.

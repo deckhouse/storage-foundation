@@ -49,7 +49,7 @@ func TestDesiredClusterRole(t *testing.T) {
 	}
 
 	vrrRule := cr.Rules[0]
-	if !reflect.DeepEqual(vrrRule.APIGroups, []string{"storage.deckhouse.io"}) {
+	if !reflect.DeepEqual(vrrRule.APIGroups, []string{"storage-foundation.deckhouse.io"}) {
 		t.Errorf("vrr apiGroups = %v", vrrRule.APIGroups)
 	}
 	if !reflect.DeepEqual(vrrRule.Resources, []string{"volumerestorerequests"}) {

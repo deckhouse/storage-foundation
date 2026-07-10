@@ -182,7 +182,7 @@ func desiredClusterRole() *rbacv1.ClusterRole {
 		},
 		Rules: []rbacv1.PolicyRule{
 			{
-				APIGroups: []string{"storage.deckhouse.io"},
+				APIGroups: []string{"storage-foundation.deckhouse.io"},
 				Resources: []string{"volumerestorerequests"},
 				Verbs:     []string{"get", "list", "watch"},
 			},

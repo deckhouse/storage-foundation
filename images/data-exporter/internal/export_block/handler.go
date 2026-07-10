@@ -23,7 +23,7 @@ import (
 	"net/http"
 
 	"github.com/deckhouse/sds-common-lib/fs/fsext"
-	"github.com/deckhouse/storage-foundation/images/data-exporter/internal/utils"
+	"github.com/deckhouse/storage-foundation/images/data-exporter/internal/httpiohelpers"
 )
 
 type BlockExporter struct {
@@ -33,7 +33,7 @@ type BlockExporter struct {
 }
 
 func NewBlockExporter(fsys fsext.FS, path string, logger *slog.Logger) (*BlockExporter, error) {
-	isBlock, err := utils.IsBlockDevice(fsys, path)
+	isBlock, err := httpiohelpers.IsBlockDevice(fsys, path)
 	if err != nil {
 		logger.Error("Failed to get type of the file", "error", err)
 		return nil, err
@@ -52,7 +52,7 @@ func NewBlockExporter(fsys fsext.FS, path string, logger *slog.Logger) (*BlockEx
 	}
 	defer file.Close()
 
-	size, err := utils.BlockDeviceSize(file)
+	size, err := httpiohelpers.BlockDeviceSize(file)
 	if err != nil {
 		logger.Error("Failed to get block device file size", "error", err)
 		return nil, err
@@ -80,10 +80,10 @@ func (e *BlockExporter) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	case http.MethodHead:
 		err = e.HandleHeadMethod(w, r)
 	default:
-		err = &utils.HTTPError{Err: errors.New("supports only methods GET and HEAD"), Status: http.StatusMethodNotAllowed}
+		err = &httpiohelpers.HTTPError{Err: errors.New("supports only methods GET and HEAD"), Status: http.StatusMethodNotAllowed}
 	}
 
-	var httpError *utils.HTTPError
+	var httpError *httpiohelpers.HTTPError
 	if errors.As(err, &httpError) {
 		http.Error(w, httpError.Error(), httpError.Status)
 	} else if err != nil {
@@ -123,7 +123,7 @@ func (e *BlockExporter) HandleGetMethod(w http.ResponseWriter, r *http.Request) 
 func (e *BlockExporter) prepareHead(w http.ResponseWriter, r *http.Request) error {
 	if r.URL.Path != "" {
 		e.logger.Error("unexpected path", "requestUrlPath", r.URL.Path, "expected", "/")
-		return &utils.HTTPError{
+		return &httpiohelpers.HTTPError{
 			Err:    errors.New("volumeMode: block. Not supported path. Use /api/v1/block to download raw block"),
 			Status: http.StatusBadRequest,
 		}
@@ -140,7 +140,7 @@ func (e *BlockExporter) prepareHead(w http.ResponseWriter, r *http.Request) erro
 	w.Header().Set("Content-Disposition", "attachment; filename=data.img")
 	w.Header().Set("Content-Type", "application/octet-stream")
 
-	size, err := utils.BlockDeviceSize(file)
+	size, err := httpiohelpers.BlockDeviceSize(file)
 	if err != nil {
 		e.logger.Error("Failed to get size of the block device file", "error", err)
 		return err

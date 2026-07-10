@@ -28,7 +28,7 @@ const (
 // +k8s:deepcopy-gen=true
 // VolumeCaptureTarget identifies a PVC (or future volume target) to capture.
 type VolumeCaptureTarget struct {
-	// UID is the map key for spec.targets (PersistentVolumeClaim UID).
+	// UID is the captured PersistentVolumeClaim UID.
 	// +kubebuilder:validation:Required
 	// +kubebuilder:validation:MinLength=1
 	UID string `json:"uid"`
@@ -42,9 +42,10 @@ type VolumeCaptureTarget struct {
 	// +kubebuilder:validation:Required
 	// +kubebuilder:validation:MinLength=1
 	Name string `json:"name"`
-	// +kubebuilder:validation:Required
-	// +kubebuilder:validation:MinLength=1
-	Namespace string `json:"namespace"`
+	// Namespace is intentionally empty in spec.target (the PVC always lives in the VCR namespace).
+	// The captured PVC identity is carried by spec.target (immutable); status.data no longer duplicates it.
+	// +optional
+	Namespace string `json:"namespace,omitempty"`
 }
 
 // +k8s:deepcopy-gen=true
@@ -61,19 +62,18 @@ type VolumeDataArtifactRef struct {
 	// +kubebuilder:validation:Required
 	// +kubebuilder:validation:MinLength=1
 	Name string `json:"name"`
+	// UID is the durable data artifact UID (for example the VolumeSnapshotContent UID). It makes the
+	// artifact reference self-contained, symmetric with target.uid. Optional: the artifact may be
+	// referenced before its UID is known, so producers fill it best-effort.
+	// +optional
+	UID string `json:"uid,omitempty"`
 }
 
 // +k8s:deepcopy-gen=true
-// VolumeDataBinding associates a capture target with its durable data artifact on one VCR.
+// VolumeDataBinding carries the durable data artifact produced for the VCR's captured target.
+// The captured PVC identity is not duplicated here: it lives in spec.target (immutable), so status.data
+// carries only the artifact.
 type VolumeDataBinding struct {
-	// TargetUID is the map key for status.dataRefs (matches spec.targets[].uid).
-	// +kubebuilder:validation:Required
-	// +kubebuilder:validation:MinLength=1
-	TargetUID string `json:"targetUID"`
-
-	// Target identifies the PVC target captured in this binding.
-	Target VolumeCaptureTarget `json:"target"`
-
 	// Artifact references the cluster-scoped durable data artifact.
 	Artifact VolumeDataArtifactRef `json:"artifact"`
 }
@@ -86,11 +86,9 @@ type VolumeCaptureRequestSpec struct {
 	// +kubebuilder:validation:Required
 	Mode string `json:"mode"`
 
-	// Targets lists PVC/volume targets to capture in this request (bulk, one VCR per logical snapshot node).
-	// +listType=map
-	// +listMapKey=uid
+	// Target is the single PVC/volume target to capture (one VCR per logical snapshot node, ≤1 volume).
 	// +optional
-	Targets []VolumeCaptureTarget `json:"targets,omitempty"`
+	Target *VolumeCaptureTarget `json:"target,omitempty"`
 }
 
 // +k8s:deepcopy-gen=true
@@ -101,16 +99,16 @@ type VolumeCaptureRequestStatus struct {
 	// Conditions represent the latest available observations of the resource's state
 	Conditions []metav1.Condition `json:"conditions,omitempty"`
 
-	// DataRefs lists per-target durable data artifacts (for example VolumeSnapshotContent).
-	// +listType=map
-	// +listMapKey=targetUID
+	// Data is the durable data artifact for the captured target (for example VolumeSnapshotContent).
+	// The captured PVC identity comes from spec.target (immutable); data carries only the artifact.
 	// +optional
-	DataRefs []VolumeDataBinding `json:"dataRefs,omitempty"`
+	Data *VolumeDataBinding `json:"data,omitempty"`
 }
 
 // +kubebuilder:object:root=true
+// +kubebuilder:metadata:labels=module=storage-foundation
 // +kubebuilder:subresource:status
-// +kubebuilder:validation:XValidation:rule="self.spec.mode != 'Snapshot' || (has(self.spec.targets) && size(self.spec.targets) > 0)",message="spec.targets must not be empty when mode is Snapshot"
+// +kubebuilder:validation:XValidation:rule="self.spec.mode != 'Snapshot' || has(self.spec.target)",message="spec.target is required when mode is Snapshot"
 // +kubebuilder:printcolumn:name="Age",type="date",JSONPath=".metadata.creationTimestamp"
 // VolumeCaptureRequest is the Schema for the volumecapturerequests API
 type VolumeCaptureRequest struct {

@@ -15,11 +15,31 @@ linters-settings:
         - kind: Deployment
           name: snapshot-validation-webhook
           container: snapshot-validation
+  module:
+    # data-source-validator is pinned to a deliberately non-semver ref (a commit SHA), which the oss
+    # rule reports as "Invalid Semantic Version". That ref is correct for this module, so the rule is
+    # disabled (matching sibling storage modules).
+    oss:
+      disable: true
+    exclude-rules:
+      license:
+        files:
+          # Checked-in prebuilt Go binary (release-notes tool); not a source file.
+          - hack/generate_release_notes
+  templates:
+    exclude-rules:
+      # /csi and /registration are declared in mount-points.yaml so the csi-livenessprobe and
+      # csi-node-driver-registrar images pre-create them for containerd v2. The node-side DaemonSet that
+      # actually mounts them ships in consumer modules (e.g. sds-local-volume), not here, so they never
+      # appear as a mountPath in this module's own pod controllers.
+      mount-points:
+        - /csi
+        - /registration
   no-cyrillic:
     exclude-rules:
+      files:
+        # The fuzz seed corpus deliberately includes cyrillic (and other exotic unicode) as adversarial
+        # path/query input; it is test data, not human-readable code.
+        - images/data-exporter/cmd/handler_fuzz_test.go
       directories:
         - hack/
-      files:
-        # handler_fuzz_test.go seeds the fuzzer with intentional random Unicode
-        # (including Cyrillic) as adversarial input; it is test data, not prose.
-        - images/data-exporter/cmd/handler_fuzz_test.go

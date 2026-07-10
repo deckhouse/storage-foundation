@@ -161,93 +161,69 @@ func (r *VolumeCaptureRequestController) Reconcile(ctx context.Context, req ctrl
 // - VCR never retries snapshot creation
 func (r *VolumeCaptureRequestController) processSnapshotMode(ctx context.Context, vcr *storagev1alpha1.VolumeCaptureRequest) (ctrl.Result, error) {
 	l := log.FromContext(ctx).WithValues("vcr", fmt.Sprintf("%s/%s", vcr.Namespace, vcr.Name), "mode", "Snapshot")
-	l.Info("Processing VolumeCaptureRequest in Snapshot mode", "targets", len(vcr.Spec.Targets))
+	l.Info("Processing VolumeCaptureRequest in Snapshot mode")
 
-	if err := validateSnapshotTargets(vcr.Spec.Targets); err != nil {
-		l.Error(err, "Invalid spec.targets")
+	target, err := requireCaptureTarget(vcr.Spec)
+	if err != nil {
+		l.Error(err, "Invalid spec.target")
 		return r.markFailed(ctx, vcr, storagev1alpha1.ConditionReasonInternalError, err.Error())
 	}
+	// spec.target carries no namespace; the captured PVC always lives in the VCR namespace.
+	// Re-inject it so the per-target capture path and the status binding both see the namespace.
+	target.Namespace = vcr.Namespace
 
 	retainerName := objectKeeperNameForVCR(vcr.UID)
 	_, result, err := r.ensureObjectKeeper(ctx, retainerName, vcr)
 	if err != nil {
 		return ctrl.Result{}, err
 	}
-	if result.Requeue || result.RequeueAfter > 0 {
+	if result.RequeueAfter > 0 {
 		return result, nil
 	}
 
-	var bindingUpdates []storagev1alpha1.VolumeDataBinding
-	var readyCount int
-	var pending bool
-	var requeueAfter time.Duration
-	var firstTerminal *snapshotTargetError
-
-	for _, target := range vcr.Spec.Targets {
-		tr, targetResult, err := r.processSnapshotTarget(ctx, vcr, retainerName, target)
-		if err != nil {
-			return ctrl.Result{}, err
-		}
-		if targetResult.Requeue || targetResult.RequeueAfter > 0 {
-			pending = true
-			if targetResult.RequeueAfter > requeueAfter {
-				requeueAfter = targetResult.RequeueAfter
-			}
-		}
-		if tr.terminal != nil && firstTerminal == nil {
-			firstTerminal = tr.terminal
-		}
-		if tr.binding != nil {
-			bindingUpdates = append(bindingUpdates, *tr.binding)
-		}
-		if tr.ready {
-			readyCount++
-		}
-		if tr.pending {
-			pending = true
-		}
+	tr, targetResult, err := r.processSnapshotTarget(ctx, vcr, retainerName, target)
+	if err != nil {
+		return ctrl.Result{}, err
 	}
 
-	total := len(vcr.Spec.Targets)
-	if firstTerminal != nil {
-		l.Error(nil, "Target capture failed", "targetUID", firstTerminal.target.UID, "reason", firstTerminal.reason)
-		return r.markFailedSnapshotForTarget(ctx, vcr, firstTerminal.target, firstTerminal.vscName, firstTerminal.reason, firstTerminal.message)
+	if tr.terminal != nil {
+		l.Error(nil, "Target capture failed", "targetUID", tr.terminal.target.UID, "reason", tr.terminal.reason)
+		return r.markFailedSnapshotForTarget(ctx, vcr, tr.terminal.target, tr.terminal.vscName, tr.terminal.vscUID, tr.terminal.reason, tr.terminal.message)
 	}
 
-	if readyCount == total {
-		vcr.Status.DataRefs = mergeVolumeDataBindings(vcr.Status.DataRefs, bindingUpdates)
-		msg := fmt.Sprintf("all %d targets ready", total)
-		if err := r.finalizeVCR(ctx, vcr, metav1.ConditionTrue, storagev1alpha1.ConditionReasonCompleted, msg); err != nil {
+	if tr.ready && tr.binding != nil {
+		vcr.Status.Data = tr.binding
+		if err := r.finalizeVCR(ctx, vcr, metav1.ConditionTrue, storagev1alpha1.ConditionReasonCompleted, "target ready"); err != nil {
 			return ctrl.Result{}, err
 		}
-		l.Info("VolumeCaptureRequest completed", "mode", "Snapshot", "targets", total)
+		l.Info("VolumeCaptureRequest completed", "mode", "Snapshot")
 		return ctrl.Result{}, nil
 	}
 
-	if err := r.patchVCRSnapshotProgress(ctx, vcr, bindingUpdates, readyCount, total); err != nil {
+	// Still capturing: surface progress and requeue.
+	if err := r.patchVCRSnapshotPending(ctx, vcr); err != nil {
 		return ctrl.Result{}, err
 	}
-	if pending {
-		if requeueAfter == 0 {
-			requeueAfter = 5 * time.Second
-		}
-		return ctrl.Result{RequeueAfter: requeueAfter}, nil
+	requeueAfter := targetResult.RequeueAfter
+	if requeueAfter == 0 {
+		requeueAfter = 5 * time.Second
 	}
-
-	return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
+	return ctrl.Result{RequeueAfter: requeueAfter}, nil
 }
 
 // processDetachMode handles Detach mode: detaches PV from PVC
-// According to ADR, PV after Detach gets annotation storage.deckhouse.io/detached: "true"
+// According to ADR, PV after Detach gets annotation storage-foundation.deckhouse.io/detached: "true"
 // Provisioner ignores such PV for normal binding (quarantine PV).
 func (r *VolumeCaptureRequestController) processDetachMode(ctx context.Context, vcr *storagev1alpha1.VolumeCaptureRequest) (ctrl.Result, error) {
 	l := log.FromContext(ctx).WithValues("vcr", fmt.Sprintf("%s/%s", vcr.Namespace, vcr.Name), "mode", "Detach")
 
-	// 1. Validate spec (Detach: single target only; bulk Detach out of scope)
-	target, err := detachVolumeCaptureTarget(vcr.Spec)
+	// 1. Validate spec (single target)
+	target, err := requireCaptureTarget(vcr.Spec)
 	if err != nil {
 		return r.markFailed(ctx, vcr, storagev1alpha1.ConditionReasonInternalError, err.Error())
 	}
+	// spec.target carries no namespace; the captured PVC always lives in the VCR namespace.
+	target.Namespace = vcr.Namespace
 
 	// 2. Check RBAC: try to get PVC
 	// NOTE: If PVC is already deleted (from previous reconcile), we need to get PV from annotation or VCR status
@@ -256,7 +232,7 @@ func (r *VolumeCaptureRequestController) processDetachMode(ctx context.Context, 
 	pvcNotFound := false
 	pvNameFromAnnotation := ""
 	if vcr.Annotations != nil {
-		if pvName, ok := vcr.Annotations["storage.deckhouse.io/detach-pv-name"]; ok {
+		if pvName, ok := vcr.Annotations["storage-foundation.deckhouse.io/detach-pv-name"]; ok {
 			pvNameFromAnnotation = pvName
 		}
 	}
@@ -265,7 +241,8 @@ func (r *VolumeCaptureRequestController) processDetachMode(ctx context.Context, 
 		Namespace: target.Namespace,
 		Name:      target.Name,
 	}, pvc); err != nil {
-		if apierrors.IsNotFound(err) {
+		switch {
+		case apierrors.IsNotFound(err):
 			// PVC already deleted - this is expected after first reconcile
 			pvcNotFound = true
 			l.Info("PVC already deleted, proceeding to detach PV", "pvc", fmt.Sprintf("%s/%s", target.Namespace, target.Name))
@@ -273,7 +250,7 @@ func (r *VolumeCaptureRequestController) processDetachMode(ctx context.Context, 
 			var pvName string
 			if pvNameFromAnnotation != "" {
 				pvName = pvNameFromAnnotation
-			} else if artifact, ok := firstDataArtifactRef(vcr.Status); ok && artifact.Kind == "PersistentVolume" {
+			} else if artifact, ok := dataArtifactRef(vcr.Status); ok && artifact.Kind == "PersistentVolume" {
 				pvName = artifact.Name
 			} else {
 				// Cannot proceed without PV name
@@ -283,9 +260,9 @@ func (r *VolumeCaptureRequestController) processDetachMode(ctx context.Context, 
 			if err := r.Get(ctx, client.ObjectKey{Name: pvName}, pv); err != nil {
 				return ctrl.Result{}, fmt.Errorf("failed to get PV %s: %w", pvName, err)
 			}
-		} else if apierrors.IsForbidden(err) {
+		case apierrors.IsForbidden(err):
 			return r.markFailed(ctx, vcr, storagev1alpha1.ConditionReasonRBACDenied, fmt.Sprintf("Access denied to PVC %s/%s", target.Namespace, target.Name))
-		} else {
+		default:
 			return ctrl.Result{}, fmt.Errorf("failed to get PVC: %w", err)
 		}
 	}
@@ -307,7 +284,7 @@ func (r *VolumeCaptureRequestController) processDetachMode(ctx context.Context, 
 
 		// Store PV name in annotation for future reconciles (when PVC is deleted)
 		// Use Patch instead of Update to minimize conflicts and reduce churn
-		if vcr.Annotations == nil || vcr.Annotations["storage.deckhouse.io/detach-pv-name"] != pv.Name {
+		if vcr.Annotations == nil || vcr.Annotations["storage-foundation.deckhouse.io/detach-pv-name"] != pv.Name {
 			current := &storagev1alpha1.VolumeCaptureRequest{}
 			if err := r.Get(ctx, client.ObjectKeyFromObject(vcr), current); err != nil {
 				return ctrl.Result{}, fmt.Errorf("failed to get VCR for annotation patch: %w", err)
@@ -316,7 +293,7 @@ func (r *VolumeCaptureRequestController) processDetachMode(ctx context.Context, 
 			if current.Annotations == nil {
 				current.Annotations = make(map[string]string)
 			}
-			current.Annotations["storage.deckhouse.io/detach-pv-name"] = pv.Name
+			current.Annotations["storage-foundation.deckhouse.io/detach-pv-name"] = pv.Name
 			if err := r.Patch(ctx, current, client.MergeFrom(base)); err != nil {
 				return ctrl.Result{}, fmt.Errorf("failed to patch VCR annotation: %w", err)
 			}
@@ -337,7 +314,7 @@ func (r *VolumeCaptureRequestController) processDetachMode(ctx context.Context, 
 		// Check if PV has our detached annotation to confirm it was detached by VCR
 		alreadyDetachedByVCR := false
 		if pv.Annotations != nil {
-			if val, ok := pv.Annotations["storage.deckhouse.io/detached"]; ok && val == "true" {
+			if val, ok := pv.Annotations["storage-foundation.deckhouse.io/detached"]; ok && val == "true" {
 				alreadyDetachedByVCR = true
 			}
 		}
@@ -346,7 +323,7 @@ func (r *VolumeCaptureRequestController) processDetachMode(ctx context.Context, 
 			l.Info("PV already detached but not by VCR", "pv", pv.Name)
 		}
 		// Already detached, update status
-		setPersistentVolumeDataRef(vcr, target, pv.Name)
+		setPersistentVolumeDataRef(vcr, target, pv.Name, string(pv.UID))
 		if err := r.finalizeVCR(ctx, vcr, metav1.ConditionTrue, storagev1alpha1.ConditionReasonCompleted, fmt.Sprintf("PV %s already detached", pv.Name)); err != nil {
 			return ctrl.Result{}, err
 		}
@@ -392,12 +369,12 @@ func (r *VolumeCaptureRequestController) processDetachMode(ctx context.Context, 
 	if err != nil {
 		return ctrl.Result{}, err
 	}
-	if result.Requeue || result.RequeueAfter > 0 {
+	if result.RequeueAfter > 0 {
 		return result, nil
 	}
 
 	// 9. Detach PV from PVC and set ownerRef in a single Patch operation
-	// According to ADR, PV after Detach gets annotation storage.deckhouse.io/detached: "true"
+	// According to ADR, PV after Detach gets annotation storage-foundation.deckhouse.io/detached: "true"
 	// NOTE: PV should have ReclaimPolicy=Retain to prevent accidental deletion
 	// Re-read PV to get latest state before patching
 	updatedPV := &corev1.PersistentVolume{}
@@ -411,7 +388,7 @@ func (r *VolumeCaptureRequestController) processDetachMode(ctx context.Context, 
 	if updatedPV.Annotations == nil {
 		updatedPV.Annotations = make(map[string]string)
 	}
-	updatedPV.Annotations["storage.deckhouse.io/detached"] = "true"
+	updatedPV.Annotations["storage-foundation.deckhouse.io/detached"] = "true"
 
 	// Set ownerRef: ObjectKeeper → PV
 	// INVARIANT: PV can have only one controller owner - ObjectKeeper.
@@ -444,7 +421,7 @@ func (r *VolumeCaptureRequestController) processDetachMode(ctx context.Context, 
 	l.Info("Detached PV from PVC and set ownerRef", "pv", updatedPV.Name)
 
 	// 10. Update VCR status
-	setPersistentVolumeDataRef(vcr, target, updatedPV.Name)
+	setPersistentVolumeDataRef(vcr, target, updatedPV.Name, string(updatedPV.UID))
 	if err := r.finalizeVCR(ctx, vcr, metav1.ConditionTrue, storagev1alpha1.ConditionReasonCompleted, fmt.Sprintf("PV %s detached", updatedPV.Name)); err != nil {
 		return ctrl.Result{}, err
 	}
@@ -564,7 +541,7 @@ func (r *VolumeCaptureRequestController) ensureObjectKeeper(
 // This ensures predictable cluster-wide retention policy.
 //
 // IMPORTANT:
-// TTL annotation (storage.deckhouse.io/ttl) is informational only.
+// TTL annotation (storage-foundation.deckhouse.io/ttl) is informational only.
 // Actual TTL is controlled exclusively by controller configuration.
 // This ensures predictable cluster-wide retention policy.
 //
@@ -668,7 +645,7 @@ func (r *VolumeCaptureRequestController) SetupWithManager(mgr ctrl.Manager) erro
 //
 // 2. TTL source:
 //   - TTL is ALWAYS taken from controller configuration (config.RequestTTL), NOT from VCR annotations
-//   - TTL annotation (storage.deckhouse.io/ttl) is informational only and does not affect deletion timing
+//   - TTL annotation (storage-foundation.deckhouse.io/ttl) is informational only and does not affect deletion timing
 //   - This ensures predictable cluster-wide retention policy
 //
 // 3. TTL calculation:
@@ -712,13 +689,13 @@ func (r *VolumeCaptureRequestController) StartTTLScanner(ctx context.Context, cl
 // scanAndDeleteExpiredVCRs lists all VCRs and deletes those where completionTimestamp + TTL < now.
 //
 // IMPORTANT:
-// TTL annotation (storage.deckhouse.io/ttl) is informational only.
+// TTL annotation (storage-foundation.deckhouse.io/ttl) is informational only.
 // Actual TTL is controlled exclusively by controller configuration.
 // This ensures predictable cluster-wide retention policy.
 //
 // TTL SEMANTICS:
 // - TTL is ALWAYS taken from controller configuration (config.RequestTTL), NOT from VCR annotations.
-// - TTL annotation (storage.deckhouse.io/ttl) is informational only and is IGNORED by the scanner.
+// - TTL annotation (storage-foundation.deckhouse.io/ttl) is informational only and is IGNORED by the scanner.
 // - This ensures consistent cleanup behavior: all VCRs use the same TTL policy defined by controller config.
 // - TTL starts counting from CompletionTimestamp (when VCR reaches Ready=True or Ready=False).
 func (r *VolumeCaptureRequestController) scanAndDeleteExpiredVCRs(ctx context.Context, client client.Client) {
@@ -813,40 +790,41 @@ func (r *VolumeCaptureRequestController) scanAndDeleteExpiredVCRs(ctx context.Co
 // cleanupArtifactsForVCR deletes VCR-created artifacts if they have no ownerRef.
 // This is a best-effort cleanup used by the TTL scanner to avoid orphaned artifacts.
 func (r *VolumeCaptureRequestController) cleanupArtifactsForVCR(ctx context.Context, vcr *storagev1alpha1.VolumeCaptureRequest) error {
-	for _, binding := range vcr.Status.DataRefs {
-		artifact := binding.Artifact
-		if artifact.Name == "" {
-			continue
+	if vcr.Status.Data == nil {
+		return nil
+	}
+	artifact := vcr.Status.Data.Artifact
+	if artifact.Name == "" {
+		return nil
+	}
+	switch artifact.Kind {
+	case "VolumeSnapshotContent":
+		content := &snapshotv1.VolumeSnapshotContent{}
+		if err := r.Get(ctx, client.ObjectKey{Name: artifact.Name}, content); err != nil {
+			if apierrors.IsNotFound(err) {
+				return nil
+			}
+			return err
 		}
-		switch artifact.Kind {
-		case "VolumeSnapshotContent":
-			content := &snapshotv1.VolumeSnapshotContent{}
-			if err := r.Client.Get(ctx, client.ObjectKey{Name: artifact.Name}, content); err != nil {
-				if apierrors.IsNotFound(err) {
-					continue
-				}
-				return err
+		if hasSnapshotContentOwnerRef(content.OwnerReferences) {
+			return nil
+		}
+		if err := r.Delete(ctx, content); err != nil && !apierrors.IsNotFound(err) {
+			return err
+		}
+	case "PersistentVolume":
+		pv := &corev1.PersistentVolume{}
+		if err := r.Get(ctx, client.ObjectKey{Name: artifact.Name}, pv); err != nil {
+			if apierrors.IsNotFound(err) {
+				return nil
 			}
-			if hasSnapshotContentOwnerRef(content.OwnerReferences) {
-				continue
-			}
-			if err := r.Client.Delete(ctx, content); err != nil && !apierrors.IsNotFound(err) {
-				return err
-			}
-		case "PersistentVolume":
-			pv := &corev1.PersistentVolume{}
-			if err := r.Client.Get(ctx, client.ObjectKey{Name: artifact.Name}, pv); err != nil {
-				if apierrors.IsNotFound(err) {
-					continue
-				}
-				return err
-			}
-			if hasSnapshotContentOwnerRef(pv.OwnerReferences) {
-				continue
-			}
-			if err := r.Client.Delete(ctx, pv); err != nil && !apierrors.IsNotFound(err) {
-				return err
-			}
+			return err
+		}
+		if hasSnapshotContentOwnerRef(pv.OwnerReferences) {
+			return nil
+		}
+		if err := r.Delete(ctx, pv); err != nil && !apierrors.IsNotFound(err) {
+			return err
 		}
 	}
 

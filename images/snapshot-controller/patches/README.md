@@ -1,5 +1,26 @@
 # Patches
 
+Applied to `kubernetes-csi/external-snapshotter` v8.5.0 in glob order —
+`000-vsc-only-mode.patch` must stay first: `003-volumesnapshot-dataimport-fork.patch`
+was generated on top of it and overlaps in `pkg/common-controller/snapshot_controller.go`
+(the historical build order was fork-branch content first, then the numbered patches).
+
+## 000-vsc-only-mode.patch
+
+Deckhouse fork: VSC-only snapshot content mode (`pkg/vscmode` + sidecar/common
+controller wiring). Lets the csi-snapshotter sidecar create and delete physical
+snapshots for `VolumeSnapshotContent` objects with a completely EMPTY
+`spec.volumeSnapshotRef` (no bound `VolumeSnapshot`) — the VolumeCaptureRequest
+flow relies on this. vsc-only is the default mode (`SNAPSHOT_CONTROLLER_VSC_MODE`
+unset); legacy per-content behavior is preserved for bound (wired-ref) contents.
+Touches `pkg/` only (no `client/`, `vendor/`, `go.mod`).
+
+Provenance: byte-identical to `git diff v8.5.0..d8-63742164-vsc-only` (commit
+`d648e7e94` "Add VSC-only snapshot content mode") in the fox mirror
+`deckhouse/3p/kubernetes-csi/external-snapshotter`; the build used to clone that
+branch directly. Keep this file in sync with the identically named patch in
+`images/csi-external-snapshotter/patches/v8.5.0/` — same content, both builds.
+
 ## 001-fix-cve.patch
 
 Fix CVE
@@ -14,7 +35,8 @@ using an absolute path.
 ## 003-volumesnapshot-dataimport-fork.patch
 
 Deckhouse fork of the CSI `VolumeSnapshot` API for the state-snapshotter
-import flow. Must keep applying to the build branch `d8-63742164-vsc-only`.
+import flow. Generated against v8.5.0 + `000-vsc-only-mode.patch` — must keep
+applying on top of that pair (see the ordering note above).
 
 - Adds `spec.source.import` (an empty marker object, third mutually-exclusive
   source) and extends the CEL one-of to allow an empty source (restore intent)
@@ -25,11 +47,15 @@ import flow. Must keep applying to the build branch `d8-63742164-vsc-only`.
   marker used by every state-snapshotter snapshot kind.
 - Adds `status.boundSnapshotContentName` (points at the cluster-scoped
   state-snapshotter `SnapshotContent`, alongside legacy
-  `boundVolumeSnapshotContentName`) plus `status.storageClassName`,
-  `status.size` and `status.volumeMode` — mirrored volume metadata for d8
-  export/consumption. Forking the Go types + deepcopy is enough:
-  `updateSnapshotStatus` does read -> `DeepCopy()` -> `UpdateStatus`, so the
-  fields are preserved without controller logic changes.
+  `boundVolumeSnapshotContentName`) plus `status.data` — a self-contained data
+  binding (`source` + `artifact` + volume metadata: `volumeMode` / `fsType` /
+  `accessModes` / `storageClassName` / `size`) whose JSON wire shape is
+  byte-identical to the state-snapshotter `SnapshotContent.status.data` and to
+  the domain data leaves, so d8 resolves the captured-volume descriptor from the
+  namespaced `VolumeSnapshot` alone (no cluster-scoped `SnapshotContent` read).
+  Forking the Go types + deepcopy is enough: `updateSnapshotStatus` does
+  read -> `DeepCopy()` -> `UpdateStatus`, so the field is preserved without
+  controller logic changes.
 - Behavioral skip: `syncSnapshot` and `syncSnapshotByKey` (before snapshot-class
   resolution) skip any `VolumeSnapshot` whose `spec.source.import` is set
   — those objects are owned/bound by the state-snapshotter common controller.

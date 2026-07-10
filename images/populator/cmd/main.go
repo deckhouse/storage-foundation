@@ -64,7 +64,7 @@ func main() {
 	}
 
 	groupKind := schema.GroupKind{
-		Group: "storage.deckhouse.io", // TODO: move this and other values to constants/config/etc
+		Group: "storage-foundation.deckhouse.io", // TODO: move this and other values to constants/config/etc
 		Kind:  "DataImport",
 	}
 	versionResource := schema.GroupVersionResource{
@@ -79,7 +79,7 @@ func main() {
 		// HttpEndpoint:           *httpEndpoint, // ???
 		// MetricsPath:            *metricsPath,  // ???
 		Namespace:              cfgParams.ControllerNamespace,
-		Prefix:                 "storage.deckhouse.io",
+		Prefix:                 "storage-foundation.deckhouse.io",
 		Gk:                     groupKind,
 		Gvr:                    versionResource,
 		ProviderFunctionConfig: pfcfg,
@@ -240,8 +240,9 @@ func getDataImportAndNames(ctx context.Context, unstructured *unstructured.Unstr
 		return nil, common.Names{}, err
 	}
 
-	// The scratch volume the populator fills is always a PVC named after the DataImport (spec.targetRef
-	// now references the snapshot leaf, not the scratch PVC).
+	// The scratch volume the populator fills is always a PVC named after the DataImport (in mode
+	// PopulateData spec.snapshotRef references the snapshot leaf, not the scratch PVC; the scratch
+	// PVC spec comes from spec.storageParams).
 	return dataImport, common.NewNames(dev1alpha1.KindPVC, dataImport.Name, dataImport.Namespace, dataImport.Name), nil
 }
 

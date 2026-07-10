@@ -8,7 +8,7 @@ metadata:
   {{- include "helm_lib_module_labels" (list .) | nindent 2 }}
 rules:
 - apiGroups:
-  - storage.deckhouse.io
+  - storage-foundation.deckhouse.io
   resources:
   - volumecapturerequests
   - volumerestorerequests
@@ -38,7 +38,7 @@ metadata:
   {{- include "helm_lib_module_labels" (list .) | nindent 2 }}
 rules:
 - apiGroups:
-  - storage.deckhouse.io
+  - storage-foundation.deckhouse.io
   resources:
   - volumecapturerequests
   - volumerestorerequests

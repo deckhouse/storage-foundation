@@ -14,33 +14,14 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-package utils
+package httpiohelpers
 
-import (
-	"io"
-	"os"
-
-	"github.com/deckhouse/sds-common-lib/fs/fsext"
-)
-
-func IsBlockDevice(fsys fsext.FS, path string) (bool, error) {
-	fileInfo, err := fsys.Stat(path)
-	if err != nil {
-		return false, err
-	}
-
-	mode := fileInfo.Mode()
-	return mode&os.ModeDevice != 0 && mode&os.ModeCharDevice == 0, nil
+// Error, caused by user invalid input, not the system failure
+type HTTPError struct {
+	Err    error
+	Status int
 }
 
-func BlockDeviceSize(content io.ReadSeeker) (int64, error) {
-	size, err := content.Seek(0, io.SeekEnd)
-	if err != nil {
-		return 0, err
-	}
-	_, err = content.Seek(0, io.SeekStart)
-	if err != nil {
-		return 0, err
-	}
-	return size, nil
+func (e *HTTPError) Error() string {
+	return e.Err.Error()
 }

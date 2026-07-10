@@ -2,13 +2,13 @@
 apiVersion: apiextensions.k8s.io/v1
 kind: CustomResourceDefinition
 metadata:
-  labels:
-    module: storage-foundation
   annotations:
     controller-gen.kubebuilder.io/version: v0.18.0
-  name: volumerestorerequests.storage.deckhouse.io
+  labels:
+    module: storage-foundation
+  name: volumerestorerequests.storage-foundation.deckhouse.io
 spec:
-  group: storage.deckhouse.io
+  group: storage-foundation.deckhouse.io
   names:
     kind: VolumeRestoreRequest
     listKind: VolumeRestoreRequestList
@@ -44,29 +44,77 @@ spec:
           metadata:
             type: object
           spec:
-            description: VolumeRestoreRequestSpec defines the desired state of VolumeRestoreRequest
+            description: |-
+              VolumeRestoreRequestSpec defines the desired state of VolumeRestoreRequest.
+
+              The suffix convention is authoritative: sourceRef (Ref) points at an object that already EXISTS;
+              pvcTemplate (Template) is the spec of the PVC the restore CREATES. The external-provisioner
+              provisions the PV from sourceRef and creates the PVC from pvcTemplate (name required), then binds
+              them in the VRR namespace (restore is never cross-namespace).
             properties:
-              accessModes:
-                description: |-
-                  AccessModes is the list of access modes for the restored PVC
-                  (optional, defaults to ReadWriteOnce). Enables parity with the PV-source
-                  restore path (e.g. RWX). Invalid modes are rejected by admission via the Enum below.
-                items:
-                  enum:
-                  - ReadWriteOnce
-                  - ReadOnlyMany
-                  - ReadWriteMany
-                  - ReadWriteOncePod
-                  type: string
-                type: array
               fsType:
-                description: FsType is the filesystem type for Filesystem volumes (optional,
-                  ignored for Block).
+                description: |-
+                  FsType is the filesystem type for Filesystem volumes (optional, ignored for Block). It is a restore
+                  execution parameter read by the external-provisioner, not a PVC field, so it stays at spec root.
                 type: string
+              pvcTemplate:
+                description: |-
+                  PvcTemplate is the spec of the PersistentVolumeClaim the restore creates and binds. It absorbs the
+                  former root storageClassName/volumeMode/accessModes/size; the PVC name lives in
+                  pvcTemplate.metadata.name (required). Namespace is implicit = the VRR namespace.
+                properties:
+                  metadata:
+                    properties:
+                      annotations:
+                        additionalProperties:
+                          type: string
+                        type: object
+                      labels:
+                        additionalProperties:
+                          type: string
+                        type: object
+                      name:
+                        type: string
+                    type: object
+                  spec:
+                    properties:
+                      accessModes:
+                        items:
+                          type: string
+                        type: array
+                      resources:
+                        description: VolumeResourceRequirements describes the storage
+                          resource requirements for a volume.
+                        properties:
+                          requests:
+                            additionalProperties:
+                              anyOf:
+                              - type: integer
+                              - type: string
+                              pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                              x-kubernetes-int-or-string: true
+                            description: ResourceList is a set of (resource name,
+                              quantity) pairs.
+                            type: object
+                        type: object
+                      storageClassName:
+                        type: string
+                      volumeMode:
+                        description: PersistentVolumeMode describes how a volume is
+                          intended to be consumed, either Block or Filesystem.
+                        type: string
+                    type: object
+                type: object
               sourceRef:
                 description: SourceRef references the source data to restore from
-                  (VolumeSnapshotContent or PersistentVolume)
+                  (VolumeSnapshotContent or PersistentVolume).
                 properties:
+                  apiVersion:
+                    description: |-
+                      APIVersion is the group/version of the referenced object (e.g., "snapshot.storage.k8s.io/v1").
+                      Optional: kind-only refs (e.g. core PersistentVolumeClaim) leave it empty. It is required for
+                      snapshot-leaf refs (spec.snapshotRef) so the state-snapshotter reverse-lookup can derive the group.
+                    type: string
                   kind:
                     description: Kind is the kind of the referenced object (e.g.,
                       "VolumeSnapshotContent", "PersistentVolume")
@@ -78,35 +126,21 @@ spec:
                     description: Namespace is the namespace of the referenced object
                       (optional)
                     type: string
+                  uid:
+                    description: |-
+                      UID is the unique identifier of the referenced object. It is populated in status references (e.g.
+                      VolumeRestoreRequest status.pvcRef) so consumers can detect recreation; spec refs may leave it empty.
+                    type: string
                 required:
                 - name
                 type: object
-              storageClassName:
-                description: StorageClassName is the storage class to use for the
-                  restored PVC
-                type: string
-              targetNamespace:
-                description: TargetNamespace is the namespace where the restored PVC
-                  will be created
-                type: string
-              targetPVCName:
-                description: TargetPVCName is the name of the PVC to create
-                type: string
-              volumeMode:
-                description: |-
-                  VolumeMode specifies whether the restored volume is Block or Filesystem.
-                  It is required: the executor builds CSI VolumeCapabilities from it and there is
-                  no implicit default (mismatched mode breaks Block volumes).
-                enum:
-                - Block
-                - Filesystem
-                type: string
             required:
+            - pvcTemplate
             - sourceRef
-            - targetNamespace
-            - targetPVCName
-            - volumeMode
             type: object
+            x-kubernetes-validations:
+            - message: pvcTemplate.metadata.name is required
+              rule: size(self.pvcTemplate.metadata.name) > 0
           status:
             description: VolumeRestoreRequestStatus defines the observed state of
               VolumeRestoreRequest
@@ -174,9 +208,17 @@ spec:
                   - type
                   type: object
                 type: array
-              targetPVCRef:
-                description: TargetPVCRef references the created target PVC
+              pvcRef:
+                description: |-
+                  PvcRef references the created restore target PersistentVolumeClaim. Unlike spec, the namespace and
+                  uid are populated here so the status is self-contained and consumers can detect recreation.
                 properties:
+                  apiVersion:
+                    description: |-
+                      APIVersion is the group/version of the referenced object (e.g., "snapshot.storage.k8s.io/v1").
+                      Optional: kind-only refs (e.g. core PersistentVolumeClaim) leave it empty. It is required for
+                      snapshot-leaf refs (spec.snapshotRef) so the state-snapshotter reverse-lookup can derive the group.
+                    type: string
                   kind:
                     description: Kind is the kind of the referenced object (e.g.,
                       "VolumeSnapshotContent", "PersistentVolume")
@@ -187,6 +229,11 @@ spec:
                   namespace:
                     description: Namespace is the namespace of the referenced object
                       (optional)
+                    type: string
+                  uid:
+                    description: |-
+                      UID is the unique identifier of the referenced object. It is populated in status references (e.g.
+                      VolumeRestoreRequest status.pvcRef) so consumers can detect recreation; spec refs may leave it empty.
                     type: string
                 required:
                 - name

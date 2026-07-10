@@ -30,7 +30,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
-	"k8s.io/utils/pointer"
+	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
@@ -101,11 +101,11 @@ var _ = Describe("VolumeRestoreRequest", func() {
 			Spec: snapshotv1.VolumeSnapshotContentSpec{
 				Driver: "test-driver",
 				Source: snapshotv1.VolumeSnapshotContentSource{
-					VolumeHandle: pointer.String("test-volume-handle"),
+					VolumeHandle: ptr.To("test-volume-handle"),
 				},
 			},
 			Status: &snapshotv1.VolumeSnapshotContentStatus{
-				ReadyToUse: pointer.Bool(true),
+				ReadyToUse: ptr.To(true),
 			},
 		}
 		Expect(client.Create(ctx, vsc)).To(Succeed())
@@ -239,8 +239,9 @@ var _ = Describe("VolumeRestoreRequest", func() {
 						Kind: SourceKindVolumeSnapshotContent,
 						Name: "test-vsc",
 					},
-					TargetNamespace: "default",
-					TargetPVCName:   "restored-pvc",
+					PvcTemplate: storagev1alpha1.PersistentVolumeClaimTemplateSpec{
+						PersistentVolumeClaimTemplateMetadata: storagev1alpha1.PersistentVolumeClaimTemplateMetadata{Name: "restored-pvc"},
+					},
 				},
 			}
 			Expect(client.Create(ctx, vrr)).To(Succeed())
@@ -265,7 +266,7 @@ var _ = Describe("VolumeRestoreRequest", func() {
 			// When: Reconcile called again
 			result, err = ctrl.Reconcile(ctx, req)
 			Expect(err).ToNot(HaveOccurred())
-			Expect(result.Requeue).To(BeFalse())
+			Expect(result.RequeueAfter).To(BeZero())
 			Expect(result.RequeueAfter).To(BeZero())
 
 			// Then: VRR finalized
@@ -277,9 +278,11 @@ var _ = Describe("VolumeRestoreRequest", func() {
 			Expect(readyCondition.Status).To(Equal(metav1.ConditionTrue))
 			Expect(readyCondition.Reason).To(Equal(storagev1alpha1.ConditionReasonCompleted))
 			Expect(finalVRR.Status.CompletionTimestamp).ToNot(BeNil())
-			Expect(finalVRR.Status.TargetPVCRef).ToNot(BeNil())
-			Expect(finalVRR.Status.TargetPVCRef.Name).To(Equal("restored-pvc"))
-			Expect(finalVRR.Status.TargetPVCRef.Namespace).To(Equal("default"))
+			Expect(finalVRR.Status.PvcRef).ToNot(BeNil())
+			Expect(finalVRR.Status.PvcRef.Kind).To(Equal(KindPersistentVolumeClaim))
+			Expect(finalVRR.Status.PvcRef.Name).To(Equal("restored-pvc"))
+			Expect(finalVRR.Status.PvcRef.Namespace).To(Equal("default"))
+			Expect(finalVRR.Status.PvcRef.UID).To(Equal("pvc-uid-restored-pvc"))
 
 			// Then: No VolumeSnapshot objects created
 			verifyNoVolumeSnapshots()
@@ -287,7 +290,7 @@ var _ = Describe("VolumeRestoreRequest", func() {
 			// Then: Terminal VRR not reconciled again
 			result, err = ctrl.Reconcile(ctx, req)
 			Expect(err).ToNot(HaveOccurred())
-			Expect(result.Requeue).To(BeFalse())
+			Expect(result.RequeueAfter).To(BeZero())
 			Expect(result.RequeueAfter).To(BeZero())
 
 			// Verify status unchanged
@@ -314,8 +317,9 @@ var _ = Describe("VolumeRestoreRequest", func() {
 						Kind: SourceKindPersistentVolume,
 						Name: "test-pv",
 					},
-					TargetNamespace: "default",
-					TargetPVCName:   "restored-pvc-pv",
+					PvcTemplate: storagev1alpha1.PersistentVolumeClaimTemplateSpec{
+						PersistentVolumeClaimTemplateMetadata: storagev1alpha1.PersistentVolumeClaimTemplateMetadata{Name: "restored-pvc-pv"},
+					},
 				},
 			}
 			Expect(client.Create(ctx, vrr)).To(Succeed())
@@ -370,8 +374,9 @@ var _ = Describe("VolumeRestoreRequest", func() {
 						Kind: SourceKindVolumeSnapshotContent,
 						Name: "test-vsc-poll",
 					},
-					TargetNamespace: "default",
-					TargetPVCName:   "restored-pvc-poll",
+					PvcTemplate: storagev1alpha1.PersistentVolumeClaimTemplateSpec{
+						PersistentVolumeClaimTemplateMetadata: storagev1alpha1.PersistentVolumeClaimTemplateMetadata{Name: "restored-pvc-poll"},
+					},
 				},
 			}
 			Expect(client.Create(ctx, vrr)).To(Succeed())
@@ -414,8 +419,9 @@ var _ = Describe("VolumeRestoreRequest", func() {
 						Kind: SourceKindVolumeSnapshotContent,
 						Name: "test-vsc-pending",
 					},
-					TargetNamespace: "default",
-					TargetPVCName:   "restored-pvc-pending",
+					PvcTemplate: storagev1alpha1.PersistentVolumeClaimTemplateSpec{
+						PersistentVolumeClaimTemplateMetadata: storagev1alpha1.PersistentVolumeClaimTemplateMetadata{Name: "restored-pvc-pending"},
+					},
 				},
 			}
 			Expect(client.Create(ctx, vrr)).To(Succeed())
@@ -447,8 +453,9 @@ var _ = Describe("VolumeRestoreRequest", func() {
 						Kind: SourceKindVolumeSnapshotContent,
 						Name: "non-existent-vsc",
 					},
-					TargetNamespace: "default",
-					TargetPVCName:   "restored-pvc-not-found",
+					PvcTemplate: storagev1alpha1.PersistentVolumeClaimTemplateSpec{
+						PersistentVolumeClaimTemplateMetadata: storagev1alpha1.PersistentVolumeClaimTemplateMetadata{Name: "restored-pvc-not-found"},
+					},
 				},
 			}
 			Expect(client.Create(ctx, vrr)).To(Succeed())
@@ -457,7 +464,7 @@ var _ = Describe("VolumeRestoreRequest", func() {
 			req := reconcile.Request{NamespacedName: types.NamespacedName{Name: "test-vrr-not-found", Namespace: "default"}}
 			result, err := ctrl.Reconcile(ctx, req)
 			Expect(err).ToNot(HaveOccurred())
-			Expect(result.Requeue).To(BeFalse())
+			Expect(result.RequeueAfter).To(BeZero())
 
 			// Then: VRR marked as failed
 			updatedVRR := &storagev1alpha1.VolumeRestoreRequest{}
@@ -478,7 +485,7 @@ var _ = Describe("VolumeRestoreRequest", func() {
 			// Then: Repeated reconcile is no-op
 			result, err = ctrl.Reconcile(ctx, req)
 			Expect(err).ToNot(HaveOccurred())
-			Expect(result.Requeue).To(BeFalse())
+			Expect(result.RequeueAfter).To(BeZero())
 		})
 
 		It("should mark VRR failed when PV is not found", func() {
@@ -494,8 +501,9 @@ var _ = Describe("VolumeRestoreRequest", func() {
 						Kind: SourceKindPersistentVolume,
 						Name: "non-existent-pv",
 					},
-					TargetNamespace: "default",
-					TargetPVCName:   "restored-pvc-pv-not-found",
+					PvcTemplate: storagev1alpha1.PersistentVolumeClaimTemplateSpec{
+						PersistentVolumeClaimTemplateMetadata: storagev1alpha1.PersistentVolumeClaimTemplateMetadata{Name: "restored-pvc-pv-not-found"},
+					},
 				},
 			}
 			Expect(client.Create(ctx, vrr)).To(Succeed())
@@ -504,7 +512,7 @@ var _ = Describe("VolumeRestoreRequest", func() {
 			req := reconcile.Request{NamespacedName: types.NamespacedName{Name: "test-vrr-pv-not-found", Namespace: "default"}}
 			result, err := ctrl.Reconcile(ctx, req)
 			Expect(err).ToNot(HaveOccurred())
-			Expect(result.Requeue).To(BeFalse())
+			Expect(result.RequeueAfter).To(BeZero())
 
 			// Then: VRR marked as failed
 			updatedVRR := &storagev1alpha1.VolumeRestoreRequest{}
@@ -527,7 +535,7 @@ var _ = Describe("VolumeRestoreRequest", func() {
 					Driver: "test-driver",
 				},
 				Status: &snapshotv1.VolumeSnapshotContentStatus{
-					ReadyToUse: pointer.Bool(false),
+					ReadyToUse: ptr.To(false),
 				},
 			}
 			Expect(client.Create(ctx, vsc)).To(Succeed())
@@ -544,8 +552,9 @@ var _ = Describe("VolumeRestoreRequest", func() {
 						Kind: SourceKindVolumeSnapshotContent,
 						Name: "test-vsc-not-ready",
 					},
-					TargetNamespace: "default",
-					TargetPVCName:   "restored-pvc-not-ready",
+					PvcTemplate: storagev1alpha1.PersistentVolumeClaimTemplateSpec{
+						PersistentVolumeClaimTemplateMetadata: storagev1alpha1.PersistentVolumeClaimTemplateMetadata{Name: "restored-pvc-not-ready"},
+					},
 				},
 			}
 			Expect(client.Create(ctx, vrr)).To(Succeed())
@@ -571,7 +580,7 @@ var _ = Describe("VolumeRestoreRequest", func() {
 					Driver: "test-driver",
 				},
 				Status: &snapshotv1.VolumeSnapshotContentStatus{
-					ReadyToUse: pointer.Bool(false),
+					ReadyToUse: ptr.To(false),
 					Error: &snapshotv1.VolumeSnapshotError{
 						Message: &errorMsg,
 						Time:    &metav1.Time{Time: time.Now()},
@@ -592,8 +601,9 @@ var _ = Describe("VolumeRestoreRequest", func() {
 						Kind: SourceKindVolumeSnapshotContent,
 						Name: "test-vsc-error",
 					},
-					TargetNamespace: "default",
-					TargetPVCName:   "restored-pvc-error",
+					PvcTemplate: storagev1alpha1.PersistentVolumeClaimTemplateSpec{
+						PersistentVolumeClaimTemplateMetadata: storagev1alpha1.PersistentVolumeClaimTemplateMetadata{Name: "restored-pvc-error"},
+					},
 				},
 			}
 			Expect(client.Create(ctx, vrr)).To(Succeed())
@@ -602,7 +612,7 @@ var _ = Describe("VolumeRestoreRequest", func() {
 			req := reconcile.Request{NamespacedName: types.NamespacedName{Name: "test-vrr-vsc-error", Namespace: "default"}}
 			result, err := ctrl.Reconcile(ctx, req)
 			Expect(err).ToNot(HaveOccurred())
-			Expect(result.Requeue).To(BeFalse())
+			Expect(result.RequeueAfter).To(BeZero())
 
 			// Then: VRR marked as failed
 			updatedVRR := &storagev1alpha1.VolumeRestoreRequest{}
@@ -614,6 +624,7 @@ var _ = Describe("VolumeRestoreRequest", func() {
 			Expect(readyCondition.Reason).To(Equal(storagev1alpha1.ConditionReasonInternalError))
 			Expect(readyCondition.Message).To(ContainSubstring(errorMsg))
 		})
+
 	})
 
 	Describe("ObjectKeeper Behavior", func() {
@@ -633,8 +644,9 @@ var _ = Describe("VolumeRestoreRequest", func() {
 						Kind: SourceKindVolumeSnapshotContent,
 						Name: "test-vsc-ok",
 					},
-					TargetNamespace: "default",
-					TargetPVCName:   "restored-pvc-ok",
+					PvcTemplate: storagev1alpha1.PersistentVolumeClaimTemplateSpec{
+						PersistentVolumeClaimTemplateMetadata: storagev1alpha1.PersistentVolumeClaimTemplateMetadata{Name: "restored-pvc-ok"},
+					},
 				},
 			}
 			Expect(client.Create(ctx, vrr)).To(Succeed())
@@ -683,8 +695,9 @@ var _ = Describe("VolumeRestoreRequest", func() {
 						Kind: SourceKindVolumeSnapshotContent,
 						Name: "test-vsc-uid-mismatch",
 					},
-					TargetNamespace: "default",
-					TargetPVCName:   "restored-pvc-uid-mismatch",
+					PvcTemplate: storagev1alpha1.PersistentVolumeClaimTemplateSpec{
+						PersistentVolumeClaimTemplateMetadata: storagev1alpha1.PersistentVolumeClaimTemplateMetadata{Name: "restored-pvc-uid-mismatch"},
+					},
 				},
 			}
 			Expect(client.Create(ctx, vrr)).To(Succeed())
@@ -739,8 +752,9 @@ var _ = Describe("VolumeRestoreRequest", func() {
 						Kind: SourceKindVolumeSnapshotContent,
 						Name: "test-vsc-no-uid",
 					},
-					TargetNamespace: "default",
-					TargetPVCName:   "restored-pvc-no-uid",
+					PvcTemplate: storagev1alpha1.PersistentVolumeClaimTemplateSpec{
+						PersistentVolumeClaimTemplateMetadata: storagev1alpha1.PersistentVolumeClaimTemplateMetadata{Name: "restored-pvc-no-uid"},
+					},
 				},
 			}
 			Expect(client.Create(ctx, vrr)).To(Succeed())
@@ -772,8 +786,9 @@ var _ = Describe("VolumeRestoreRequest", func() {
 						Kind: SourceKindVolumeSnapshotContent,
 						Name: "test-vsc-terminal",
 					},
-					TargetNamespace: "default",
-					TargetPVCName:   "restored-pvc-terminal",
+					PvcTemplate: storagev1alpha1.PersistentVolumeClaimTemplateSpec{
+						PersistentVolumeClaimTemplateMetadata: storagev1alpha1.PersistentVolumeClaimTemplateMetadata{Name: "restored-pvc-terminal"},
+					},
 				},
 				Status: storagev1alpha1.VolumeRestoreRequestStatus{
 					CompletionTimestamp: &completionTime,
@@ -795,7 +810,7 @@ var _ = Describe("VolumeRestoreRequest", func() {
 			Expect(err).ToNot(HaveOccurred())
 
 			// Then: No requeue, no processing
-			Expect(result.Requeue).To(BeFalse())
+			Expect(result.RequeueAfter).To(BeZero())
 			Expect(result.RequeueAfter).To(BeZero())
 
 			// Then: Status unchanged (time may differ slightly, so check that it exists and Ready condition unchanged)
@@ -827,8 +842,9 @@ var _ = Describe("VolumeRestoreRequest", func() {
 						Kind: SourceKindVolumeSnapshotContent,
 						Name: "test-vsc-spec-change",
 					},
-					TargetNamespace: "default",
-					TargetPVCName:   "restored-pvc-spec-change",
+					PvcTemplate: storagev1alpha1.PersistentVolumeClaimTemplateSpec{
+						PersistentVolumeClaimTemplateMetadata: storagev1alpha1.PersistentVolumeClaimTemplateMetadata{Name: "restored-pvc-spec-change"},
+					},
 				},
 				Status: storagev1alpha1.VolumeRestoreRequestStatus{
 					CompletionTimestamp: &completionTime,
@@ -847,7 +863,7 @@ var _ = Describe("VolumeRestoreRequest", func() {
 			// When: Spec changed manually
 			updatedVRR := &storagev1alpha1.VolumeRestoreRequest{}
 			Expect(client.Get(ctx, types.NamespacedName{Name: "test-vrr-spec-change", Namespace: "default"}, updatedVRR)).To(Succeed())
-			updatedVRR.Spec.TargetPVCName = "changed-pvc-name"
+			updatedVRR.Spec.PvcTemplate.Name = "changed-pvc-name"
 			Expect(client.Update(ctx, updatedVRR)).To(Succeed())
 
 			// When: Reconcile called
@@ -856,7 +872,7 @@ var _ = Describe("VolumeRestoreRequest", func() {
 			Expect(err).ToNot(HaveOccurred())
 
 			// Then: No-op (terminal VRR ignored)
-			Expect(result.Requeue).To(BeFalse())
+			Expect(result.RequeueAfter).To(BeZero())
 			Expect(result.RequeueAfter).To(BeZero())
 
 			// Then: Status unchanged (time may differ slightly, so check that it exists and Ready condition unchanged)

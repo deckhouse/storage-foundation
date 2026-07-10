@@ -87,7 +87,7 @@ spec:
             properties:
               boundSnapshotContentName:
                 description: |-
-                  Имя кластерного объекта SnapshotContent (storage.deckhouse.io) state-snapshotter,
+                  Имя кластерного объекта SnapshotContent (state-snapshotter.deckhouse.io) state-snapshotter,
                   который обеспечивает этот VolumeSnapshot как логический узел в дереве снимка.
                   
                   Записывается общим контроллером state-snapshotter в дополнение к boundVolumeSnapshotContentName.
@@ -112,6 +112,27 @@ spec:
                   возвращаемым из вызова gRPC `ListSnapshots` CSI, если драйвер поддерживает это.
                   
                   Если не указано, время создания снимка неизвестно.
+              data:
+                description: |-
+                  Самодостаточная привязка данных (source + artifact + метаданные тома), зеркалируемая
+                  из привязанного SnapshotContent.status.data state-snapshotter, чтобы d8 определял
+                  дескриптор захваченного тома из этого namespaced VolumeSnapshot. Записывается общим
+                  контроллером state-snapshotter. Расширение Deckhouse.
+                properties:
+                  accessModes:
+                    description: Режимы доступа исходного PVC (например, ReadWriteOnce).
+                  artifact:
+                    description: Durable-артефакт данных (VolumeSnapshotContent).
+                  fsType:
+                    description: Тип файловой системы источника (только для томов Filesystem).
+                  size:
+                    description: Реальный выделенный размер захваченного тома (например, "10Gi").
+                  source:
+                    description: Захваченный источник PersistentVolumeClaim (uid — идентичность тома).
+                  storageClassName:
+                    description: StorageClass исходного захваченного тома.
+                  volumeMode:
+                    description: Режим тома источника (Block или Filesystem).
               error:
                 description: |-
                   Последняя наблюдаемая ошибка при создании снимка, если есть.
@@ -157,23 +178,9 @@ spec:
                   быть меньше `restoreSize`, если он указан, иначе восстановление завершится ошибкой.
                   
                   Если не указано, размер неизвестен.
-              size:
-                description: |-
-                  Отражает реальный размер тома (например, "10Gi"). Записывается общим контроллером
-                  state-snapshotter (из DataImport.spec.size при импорте или из привязанного content при захвате).
-                  Расширение Deckhouse.
-              storageClassName:
-                description: |-
-                  Отражает StorageClass исходного тома для экспорта/потребления в d8. Для импортных
-                  VolumeSnapshot берется из DataImport.spec.storageClassName, при захвате — из привязанного content.
-                  Записывается общим контроллером state-snapshotter. Расширение Deckhouse.
               volumeGroupSnapshotName:
                 description: |-
                   Имя VolumeGroupSnapshot, частью которого является этот VolumeSnapshot.
-              volumeMode:
-                description: |-
-                  Отражает режим тома источника (Filesystem или Block). Записывается общим контроллером
-                  state-snapshotter. Расширение Deckhouse.
   - name: v1beta1
     schema:
       openAPIV3Schema:
@@ -262,7 +269,7 @@ spec:
             properties:
               boundSnapshotContentName:
                 description: |-
-                  Имя кластерного объекта SnapshotContent (storage.deckhouse.io) state-snapshotter,
+                  Имя кластерного объекта SnapshotContent (state-snapshotter.deckhouse.io) state-snapshotter,
                   который обеспечивает этот VolumeSnapshot как логический узел в дереве снимка.
                   
                   Записывается общим контроллером state-snapshotter в дополнение к boundVolumeSnapshotContentName.
@@ -287,6 +294,27 @@ spec:
                   возвращаемым из вызова gRPC `ListSnapshots` CSI, если драйвер поддерживает это.
                   
                   Если не указано, время создания снимка неизвестно.
+              data:
+                description: |-
+                  Самодостаточная привязка данных (source + artifact + метаданные тома), зеркалируемая
+                  из привязанного SnapshotContent.status.data state-snapshotter, чтобы d8 определял
+                  дескриптор захваченного тома из этого namespaced VolumeSnapshot. Записывается общим
+                  контроллером state-snapshotter. Расширение Deckhouse.
+                properties:
+                  accessModes:
+                    description: Режимы доступа исходного PVC (например, ReadWriteOnce).
+                  artifact:
+                    description: Durable-артефакт данных (VolumeSnapshotContent).
+                  fsType:
+                    description: Тип файловой системы источника (только для томов Filesystem).
+                  size:
+                    description: Реальный выделенный размер захваченного тома (например, "10Gi").
+                  source:
+                    description: Захваченный источник PersistentVolumeClaim (uid — идентичность тома).
+                  storageClassName:
+                    description: StorageClass исходного захваченного тома.
+                  volumeMode:
+                    description: Режим тома источника (Block или Filesystem).
               error:
                 description: |-
                   Последняя наблюдаемая ошибка при создании снимка, если есть.
@@ -332,20 +360,6 @@ spec:
                   быть меньше `restoreSize`, если он указан, иначе восстановление завершится ошибкой.
                   
                   Если не указано, размер неизвестен.
-              size:
-                description: |-
-                  Отражает реальный размер тома (например, "10Gi"). Записывается общим контроллером
-                  state-snapshotter (из DataImport.spec.size при импорте или из привязанного content при захвате).
-                  Расширение Deckhouse.
-              storageClassName:
-                description: |-
-                  Отражает StorageClass исходного тома для экспорта/потребления в d8. Для импортных
-                  VolumeSnapshot берется из DataImport.spec.storageClassName, при захвате — из привязанного content.
-                  Записывается общим контроллером state-snapshotter. Расширение Deckhouse.
               volumeGroupSnapshotName:
                 description: |-
                   Имя VolumeGroupSnapshot, частью которого является этот VolumeSnapshot.
-              volumeMode:
-                description: |-
-                  Отражает режим тома источника (Filesystem или Block). Записывается общим контроллером
-                  state-snapshotter. Расширение Deckhouse.

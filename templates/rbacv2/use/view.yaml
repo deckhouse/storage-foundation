@@ -9,7 +9,7 @@ metadata:
   name: d8:use:capability:module:storage-foundation:view
 rules:
   - apiGroups:
-      - storage.deckhouse.io
+      - storage-foundation.deckhouse.io
     resources:
       - volumecapturerequests
       - volumerestorerequests

@@ -14,7 +14,7 @@ metadata:
   {{- include "helm_lib_module_labels" (list . (dict "app" "data-exporter")) | nindent 2 }}
 rules:
   - apiGroups:
-      - storage.deckhouse.io
+      - storage-foundation.deckhouse.io
     resources:
       - dataexports/status
       - dataexports

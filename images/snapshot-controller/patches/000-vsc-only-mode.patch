@@ -1,0 +1,2192 @@
+diff --git a/pkg/common-controller/snapshot_controller.go b/pkg/common-controller/snapshot_controller.go
+index 67fdc6c5e..a1457eb01 100644
+--- a/pkg/common-controller/snapshot_controller.go
++++ b/pkg/common-controller/snapshot_controller.go
+@@ -92,6 +92,7 @@ func (ctrl *csiSnapshotCommonController) syncContent(content *crdv1.VolumeSnapsh
+ 
+ 	klog.V(5).Infof("syncContent[%s]: check if we should add invalid label on content", content.Name)
+ 
++	// Validate that exactly one of VolumeHandle and SnapshotHandle is specified
+ 	if (content.Spec.Source.VolumeHandle == nil && content.Spec.Source.SnapshotHandle == nil) ||
+ 		(content.Spec.Source.VolumeHandle != nil && content.Spec.Source.SnapshotHandle != nil) {
+ 		err := fmt.Errorf("Exactly one of VolumeHandle and SnapshotHandle should be specified")
+@@ -100,6 +101,19 @@ func (ctrl *csiSnapshotCommonController) syncContent(content *crdv1.VolumeSnapsh
+ 		return err
+ 	}
+ 
++	isVSCOnly := content.Spec.VolumeSnapshotRef.UID == "" &&
++		content.Spec.VolumeSnapshotRef.Name == "" &&
++		content.Spec.VolumeSnapshotRef.Namespace == ""
++
++	if isVSCOnly {
++		klog.V(4).Infof("syncContent [%s]: VolumeSnapshotContent is VSC-only (no VolumeSnapshotRef)", content.Name)
++		if utils.NeedToAddContentFinalizer(content) {
++			klog.V(5).Infof("syncContent [%s]: Add Finalizer for VSC-only VolumeSnapshotContent", content.Name)
++			return ctrl.addContentFinalizer(content)
++		}
++		return nil
++	}
++
+ 	// The VolumeSnapshotContent is reserved for a VolumeSnapshot;
+ 	// that VolumeSnapshot has not yet been bound to this VolumeSnapshotContent;
+ 	// syncSnapshot will handle it.
+diff --git a/pkg/sidecar-controller/csi_handler.go b/pkg/sidecar-controller/csi_handler.go
+index 9658e3179..7f7e09233 100644
+--- a/pkg/sidecar-controller/csi_handler.go
++++ b/pkg/sidecar-controller/csi_handler.go
+@@ -28,6 +28,7 @@ import (
+ 
+ 	crdv1 "github.com/kubernetes-csi/external-snapshotter/client/v8/apis/volumesnapshot/v1"
+ 	"github.com/kubernetes-csi/external-snapshotter/v8/pkg/snapshotter"
++	"github.com/kubernetes-csi/external-snapshotter/v8/pkg/vscmode"
+ )
+ 
+ // Handler is responsible for handling VolumeSnapshot events from informer.
+@@ -49,6 +50,7 @@ type csiHandler struct {
+ 	snapshotNameUUIDLength      int
+ 	groupSnapshotNamePrefix     string
+ 	groupSnapshotNameUUIDLength int
++	vscMode                     vscmode.VSCMode
+ }
+ 
+ // NewCSIHandler returns a handler which includes the csi connection and Snapshot name details
+@@ -60,6 +62,7 @@ func NewCSIHandler(
+ 	snapshotNameUUIDLength int,
+ 	groupSnapshotNamePrefix string,
+ 	groupSnapshotNameUUIDLength int,
++	vscMode vscmode.VSCMode,
+ ) Handler {
+ 	return &csiHandler{
+ 		snapshotter:                 snapshotter,
+@@ -69,6 +72,7 @@ func NewCSIHandler(
+ 		snapshotNameUUIDLength:      snapshotNameUUIDLength,
+ 		groupSnapshotNamePrefix:     groupSnapshotNamePrefix,
+ 		groupSnapshotNameUUIDLength: groupSnapshotNameUUIDLength,
++		vscMode:                     vscMode,
+ 	}
+ }
+ 
+@@ -76,15 +80,16 @@ func (handler *csiHandler) CreateSnapshot(content *crdv1.VolumeSnapshotContent,
+ 	ctx, cancel := context.WithTimeout(context.Background(), handler.timeout)
+ 	defer cancel()
+ 
+-	if content.Spec.VolumeSnapshotRef.UID == "" {
+-		return "", "", time.Time{}, 0, false, fmt.Errorf("cannot create snapshot. Snapshot content %s not bound to a snapshot", content.Name)
+-	}
++	// Use VSCMode to determine snapshot UID for name generation.
++	// SnapshotUID may come from VolumeSnapshotRef.UID (legacy/upstream) or from content.UID (VSC-only).
++	// VSCMode handles this selection based on the content's mode.
++	snapshotUID := handler.vscMode.SnapshotUID(content)
+ 
+ 	if content.Spec.Source.VolumeHandle == nil {
+ 		return "", "", time.Time{}, 0, false, fmt.Errorf("cannot create snapshot. Volume handle not found in snapshot content %s", content.Name)
+ 	}
+ 
+-	snapshotName, err := makeSnapshotName(handler.snapshotNamePrefix, string(content.Spec.VolumeSnapshotRef.UID), handler.snapshotNameUUIDLength)
++	snapshotName, err := makeSnapshotName(handler.snapshotNamePrefix, snapshotUID, handler.snapshotNameUUIDLength)
+ 	if err != nil {
+ 		return "", "", time.Time{}, 0, false, err
+ 	}
+@@ -135,9 +140,16 @@ func (handler *csiHandler) GetSnapshotStatus(content *crdv1.VolumeSnapshotConten
+ 	return csiSnapshotStatus, timestamp, size, groupSnapshotID, nil
+ }
+ 
++// makeSnapshotName creates a deterministic snapshot name based on prefix and snapshotUID.
++// The snapshotUID may come from VolumeSnapshotRef.UID (legacy/upstream) or from
++// VolumeSnapshotContent.UID (VSC-only downstream extension). VSCMode handles the selection
++// of which UID to use, ensuring consistent snapshot naming across modes.
++//
++// This deterministic naming allows CSI drivers to identify and manage snapshots consistently,
++// even across controller restarts or when snapshots are created asynchronously.
+ func makeSnapshotName(prefix, snapshotUID string, snapshotNameUUIDLength int) (string, error) {
+ 	// create persistent name based on a volumeNamePrefix and volumeNameUUIDLength
+-	// of PVC's UID
++	// of snapshot UID (from VolumeSnapshotRef.UID in legacy mode, or content.UID in VSC-only mode)
+ 	if len(snapshotUID) == 0 {
+ 		return "", fmt.Errorf("Corrupted snapshot object, it is missing UID")
+ 	}
+diff --git a/pkg/sidecar-controller/framework_test.go b/pkg/sidecar-controller/framework_test.go
+index a8bf8b74a..57c201b61 100644
+--- a/pkg/sidecar-controller/framework_test.go
++++ b/pkg/sidecar-controller/framework_test.go
+@@ -333,6 +333,12 @@ func (r *snapshotReactor) checkContents(expectedContents []*crdv1.VolumeSnapshot
+ 		v := v.DeepCopy()
+ 		v.ResourceVersion = ""
+ 		v.Spec.VolumeSnapshotRef.ResourceVersion = ""
++		// Clear DeletionTimestamp to avoid time precision issues in comparison.
++		// This is needed for VSC-only tests that use DeletionTimestamp.
++		// NOTE: This is a downstream-specific modification to the test framework.
++		// Upstream framework does not clear DeletionTimestamp, but VSC-only deletion
++		// tests require this normalization for consistent test comparisons.
++		v.DeletionTimestamp = nil
+ 		if v.Status != nil {
+ 			v.Status.CreationTime = nil
+ 		}
+@@ -347,6 +353,12 @@ func (r *snapshotReactor) checkContents(expectedContents []*crdv1.VolumeSnapshot
+ 		v := v.DeepCopy()
+ 		v.ResourceVersion = ""
+ 		v.Spec.VolumeSnapshotRef.ResourceVersion = ""
++		// Clear DeletionTimestamp to avoid time precision issues in comparison.
++		// This is needed for VSC-only tests that use DeletionTimestamp.
++		// NOTE: This is a downstream-specific modification to the test framework.
++		// Upstream framework does not clear DeletionTimestamp, but VSC-only deletion
++		// tests require this normalization for consistent test comparisons.
++		v.DeletionTimestamp = nil
+ 		if v.Status != nil {
+ 			v.Status.CreationTime = nil
+ 			if v.Status.Error != nil {
+diff --git a/pkg/sidecar-controller/snapshot_controller.go b/pkg/sidecar-controller/snapshot_controller.go
+index ec67be7cc..62c25c1c2 100644
+--- a/pkg/sidecar-controller/snapshot_controller.go
++++ b/pkg/sidecar-controller/snapshot_controller.go
+@@ -88,7 +88,17 @@ func (ctrl *csiSnapshotSideCarController) syncContent(content *crdv1.VolumeSnaps
+ 	// Create snapshot calling the CSI driver only if it is a dynamic
+ 	// provisioning for an independent snapshot.
+ 	_, groupSnapshotMember := content.Annotations[utils.VolumeGroupSnapshotHandleAnnotation]
+-	if content.Spec.Source.VolumeHandle != nil && content.Status == nil && !groupSnapshotMember {
++	if ctrl.vscMode.IsVSCOnly(content) && ctrl.vscMode.ShouldSkip(content) {
++		return false, nil
++	}
++	if ctrl.vscMode.IsVSCOnly(content) && ctrl.vscMode.ShouldSkipCreateForInProgress(content) {
++		return true, nil
++	}
++	if ctrl.vscMode.IsVSCOnly(content) && ctrl.vscMode.ShouldCreateSnapshot(content) && !groupSnapshotMember {
++		klog.V(5).Infof("syncContent: Call CreateSnapshot for VSC-only content %s", content.Name)
++		return ctrl.createSnapshot(content)
++	}
++	if !ctrl.vscMode.IsVSCOnly(content) && content.Spec.Source.VolumeHandle != nil && content.Status == nil && !groupSnapshotMember {
+ 		klog.V(5).Infof("syncContent: Call CreateSnapshot for content %s", content.Name)
+ 		return ctrl.createSnapshot(content)
+ 	}
+@@ -251,6 +261,15 @@ func (ctrl *csiSnapshotSideCarController) getCSISnapshotInput(content *crdv1.Vol
+ 	if err != nil {
+ 		return nil, nil, err
+ 	}
++	if ctrl.vscMode.IsVSCOnly(content) && len(snapshotterCredentials) == 0 && class != nil {
++		snapshotterSecretRef, err := utils.GetSecretReference(utils.SnapshotterSecretParams, class.Parameters, content.GetObjectMeta().GetName(), nil)
++		if err == nil && snapshotterSecretRef != nil {
++			snapshotterCredentials, err = utils.GetCredentials(ctrl.client, snapshotterSecretRef)
++			if err != nil {
++				return nil, nil, fmt.Errorf("failed to get credentials from class parameters for VSC-only content %s: %w", content.Name, err)
++			}
++		}
++	}
+ 
+ 	return class, snapshotterCredentials, nil
+ }
+@@ -266,6 +285,35 @@ func (ctrl *csiSnapshotSideCarController) checkandUpdateContentStatusOperation(c
+ 
+ 	volumeGroupSnapshotMemberWithGroupSnapshotHandle := content.Status != nil && content.Status.VolumeGroupSnapshotHandle != nil
+ 
++	if ctrl.vscMode.IsVSCOnly(content) && content.Status != nil && content.Status.SnapshotHandle != nil {
++		if content.Spec.VolumeSnapshotClassName != nil {
++			class, err := ctrl.getSnapshotClass(*content.Spec.VolumeSnapshotClassName)
++			if err != nil {
++				return content, fmt.Errorf("failed to get snapshot class %s for VSC-only content %s: %v", *content.Spec.VolumeSnapshotClassName, content.Name, err)
++			}
++
++			snapshotterListSecretRef, err := utils.GetSecretReference(utils.SnapshotterListSecretParams, class.Parameters, content.GetObjectMeta().GetName(), nil)
++			if err == nil && snapshotterListSecretRef != nil {
++				snapshotterListCredentials, err = utils.GetCredentials(ctrl.client, snapshotterListSecretRef)
++				if err != nil {
++					return content, fmt.Errorf("failed to get list credentials for VSC-only content %s: %v", content.Name, err)
++				}
++			}
++		}
++
++		readyToUse, creationTime, size, groupSnapshotID, err = ctrl.handler.GetSnapshotStatus(content, snapshotterListCredentials)
++		if err != nil {
++			return content, err
++		}
++		driverName = content.Spec.Driver
++		snapshotID := *content.Status.SnapshotHandle
++		klog.V(5).Infof("checkandUpdateContentStatusOperation: driver %s, snapshotId %s, creationTime %v, size %d, readyToUse %t, groupSnapshotID %s", driverName, snapshotID, creationTime, size, readyToUse, groupSnapshotID)
++		if creationTime.IsZero() {
++			creationTime = time.Now()
++		}
++		return ctrl.updateSnapshotContentStatus(content, snapshotID, readyToUse, creationTime.UnixNano(), size, groupSnapshotID)
++	}
++
+ 	if content.Spec.Source.SnapshotHandle != nil || (volumeGroupSnapshotMemberWithGroupSnapshotHandle && content.Status.SnapshotHandle != nil) {
+ 		klog.V(5).Infof("checkandUpdateContentStatusOperation: call GetSnapshotStatus for snapshot content [%s]", content.Name)
+ 
+@@ -360,8 +408,10 @@ func (ctrl *csiSnapshotSideCarController) createSnapshotWrapper(content *crdv1.V
+ 		return content, fmt.Errorf("failed to remove CSI Parameters of prefixed keys: %v", err)
+ 	}
+ 	if ctrl.extraCreateMetadata {
+-		parameters[utils.PrefixedVolumeSnapshotNameKey] = content.Spec.VolumeSnapshotRef.Name
+-		parameters[utils.PrefixedVolumeSnapshotNamespaceKey] = content.Spec.VolumeSnapshotRef.Namespace
++		if !ctrl.vscMode.IsVSCOnly(content) {
++			parameters[utils.PrefixedVolumeSnapshotNameKey] = content.Spec.VolumeSnapshotRef.Name
++			parameters[utils.PrefixedVolumeSnapshotNamespaceKey] = content.Spec.VolumeSnapshotRef.Namespace
++		}
+ 		parameters[utils.PrefixedVolumeSnapshotContentNameKey] = content.Name
+ 	}
+ 
+@@ -414,6 +464,20 @@ func (ctrl *csiSnapshotSideCarController) deleteCSISnapshotOperation(content *cr
+ 		ctrl.eventRecorder.Event(content, v1.EventTypeWarning, "SnapshotDeleteError", "Failed to get snapshot credentials")
+ 		return content, fmt.Errorf("failed to get input parameters to delete snapshot for content %s: %q", content.Name, err)
+ 	}
++	if ctrl.vscMode.IsVSCOnly(content) && len(snapshotterCredentials) == 0 && content.Spec.VolumeSnapshotClassName != nil {
++		class, err := ctrl.getSnapshotClass(*content.Spec.VolumeSnapshotClassName)
++		if err != nil {
++			return content, fmt.Errorf("failed to get snapshot class %s for VSC-only content %s: %w", *content.Spec.VolumeSnapshotClassName, content.Name, err)
++		}
++		snapshotterSecretRef, err := utils.GetSecretReference(utils.SnapshotterSecretParams, class.Parameters, content.GetObjectMeta().GetName(), nil)
++		if err == nil && snapshotterSecretRef != nil {
++			snapshotterCredentials, err = utils.GetCredentials(ctrl.client, snapshotterSecretRef)
++			if err != nil {
++				ctrl.eventRecorder.Event(content, v1.EventTypeWarning, "SnapshotDeleteError", "Failed to get snapshot credentials")
++				return content, fmt.Errorf("failed to get credentials from class parameters for VSC-only content %s: %w", content.Name, err)
++			}
++		}
++	}
+ 
+ 	err = ctrl.handler.DeleteSnapshot(content, snapshotterCredentials)
+ 	if err != nil {
+@@ -625,6 +689,10 @@ func (ctrl csiSnapshotSideCarController) removeContentFinalizer(content *crdv1.V
+ func (ctrl *csiSnapshotSideCarController) shouldDelete(content *crdv1.VolumeSnapshotContent) bool {
+ 	klog.V(5).Infof("Check if VolumeSnapshotContent[%s] should be deleted.", content.Name)
+ 
++	if ctrl.vscMode != nil && ctrl.vscMode.IsVSCOnly(content) {
++		return ctrl.vscMode.ShouldDeleteSnapshot(content)
++	}
++
+ 	if content.ObjectMeta.DeletionTimestamp == nil {
+ 		return false
+ 	}
+diff --git a/pkg/sidecar-controller/snapshot_controller_base.go b/pkg/sidecar-controller/snapshot_controller_base.go
+index d25b0bb99..bfd85da6c 100644
+--- a/pkg/sidecar-controller/snapshot_controller_base.go
++++ b/pkg/sidecar-controller/snapshot_controller_base.go
+@@ -46,6 +46,7 @@ import (
+ 	snapshotlisters "github.com/kubernetes-csi/external-snapshotter/client/v8/listers/volumesnapshot/v1"
+ 	"github.com/kubernetes-csi/external-snapshotter/v8/pkg/snapshotter"
+ 	"github.com/kubernetes-csi/external-snapshotter/v8/pkg/utils"
++	"github.com/kubernetes-csi/external-snapshotter/v8/pkg/vscmode"
+ )
+ 
+ type csiSnapshotSideCarController struct {
+@@ -64,6 +65,7 @@ type csiSnapshotSideCarController struct {
+ 	contentStore cache.Store
+ 
+ 	handler Handler
++	vscMode vscmode.VSCMode
+ 
+ 	resyncPeriod time.Duration
+ 
+@@ -104,12 +106,14 @@ func NewCSISnapshotSideCarController(
+ 	var eventRecorder record.EventRecorder
+ 	eventRecorder = broadcaster.NewRecorder(scheme.Scheme, v1.EventSource{Component: fmt.Sprintf("csi-snapshotter %s", driverName)})
+ 
++	vscMode := vscmode.GetVSCMode()
+ 	ctrl := &csiSnapshotSideCarController{
+ 		clientset:     clientset,
+ 		client:        client,
+ 		driverName:    driverName,
+ 		eventRecorder: eventRecorder,
+-		handler:       NewCSIHandler(snapshotter, groupSnapshotter, timeout, snapshotNamePrefix, snapshotNameUUIDLength, groupSnapshotNamePrefix, groupSnapshotNameUUIDLength),
++		handler:       NewCSIHandler(snapshotter, groupSnapshotter, timeout, snapshotNamePrefix, snapshotNameUUIDLength, groupSnapshotNamePrefix, groupSnapshotNameUUIDLength, vscMode),
++		vscMode:       vscMode,
+ 		resyncPeriod:  resyncPeriod,
+ 		contentStore:  cache.NewStore(cache.DeletionHandlingMetaNamespaceKeyFunc),
+ 		contentQueue: workqueue.NewTypedRateLimitingQueueWithConfig(
+@@ -332,11 +336,20 @@ func (ctrl *csiSnapshotSideCarController) syncContentByKey(key string) (requeue
+ }
+ 
+ // isDriverMatch verifies whether the driver specified in VolumeSnapshotContent
+-// or VolumeGroupSnapshotContent matches the controller's driver name
++// or VolumeGroupSnapshotContent matches the controller's driver name.
++//
++// Upstream logic filters out contents without any source (VolumeHandle or SnapshotHandle)
++// only for legacy mode. Downstream (VSC-only) needs to see such objects in sync for
++// proper handling, even though they may be skipped later in syncContent via ShouldSkip().
++//
++// This method determines which objects should be added to the controller's work queue.
++// The actual processing logic (including skipping) is handled in syncContent.
+ func (ctrl *csiSnapshotSideCarController) isDriverMatch(object interface{}) bool {
+ 	if content, ok := object.(*crdv1.VolumeSnapshotContent); ok {
+-		if content.Spec.Source.VolumeHandle == nil && content.Spec.Source.SnapshotHandle == nil {
+-			// Skip this snapshot content if it does not have a valid source
++		// Use VSCMode to determine if content should be considered for reconciliation.
++		// Upstream (legacy) filters out content without VolumeHandle/SnapshotHandle.
++		// Downstream (VSC-only) allows such content to be processed (skipping happens in syncContent).
++		if !ctrl.vscMode.IsValidContentForReconcile(content) {
+ 			return false
+ 		}
+ 		if content.Spec.Driver != ctrl.driverName {
+diff --git a/pkg/sidecar-controller/vsc_only_contract_test.go b/pkg/sidecar-controller/vsc_only_contract_test.go
+new file mode 100644
+index 000000000..a813352ce
+--- /dev/null
++++ b/pkg/sidecar-controller/vsc_only_contract_test.go
+@@ -0,0 +1,307 @@
++/*
++Copyright 2019 The Kubernetes Authors.
++
++Licensed under the Apache License, Version 2.0 (the "License");
++you may not use this file except in compliance with the License.
++You may obtain a copy of the License at
++
++    http://www.apache.org/licenses/LICENSE-2.0
++
++Unless required by applicable law or agreed to in writing, software
++distributed under the License is distributed on an "AS IS" BASIS,
++WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++See the License for the specific language governing permissions and
++limitations under the License.
++*/
++
++package sidecar_controller
++
++import (
++	"testing"
++	"time"
++
++	crdv1 "github.com/kubernetes-csi/external-snapshotter/client/v8/apis/volumesnapshot/v1"
++	"github.com/kubernetes-csi/external-snapshotter/v8/pkg/utils"
++	v1 "k8s.io/api/core/v1"
++	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
++	"k8s.io/apimachinery/pkg/types"
++)
++
++// Contract tests for VSC-only mode.
++// These tests verify behavior, not implementation details.
++
++// TestVSCOnlyContract_Basic verifies basic VSC-only behavior:
++// 1. VSC without VolumeSnapshotRef is accepted
++// 2. CreateSnapshot is called
++// 3. SnapshotHandle appears in status
++func TestVSCOnlyContract_Basic(t *testing.T) {
++	tests := []controllerTest{
++		{
++			name: "VSC-only basic: CreateSnapshot called, SnapshotHandle set",
++			initialContents: []*crdv1.VolumeSnapshotContent{
++				newVSCOnlyContent("content-vsc-only-1", "", defaultClass, "volume-handle-1", retainPolicy, &defaultSize, nil, true),
++			},
++			expectedContents: withContentAnnotations(
++				withContentStatus(
++					[]*crdv1.VolumeSnapshotContent{
++						newVSCOnlyContent("content-vsc-only-1", "snapuid-vsc-only-1", defaultClass, "volume-handle-1", retainPolicy, &defaultSize, &True, true),
++					},
++					&crdv1.VolumeSnapshotContentStatus{
++						SnapshotHandle: toStringPointer("snapuid-vsc-only-1"),
++						RestoreSize:    &defaultSize,
++						ReadyToUse:     &True,
++					},
++				),
++				map[string]string{},
++			),
++			expectedEvents: noevents,
++			expectedCreateCalls: []createCall{
++				{
++					volumeHandle: "volume-handle-1",
++					snapshotName: "snapshot-vsc-uid-content-vsc-only-1",
++					driverName:   mockDriverName,
++					snapshotId:   "snapuid-vsc-only-1",
++					parameters: map[string]string{
++						utils.PrefixedVolumeSnapshotContentNameKey: "content-vsc-only-1",
++					},
++					secrets: map[string]string{
++						"foo": "bar",
++					},
++					creationTime: timeNow,
++					readyToUse:   true,
++					size:         defaultSize,
++				},
++			},
++			expectedListCalls: []listCall{{"snapuid-vsc-only-1", map[string]string{"foo": "bar"}, true, time.Now(), 1, nil, ""}},
++			expectSuccess:     true,
++			initialSecrets:    []*v1.Secret{secret()},
++			errors:            noerrors,
++			test:              testSyncContent,
++		},
++	}
++	runSyncContentTests(t, tests, snapshotClasses)
++}
++
++// TestVSCOnlyContract_Lifecycle verifies complete VSC-only lifecycle:
++// 1. CreateSnapshot called once
++// 2. SnapshotHandle appears in status
++// 3. ReadyToUse correctly set
++func TestVSCOnlyContract_Lifecycle(t *testing.T) {
++	tests := []controllerTest{
++		{
++			name: "VSC-only lifecycle: CreateSnapshot -> Status -> ReadyToUse",
++			initialContents: []*crdv1.VolumeSnapshotContent{
++				newVSCOnlyContent("content-lifecycle-1", "", defaultClass, "volume-handle-1", retainPolicy, &defaultSize, nil, true),
++			},
++			expectedContents: withContentAnnotations(
++				withContentStatus(
++					[]*crdv1.VolumeSnapshotContent{
++						newVSCOnlyContent("content-lifecycle-1", "snapuid-lifecycle-1", defaultClass, "volume-handle-1", retainPolicy, &defaultSize, &True, true),
++					},
++					&crdv1.VolumeSnapshotContentStatus{
++						SnapshotHandle: toStringPointer("snapuid-lifecycle-1"),
++						RestoreSize:    &defaultSize,
++						ReadyToUse:     &True,
++					},
++				),
++				map[string]string{},
++			),
++			expectedEvents: noevents,
++			expectedCreateCalls: []createCall{
++				{
++					volumeHandle: "volume-handle-1",
++					snapshotName: "snapshot-vsc-uid-content-lifecycle-1",
++					driverName:   mockDriverName,
++					snapshotId:   "snapuid-lifecycle-1",
++					parameters: map[string]string{
++						utils.PrefixedVolumeSnapshotContentNameKey: "content-lifecycle-1",
++					},
++					secrets: map[string]string{
++						"foo": "bar",
++					},
++					creationTime: timeNow,
++					readyToUse:   true,
++					size:         defaultSize,
++				},
++			},
++			expectedListCalls: []listCall{{"snapuid-lifecycle-1", map[string]string{"foo": "bar"}, true, time.Now(), 1, nil, ""}},
++			expectSuccess:     true,
++			initialSecrets:    []*v1.Secret{secret()},
++			errors:            noerrors,
++			test:              testSyncContent,
++		},
++	}
++	runSyncContentTests(t, tests, snapshotClasses)
++}
++
++// TestVSCOnlyContract_Deletion verifies VSC-only deletion behavior:
++// 1. DeleteSnapshot called only for Delete policy
++// 2. Finalizer removed after successful deletion
++func TestVSCOnlyContract_Deletion(t *testing.T) {
++	deletionTime := metav1.Now()
++	content := newVSCOnlyContent("content-delete-1", "snapuid-delete-1", defaultClass, "volume-handle-1", deletePolicy, &defaultSize, &True, true)
++	content.DeletionTimestamp = &deletionTime
++
++	// After deletion, SnapshotHandle is cleared by clearVolumeContentStatus
++	expectedContent := newVSCOnlyContent("content-delete-1", "", defaultClass, "volume-handle-1", deletePolicy, nil, nil, false)
++
++	tests := []controllerTest{
++		{
++			name: "VSC-only deletion: DeleteSnapshot called, finalizer removed",
++			initialContents: []*crdv1.VolumeSnapshotContent{
++				content,
++			},
++			expectedContents: []*crdv1.VolumeSnapshotContent{
++				expectedContent,
++			},
++			expectedEvents: noevents,
++			expectedDeleteCalls: []deleteCall{
++				{
++					snapshotID: "snapuid-delete-1",
++					secrets:    map[string]string{"foo": "bar"},
++					err:        nil,
++				},
++			},
++			expectedListCalls: []listCall{},
++			expectSuccess:     true,
++			initialSecrets:    []*v1.Secret{secret()},
++			errors:            noerrors,
++			test:              testSyncContent,
++		},
++	}
++	runSyncContentTests(t, tests, snapshotClasses)
++}
++
++// TestVSCOnlyContract_NoVolumeSnapshot verifies that no VolumeSnapshot objects
++// are created or required for VSC-only mode.
++func TestVSCOnlyContract_NoVolumeSnapshot(t *testing.T) {
++	tests := []controllerTest{
++		{
++			name: "VSC-only: No VolumeSnapshot required or created",
++			initialContents: []*crdv1.VolumeSnapshotContent{
++				newVSCOnlyContent("content-no-vs-1", "", defaultClass, "volume-handle-1", retainPolicy, &defaultSize, nil, true),
++			},
++			expectedContents: withContentAnnotations(
++				withContentStatus(
++					[]*crdv1.VolumeSnapshotContent{
++						newVSCOnlyContent("content-no-vs-1", "snapuid-no-vs-1", defaultClass, "volume-handle-1", retainPolicy, &defaultSize, &True, true),
++					},
++					&crdv1.VolumeSnapshotContentStatus{
++						SnapshotHandle: toStringPointer("snapuid-no-vs-1"),
++						RestoreSize:    &defaultSize,
++						ReadyToUse:     &True,
++					},
++				),
++				map[string]string{},
++			),
++			expectedEvents: noevents,
++			expectedCreateCalls: []createCall{
++				{
++					volumeHandle: "volume-handle-1",
++					snapshotName: "snapshot-vsc-uid-content-no-vs-1",
++					driverName:   mockDriverName,
++					snapshotId:   "snapuid-no-vs-1",
++					parameters: map[string]string{
++						utils.PrefixedVolumeSnapshotContentNameKey: "content-no-vs-1",
++					},
++					secrets: map[string]string{
++						"foo": "bar",
++					},
++					creationTime: timeNow,
++					readyToUse:   true,
++					size:         defaultSize,
++				},
++			},
++			expectedListCalls: []listCall{{"snapuid-no-vs-1", map[string]string{"foo": "bar"}, true, time.Now(), 1, nil, ""}},
++			expectSuccess:     true,
++			initialSecrets:    []*v1.Secret{secret()},
++			errors:            noerrors,
++			test:              testSyncContent,
++		},
++	}
++	runSyncContentTests(t, tests, snapshotClasses)
++}
++
++// TestVSCOnlyContract_RecreateVSC verifies that when a VSC is deleted and recreated
++// with the same name but different UID, a new snapshot is created with a different snapshotName.
++// This is a real scenario in backup/restore workflows.
++func TestVSCOnlyContract_RecreateVSC(t *testing.T) {
++	// First VSC with UID "vsc-uid-content-recreate-1"
++	content1 := newVSCOnlyContent("content-recreate-1", "", defaultClass, "volume-handle-1", retainPolicy, &defaultSize, nil, true)
++	// Verify UID is set correctly
++	if string(content1.UID) != "vsc-uid-content-recreate-1" {
++		t.Fatalf("Expected UID vsc-uid-content-recreate-1, got %s", content1.UID)
++	}
++
++	// Second VSC with same name but different UID
++	content2 := &crdv1.VolumeSnapshotContent{
++		ObjectMeta: metav1.ObjectMeta{
++			Name:            "content-recreate-1",
++			UID:             types.UID("vsc-uid-content-recreate-1-new"), // Different UID
++			ResourceVersion: "1",
++		},
++		Spec: crdv1.VolumeSnapshotContentSpec{
++			Driver:                  vscTestDriverName,
++			DeletionPolicy:          retainPolicy,
++			VolumeSnapshotRef:       v1.ObjectReference{}, // Empty - VSC-only
++			VolumeSnapshotClassName: &defaultClass,
++			Source: crdv1.VolumeSnapshotContentSource{
++				VolumeHandle: toStringPointer("volume-handle-1"),
++			},
++		},
++		Status: &crdv1.VolumeSnapshotContentStatus{},
++	}
++	content2.ObjectMeta.Finalizers = []string{utils.VolumeSnapshotContentFinalizer}
++
++	tests := []controllerTest{
++		{
++			name: "VSC-only recreate: New VSC with same name but different UID creates new snapshot",
++			initialContents: []*crdv1.VolumeSnapshotContent{
++				content2, // Only the new VSC
++			},
++			expectedContents: withContentAnnotations(
++				withContentStatus(
++					[]*crdv1.VolumeSnapshotContent{
++						func() *crdv1.VolumeSnapshotContent {
++							c := content2.DeepCopy()
++							c.Status.SnapshotHandle = toStringPointer("snapuid-recreate-1")
++							c.Status.RestoreSize = &defaultSize
++							c.Status.ReadyToUse = &True
++							return c
++						}(),
++					},
++					&crdv1.VolumeSnapshotContentStatus{
++						SnapshotHandle: toStringPointer("snapuid-recreate-1"),
++						RestoreSize:    &defaultSize,
++						ReadyToUse:     &True,
++					},
++				),
++				map[string]string{},
++			),
++			expectedEvents: noevents,
++			expectedCreateCalls: []createCall{
++				{
++					volumeHandle: "volume-handle-1",
++					snapshotName: "snapshot-vsc-uid-content-recreate-1-new", // Different snapshotName based on new UID
++					driverName:   mockDriverName,
++					snapshotId:   "snapuid-recreate-1",
++					parameters: map[string]string{
++						utils.PrefixedVolumeSnapshotContentNameKey: "content-recreate-1",
++					},
++					secrets: map[string]string{
++						"foo": "bar",
++					},
++					creationTime: timeNow,
++					readyToUse:   true,
++					size:         defaultSize,
++				},
++			},
++			expectedListCalls: []listCall{{"snapuid-recreate-1", map[string]string{"foo": "bar"}, true, time.Now(), 1, nil, ""}},
++			expectSuccess:     true,
++			initialSecrets:    []*v1.Secret{secret()},
++			errors:            noerrors,
++			test:              testSyncContent,
++		},
++	}
++	runSyncContentTests(t, tests, snapshotClasses)
++}
+diff --git a/pkg/sidecar-controller/vsc_only_edge_cases_test.go b/pkg/sidecar-controller/vsc_only_edge_cases_test.go
+new file mode 100644
+index 000000000..318ed72f5
+--- /dev/null
++++ b/pkg/sidecar-controller/vsc_only_edge_cases_test.go
+@@ -0,0 +1,205 @@
++/*
++Copyright 2019 The Kubernetes Authors.
++
++Licensed under the Apache License, Version 2.0 (the "License");
++you may not use this file except in compliance with the License.
++You may obtain a copy of the License at
++
++    http://www.apache.org/licenses/LICENSE-2.0
++
++Unless required by applicable law or agreed to in writing, software
++distributed under the License is distributed on an "AS IS" BASIS,
++WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++See the License for the specific language governing permissions and
++limitations under the License.
++*/
++
++package sidecar_controller
++
++import (
++	"errors"
++	"testing"
++	"time"
++
++	crdv1 "github.com/kubernetes-csi/external-snapshotter/client/v8/apis/volumesnapshot/v1"
++	"github.com/kubernetes-csi/external-snapshotter/v8/pkg/utils"
++	v1 "k8s.io/api/core/v1"
++	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
++)
++
++// Edge-case and negative tests for VSC-only mode.
++// These tests protect against flapping and "silent" bugs.
++
++// TestVSCOnly_NoVolumeHandleNoSnapshotHandle verifies that VSC without VolumeHandle
++// and without SnapshotHandle is skipped correctly.
++func TestVSCOnly_NoVolumeHandleNoSnapshotHandle(t *testing.T) {
++	content := newVSCOnlyContent("content-no-handles-1", "", defaultClass, "", retainPolicy, nil, nil, true)
++	// No VolumeHandle, no SnapshotHandle
++
++	tests := []controllerTest{
++		{
++			name: "VSC-only: No VolumeHandle and no SnapshotHandle - skipped",
++			initialContents: []*crdv1.VolumeSnapshotContent{
++				content,
++			},
++			expectedContents: []*crdv1.VolumeSnapshotContent{
++				content, // No changes - skipped
++			},
++			expectedEvents:      noevents,
++			expectedCreateCalls: []createCall{},
++			expectedListCalls:   []listCall{},
++			expectSuccess:       true,
++			errors:              noerrors,
++			test:                testSyncContent,
++		},
++	}
++	runSyncContentTests(t, tests, snapshotClasses)
++}
++
++// TestVSCOnly_CreateSnapshotFinalError verifies that final errors from CreateSnapshot
++// are handled correctly (annotation removed, status updated with error).
++func TestVSCOnly_CreateSnapshotFinalError(t *testing.T) {
++	tests := []controllerTest{
++		{
++			name: "VSC-only: CreateSnapshot final error handled correctly",
++			initialContents: []*crdv1.VolumeSnapshotContent{
++				newVSCOnlyContent("content-error-1", "", defaultClass, "invalid-volume-handle", retainPolicy, &defaultSize, nil, true),
++			},
++			expectedContents: withContentAnnotations(
++				withContentStatus(
++					[]*crdv1.VolumeSnapshotContent{
++						newVSCOnlyContent("content-error-1", "", defaultClass, "invalid-volume-handle", retainPolicy, &defaultSize, &False, true),
++					},
++					&crdv1.VolumeSnapshotContentStatus{
++						SnapshotHandle: nil,
++						RestoreSize:    &defaultSize,
++						ReadyToUse:     &False,
++						Error:          newSnapshotError("Failed to create snapshot: failed to take snapshot of the volume invalid-volume-handle: \"invalid volume handle\""),
++					},
++				),
++				map[string]string{
++					utils.AnnVolumeSnapshotBeingCreated: "yes", // Annotation remains for non-gRPC errors (isCSIFinalError returns false for non-gRPC errors)
++				},
++			),
++			expectedEvents: []string{"Warning SnapshotCreationFailed"},
++			expectedCreateCalls: []createCall{
++				{
++					volumeHandle: "invalid-volume-handle",
++					snapshotName: "snapshot-vsc-uid-content-error-1",
++					driverName:   mockDriverName,
++					snapshotId:   "",
++					parameters: map[string]string{
++						utils.PrefixedVolumeSnapshotContentNameKey: "content-error-1",
++					},
++					secrets: map[string]string{
++						"foo": "bar",
++					},
++					creationTime: timeNow,
++					readyToUse:   false,
++					err:          errors.New("invalid volume handle"),
++				},
++			},
++			expectedListCalls: []listCall{},
++			expectSuccess:     false, // Error is returned from syncContent
++			expectRequeue:     true,  // Error causes requeue
++			initialSecrets:    []*v1.Secret{secret()},
++			errors:            noerrors,
++			test:              testSyncContent,
++		},
++	}
++	runSyncContentTests(t, tests, snapshotClasses)
++}
++
++// TestVSCOnly_CreateSnapshotInProgress verifies that CreateSnapshot in progress
++// (annotation set but no status yet) is handled correctly.
++func TestVSCOnly_CreateSnapshotInProgress(t *testing.T) {
++	content := newVSCOnlyContent("content-in-progress-1", "", defaultClass, "volume-handle-1", retainPolicy, &defaultSize, nil, true)
++	content.Annotations = map[string]string{
++		utils.AnnVolumeSnapshotBeingCreated: "yes",
++	}
++
++	tests := []controllerTest{
++		{
++			name: "VSC-only: CreateSnapshot in progress - status checked periodically",
++			initialContents: []*crdv1.VolumeSnapshotContent{
++				content,
++			},
++			expectedContents: []*crdv1.VolumeSnapshotContent{
++				content, // No changes - waiting for CSI response
++			},
++			expectedEvents:      noevents,
++			expectedCreateCalls: []createCall{}, // Not called again - already in progress
++			expectedListCalls:   []listCall{},
++			expectSuccess:       true,
++			expectRequeue:       true, // Controller should requeue to check status periodically
++			errors:              noerrors,
++			test:                testSyncContent,
++		},
++	}
++	runSyncContentTests(t, tests, snapshotClasses)
++}
++
++// TestVSCOnly_PartialStatus verifies that partially filled status
++// (SnapshotHandle present but ReadyToUse not set) is handled correctly.
++func TestVSCOnly_PartialStatus(t *testing.T) {
++	content := newVSCOnlyContent("content-partial-1", "snapuid-partial-1", defaultClass, "volume-handle-1", retainPolicy, &defaultSize, nil, true)
++	// SnapshotHandle is set, but ReadyToUse is nil
++
++	tests := []controllerTest{
++		{
++			name: "VSC-only: Partial status - ReadyToUse updated via ListSnapshots",
++			initialContents: []*crdv1.VolumeSnapshotContent{
++				content,
++			},
++			expectedContents: withContentStatus(
++				[]*crdv1.VolumeSnapshotContent{
++					newVSCOnlyContent("content-partial-1", "snapuid-partial-1", defaultClass, "volume-handle-1", retainPolicy, &defaultSize, &True, true),
++				},
++				&crdv1.VolumeSnapshotContentStatus{
++					SnapshotHandle: toStringPointer("snapuid-partial-1"),
++					RestoreSize:    &defaultSize,
++					ReadyToUse:     &True,
++				},
++			),
++			expectedEvents:      noevents,
++			expectedCreateCalls: []createCall{}, // Already has SnapshotHandle
++			expectedListCalls: []listCall{
++				{"snapuid-partial-1", map[string]string{"foo": "bar"}, true, time.Now(), 1, nil, ""},
++			},
++			initialSecrets: []*v1.Secret{secret()},
++			expectSuccess:  true,
++			errors:         noerrors,
++			test:           testSyncContent,
++		},
++	}
++	runSyncContentTests(t, tests, snapshotClasses)
++}
++
++// TestVSCOnly_DeletionRetainPolicy verifies that VSC with Retain policy
++// does not call DeleteSnapshot when deleted.
++func TestVSCOnly_DeletionRetainPolicy(t *testing.T) {
++	deletionTime := metav1.Now()
++	content := newVSCOnlyContent("content-retain-1", "snapuid-retain-1", defaultClass, "volume-handle-1", retainPolicy, &defaultSize, &True, true)
++	content.DeletionTimestamp = &deletionTime
++
++	expectedContent := newVSCOnlyContent("content-retain-1", "snapuid-retain-1", defaultClass, "volume-handle-1", retainPolicy, &defaultSize, &True, false)
++
++	tests := []controllerTest{
++		{
++			name: "VSC-only: Retain policy - no DeleteSnapshot called",
++			initialContents: []*crdv1.VolumeSnapshotContent{
++				content,
++			},
++			expectedContents: []*crdv1.VolumeSnapshotContent{
++				expectedContent, // Finalizer removed, but snapshot retained
++			},
++			expectedEvents:      noevents,
++			expectedDeleteCalls: []deleteCall{}, // No deletion for Retain policy
++			expectedListCalls:   []listCall{},
++			expectSuccess:       true,
++			errors:              noerrors,
++			test:                testSyncContent,
++		},
++	}
++	runSyncContentTests(t, tests, snapshotClasses)
++}
+diff --git a/pkg/sidecar-controller/vsc_test_helpers.go b/pkg/sidecar-controller/vsc_test_helpers.go
+new file mode 100644
+index 000000000..0c4a64526
+--- /dev/null
++++ b/pkg/sidecar-controller/vsc_test_helpers.go
+@@ -0,0 +1,52 @@
++/*
++Copyright 2019 The Kubernetes Authors.
++
++Licensed under the Apache License, Version 2.0 (the "License");
++you may not use this file except in compliance with the License.
++You may obtain a copy of the License at
++
++    http://www.apache.org/licenses/LICENSE-2.0
++
++Unless required by applicable law or agreed to in writing, software
++distributed under the License is distributed on an "AS IS" BASIS,
++WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++See the License for the specific language governing permissions and
++limitations under the License.
++*/
++
++package sidecar_controller
++
++import (
++	crdv1 "github.com/kubernetes-csi/external-snapshotter/client/v8/apis/volumesnapshot/v1"
++	vscmodetesting "github.com/kubernetes-csi/external-snapshotter/v8/pkg/vscmode/testing"
++)
++
++// testConfig is the test configuration for sidecar-controller tests.
++// These constants match the ones from framework_test.go.
++const (
++	vscTestDriverName = "csi-mock-plugin"
++	vscTestNamespace  = "default"
++)
++
++var testConfig = vscmodetesting.TestConfig{
++	DriverName:    vscTestDriverName,
++	TestNamespace: vscTestNamespace,
++}
++
++// newVSCOnlyContent creates a VSC without VolumeSnapshotRef (VSC-only model).
++// This is a wrapper around vscmode/testing.NewVSCOnlyContent that uses
++// sidecar-controller test configuration.
++func newVSCOnlyContent(contentName, snapshotHandle, snapshotClassName, volumeHandle string,
++	deletionPolicy crdv1.DeletionPolicy, size *int64, readyToUse *bool,
++	withFinalizer bool) *crdv1.VolumeSnapshotContent {
++	return vscmodetesting.NewVSCOnlyContent(testConfig, contentName, snapshotHandle, snapshotClassName, volumeHandle, deletionPolicy, size, readyToUse, withFinalizer)
++}
++
++// newVSCWithVolumeSnapshotRef creates a VSC with VolumeSnapshotRef (legacy, for backward compatibility tests).
++// This is a wrapper around vscmode/testing.NewVSCWithVolumeSnapshotRef that uses
++// sidecar-controller test configuration.
++func newVSCWithVolumeSnapshotRef(contentName, boundToSnapshotUID, boundToSnapshotName, snapshotHandle, snapshotClassName, volumeHandle string,
++	deletionPolicy crdv1.DeletionPolicy, size *int64, readyToUse *bool,
++	withFinalizer bool) *crdv1.VolumeSnapshotContent {
++	return vscmodetesting.NewVSCWithVolumeSnapshotRef(testConfig, contentName, boundToSnapshotUID, boundToSnapshotName, snapshotHandle, snapshotClassName, volumeHandle, deletionPolicy, size, readyToUse, withFinalizer)
++}
+diff --git a/pkg/vscmode/config.go b/pkg/vscmode/config.go
+new file mode 100644
+index 000000000..6175fcf5a
+--- /dev/null
++++ b/pkg/vscmode/config.go
+@@ -0,0 +1,53 @@
++/*
++Copyright 2019 The Kubernetes Authors.
++
++Licensed under the Apache License, Version 2.0 (the "License");
++you may not use this file except in compliance with the License.
++You may obtain a copy of the License at
++
++    http://www.apache.org/licenses/LICENSE-2.0
++
++Unless required by applicable law or agreed to in writing, software
++distributed under the License is distributed on an "AS IS" BASIS,
++WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++See the License for the specific language governing permissions and
++limitations under the License.
++*/
++
++package vscmode
++
++import (
++	"os"
++	"strings"
++)
++
++const (
++	// EnvVSCMode is the environment variable name for VSC mode configuration
++	EnvVSCMode = "SNAPSHOT_CONTROLLER_VSC_MODE"
++
++	// ModeLegacy is the legacy mode (upstream behavior)
++	ModeLegacy = "legacy"
++
++	// ModeVSCOnly is the VSC-only mode (downstream extension)
++	ModeVSCOnly = "vsc-only"
++)
++
++// GetVSCMode returns the configured VSCMode instance.
++// Priority:
++// 1. Environment variable SNAPSHOT_CONTROLLER_VSC_MODE
++// 2. Default: VSCOnlyMode (for Deckhouse builds)
++func GetVSCMode() VSCMode {
++	mode := os.Getenv(EnvVSCMode)
++	mode = strings.ToLower(strings.TrimSpace(mode))
++
++	switch mode {
++	case ModeLegacy:
++		return NewLegacyVSCMode()
++	case ModeVSCOnly, "":
++		// Default to VSC-only mode for Deckhouse builds
++		return NewVSCOnlyMode()
++	default:
++		// Unknown mode, default to VSC-only
++		return NewVSCOnlyMode()
++	}
++}
+diff --git a/pkg/vscmode/legacy.go b/pkg/vscmode/legacy.go
+new file mode 100644
+index 000000000..c5ae881d4
+--- /dev/null
++++ b/pkg/vscmode/legacy.go
+@@ -0,0 +1,147 @@
++/*
++Copyright 2019 The Kubernetes Authors.
++
++Licensed under the Apache License, Version 2.0 (the "License");
++you may not use this file except in compliance with the License.
++You may obtain a copy of the License at
++
++    http://www.apache.org/licenses/LICENSE-2.0
++
++Unless required by applicable law or agreed to in writing, software
++distributed under the License is distributed on an "AS IS" BASIS,
++WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++See the License for the specific language governing permissions and
++limitations under the License.
++*/
++
++package vscmode
++
++import (
++	crdv1 "github.com/kubernetes-csi/external-snapshotter/client/v8/apis/volumesnapshot/v1"
++	"github.com/kubernetes-csi/external-snapshotter/v8/pkg/utils"
++	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
++)
++
++// LegacyVSCMode implements upstream snapshot-controller behavior.
++// This mode requires VolumeSnapshotRef to be set and uses VolumeSnapshotRef.UID for snapshot naming.
++//
++// This implementation preserves upstream semantics exactly as they are in the original
++// snapshot-controller, ensuring that legacy behavior remains unchanged when VSC-only
++// mode is not enabled. This is critical for maintaining upstream compatibility.
++type LegacyVSCMode struct{}
++
++// NewLegacyVSCMode creates a new LegacyVSCMode instance.
++func NewLegacyVSCMode() VSCMode {
++	return &LegacyVSCMode{}
++}
++
++// IsVSCOnly returns false for legacy mode (always requires VolumeSnapshotRef).
++func (m *LegacyVSCMode) IsVSCOnly(content *crdv1.VolumeSnapshotContent) bool {
++	return false
++}
++
++// SnapshotUID returns VolumeSnapshotRef.UID for legacy mode.
++// This matches upstream behavior where snapshot name is generated from VolumeSnapshot UID.
++func (m *LegacyVSCMode) SnapshotUID(content *crdv1.VolumeSnapshotContent) string {
++	return string(content.Spec.VolumeSnapshotRef.UID)
++}
++
++// ShouldCreateSnapshot returns true if CreateSnapshot should be called.
++// For legacy mode, this follows upstream logic:
++// - VolumeHandle must be present
++// - Status must be nil OR SnapshotHandle must be nil (not already created)
++// - Not a group snapshot member
++func (m *LegacyVSCMode) ShouldCreateSnapshot(content *crdv1.VolumeSnapshotContent) bool {
++	// Legacy mode requires VolumeSnapshotRef.UID to be set
++	if content.Spec.VolumeSnapshotRef.UID == "" {
++		return false
++	}
++
++	// Standard upstream checks
++	if content.Spec.Source.VolumeHandle == nil {
++		return false
++	}
++
++	// If Status exists and SnapshotHandle is set, snapshot was already created
++	if content.Status != nil && content.Status.SnapshotHandle != nil {
++		return false
++	}
++
++	_, groupSnapshotMember := content.Annotations[utils.VolumeGroupSnapshotHandleAnnotation]
++	if groupSnapshotMember {
++		return false
++	}
++
++	return true
++}
++
++// ShouldDeleteSnapshot returns true if DeleteSnapshot should be called.
++// For legacy mode, this follows upstream logic:
++// - DeletionTimestamp must be set
++// - AnnVolumeSnapshotBeingCreated must not be set (not in progress)
++// - For pre-provisioned: VolumeSnapshotRef.UID == "" means delete immediately
++// - AnnVolumeSnapshotBeingDeleted annotation triggers deletion
++func (m *LegacyVSCMode) ShouldDeleteSnapshot(content *crdv1.VolumeSnapshotContent) bool {
++	if content.ObjectMeta.DeletionTimestamp == nil {
++		return false
++	}
++
++	// Don't delete if CreateSnapshot is in progress
++	if metav1.HasAnnotation(content.ObjectMeta, utils.AnnVolumeSnapshotBeingCreated) {
++		return false
++	}
++
++	// Legacy: For pre-provisioned snapshots (SnapshotHandle in Source and VolumeSnapshotRef.UID == ""), delete immediately.
++	if content.Spec.Source.SnapshotHandle != nil && content.Spec.VolumeSnapshotRef.UID == "" {
++		return true
++	}
++
++	// Legacy: shouldDelete returns true if AnnVolumeSnapshotBeingDeleted annotation is set.
++	if metav1.HasAnnotation(content.ObjectMeta, utils.AnnVolumeSnapshotBeingDeleted) {
++		return true
++	}
++
++	return false
++}
++
++// ShouldSkipCreateForInProgress returns true if CreateSnapshot should be skipped
++// because it's already in progress (annotation set but not completed).
++// For legacy mode, this follows upstream behavior.
++func (m *LegacyVSCMode) ShouldSkipCreateForInProgress(content *crdv1.VolumeSnapshotContent) bool {
++	// Check if annotation is set
++	if !metav1.HasAnnotation(content.ObjectMeta, utils.AnnVolumeSnapshotBeingCreated) {
++		return false
++	}
++
++	// If annotation is set but content is not ready, CreateSnapshot is in progress
++	// Content is ready if Status exists, SnapshotHandle is set, and ReadyToUse is true
++	if content.Status == nil || content.Status.SnapshotHandle == nil {
++		return true // CreateSnapshot in progress, skip calling it again
++	}
++
++	// If SnapshotHandle exists but ReadyToUse is false, still in progress
++	if content.Status.ReadyToUse == nil || !*content.Status.ReadyToUse {
++		return true
++	}
++
++	return false // Content is ready, no need to skip
++}
++
++// ShouldSkip returns false for legacy mode - upstream never skips content processing.
++// Legacy mode always requires VolumeHandle or SnapshotHandle to be present.
++func (m *LegacyVSCMode) ShouldSkip(content *crdv1.VolumeSnapshotContent) bool {
++	// Upstream behavior: never skip content processing
++	// If VolumeHandle is nil, it's either pre-provisioned (has SnapshotHandle) or an error
++	return false
++}
++
++// IsValidContentForReconcile returns true if the VolumeSnapshotContent should be
++// added to the controller's work queue for reconciliation.
++// For legacy mode: follows upstream behavior - filters out content without VolumeHandle or SnapshotHandle.
++func (m *LegacyVSCMode) IsValidContentForReconcile(content *crdv1.VolumeSnapshotContent) bool {
++	// Upstream behavior: content must have either VolumeHandle or SnapshotHandle
++	if content.Spec.Source.VolumeHandle == nil && content.Spec.Source.SnapshotHandle == nil {
++		return false
++	}
++	return true
++}
+diff --git a/pkg/vscmode/testing/helpers.go b/pkg/vscmode/testing/helpers.go
+new file mode 100644
+index 000000000..adcdf6dec
+--- /dev/null
++++ b/pkg/vscmode/testing/helpers.go
+@@ -0,0 +1,112 @@
++/*
++Copyright 2019 The Kubernetes Authors.
++
++Licensed under the Apache License, Version 2.0 (the "License");
++you may not use this file except in compliance with the License.
++You may obtain a copy of the License at
++
++    http://www.apache.org/licenses/LICENSE-2.0
++
++Unless required by applicable law or agreed to in writing, software
++distributed under the License is distributed on an "AS IS" BASIS,
++WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++See the License for the specific language governing permissions and
++limitations under the License.
++*/
++
++package testing
++
++import (
++	crdv1 "github.com/kubernetes-csi/external-snapshotter/client/v8/apis/volumesnapshot/v1"
++	"github.com/kubernetes-csi/external-snapshotter/v8/pkg/utils"
++	v1 "k8s.io/api/core/v1"
++	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
++	"k8s.io/apimachinery/pkg/types"
++)
++
++// TestConfig contains test configuration constants.
++// These can be overridden by test packages that import vscmode/testing.
++type TestConfig struct {
++	DriverName    string
++	TestNamespace string
++}
++
++// DefaultTestConfig returns default test configuration.
++func DefaultTestConfig() TestConfig {
++	return TestConfig{
++		DriverName:    "csi-mock-plugin",
++		TestNamespace: "default",
++	}
++}
++
++// NewVSCOnlyContent creates a VSC without VolumeSnapshotRef (VSC-only model).
++// Used by contract, compatibility, and edge-case tests.
++func NewVSCOnlyContent(config TestConfig, contentName, snapshotHandle, snapshotClassName, volumeHandle string,
++	deletionPolicy crdv1.DeletionPolicy, size *int64, readyToUse *bool,
++	withFinalizer bool) *crdv1.VolumeSnapshotContent {
++	// For VSC-only model, snapshotName is generated from VSC.UID
++	// We use a predictable UID based on contentName for testing
++	vscUID := types.UID("vsc-uid-" + contentName)
++	content := &crdv1.VolumeSnapshotContent{
++		ObjectMeta: metav1.ObjectMeta{
++			Name:            contentName,
++			UID:             vscUID,
++			ResourceVersion: "1",
++		},
++		Spec: crdv1.VolumeSnapshotContentSpec{
++			Driver:         config.DriverName,
++			DeletionPolicy: deletionPolicy,
++			// VolumeSnapshotRef is empty - VSC-only model
++			VolumeSnapshotRef: v1.ObjectReference{},
++		},
++		Status: &crdv1.VolumeSnapshotContentStatus{},
++	}
++
++	if snapshotClassName != "" {
++		content.Spec.VolumeSnapshotClassName = &snapshotClassName
++	}
++
++	if volumeHandle != "" {
++		content.Spec.Source = crdv1.VolumeSnapshotContentSource{
++			VolumeHandle: &volumeHandle,
++		}
++	}
++
++	if snapshotHandle != "" {
++		content.Status.SnapshotHandle = &snapshotHandle
++	}
++
++	if size != nil {
++		content.Status.RestoreSize = size
++	}
++
++	if readyToUse != nil {
++		content.Status.ReadyToUse = readyToUse
++	}
++
++	if withFinalizer {
++		content.ObjectMeta.Finalizers = append(content.ObjectMeta.Finalizers, utils.VolumeSnapshotContentFinalizer)
++	}
++
++	return content
++}
++
++// NewVSCWithVolumeSnapshotRef creates a VSC with VolumeSnapshotRef (legacy, for backward compatibility tests).
++// Used by compatibility tests to verify upstream behavior.
++func NewVSCWithVolumeSnapshotRef(config TestConfig, contentName, boundToSnapshotUID, boundToSnapshotName, snapshotHandle, snapshotClassName, volumeHandle string,
++	deletionPolicy crdv1.DeletionPolicy, size *int64, readyToUse *bool,
++	withFinalizer bool) *crdv1.VolumeSnapshotContent {
++	content := NewVSCOnlyContent(config, contentName, snapshotHandle, snapshotClassName, volumeHandle, deletionPolicy, size, readyToUse, withFinalizer)
++
++	if boundToSnapshotName != "" {
++		content.Spec.VolumeSnapshotRef = v1.ObjectReference{
++			Kind:       "VolumeSnapshot",
++			APIVersion: "snapshot.storage.k8s.io/v1",
++			UID:        types.UID(boundToSnapshotUID),
++			Namespace:  config.TestNamespace,
++			Name:       boundToSnapshotName,
++		}
++	}
++
++	return content
++}
+diff --git a/pkg/vscmode/vsc_only.go b/pkg/vscmode/vsc_only.go
+new file mode 100644
+index 000000000..f69589102
+--- /dev/null
++++ b/pkg/vscmode/vsc_only.go
+@@ -0,0 +1,174 @@
++/*
++Copyright 2019 The Kubernetes Authors.
++
++Licensed under the Apache License, Version 2.0 (the "License");
++you may not use this file except in compliance with the License.
++You may obtain a copy of the License at
++
++    http://www.apache.org/licenses/LICENSE-2.0
++
++Unless required by applicable law or agreed to in writing, software
++distributed under the License is distributed on an "AS IS" BASIS,
++WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++See the License for the specific language governing permissions and
++limitations under the License.
++*/
++
++package vscmode
++
++import (
++	crdv1 "github.com/kubernetes-csi/external-snapshotter/client/v8/apis/volumesnapshot/v1"
++	"github.com/kubernetes-csi/external-snapshotter/v8/pkg/utils"
++	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
++)
++
++// VSCOnlyMode implements VSC-only model behavior.
++// In this mode, VolumeSnapshotContent can exist without VolumeSnapshot,
++// and VolumeSnapshotRef is completely empty.
++//
++// This is a downstream extension that allows VSC to be managed independently
++// by external controllers (e.g., VCR) without requiring VolumeSnapshot objects.
++// All downstream-specific logic is isolated in this implementation to facilitate
++// clean rebases from upstream snapshot-controller.
++type VSCOnlyMode struct{}
++
++// NewVSCOnlyMode creates a new VSCOnlyMode instance.
++func NewVSCOnlyMode() VSCMode {
++	return &VSCOnlyMode{}
++}
++
++// IsVSCOnly returns true if VolumeSnapshotRef is completely empty (VSC-only model).
++func (m *VSCOnlyMode) IsVSCOnly(content *crdv1.VolumeSnapshotContent) bool {
++	return content.Spec.VolumeSnapshotRef.UID == "" &&
++		content.Spec.VolumeSnapshotRef.Name == "" &&
++		content.Spec.VolumeSnapshotRef.Namespace == ""
++}
++
++// SnapshotUID returns VolumeSnapshotContent.UID for VSC-only mode.
++// This allows VSC-only snapshots to work without VolumeSnapshot.
++// NOTE: We use content.UID (not content.Name) to match legacy behavior where VolumeSnapshotRef.UID is used.
++// content.UID is stable for the lifetime of the object, but changes if VSC is recreated.
++func (m *VSCOnlyMode) SnapshotUID(content *crdv1.VolumeSnapshotContent) string {
++	if content.Spec.VolumeSnapshotRef.UID != "" {
++		// Legacy mode: VolumeSnapshotRef is set - use it for backward compatibility
++		return string(content.Spec.VolumeSnapshotRef.UID)
++	}
++	// VSC-only mode: VolumeSnapshotRef is empty - use VSC.UID
++	return string(content.UID)
++}
++
++// ShouldCreateSnapshot returns true if CreateSnapshot should be called.
++// For VSC-only mode:
++// - VolumeHandle must be present
++// - Status must be nil OR SnapshotHandle must be nil (not already created)
++// - Not a group snapshot member
++// - Works with or without VolumeSnapshotRef
++func (m *VSCOnlyMode) ShouldCreateSnapshot(content *crdv1.VolumeSnapshotContent) bool {
++	if content.Spec.Source.VolumeHandle == nil {
++		return false
++	}
++
++	// If Status exists and SnapshotHandle is set, snapshot was already created
++	if content.Status != nil && content.Status.SnapshotHandle != nil {
++		return false
++	}
++
++	_, groupSnapshotMember := content.Annotations[utils.VolumeGroupSnapshotHandleAnnotation]
++	if groupSnapshotMember {
++		return false
++	}
++
++	return true
++}
++
++// ShouldDeleteSnapshot returns true if DeleteSnapshot should be called.
++// For VSC-only mode:
++//   - DeletionTimestamp must be set
++//   - AnnVolumeSnapshotBeingCreated must not be set (not in progress)
++//   - AnnVolumeSnapshotBeingDeleted annotation triggers deletion (set by common-controller)
++//   - If DeletionTimestamp is set and we have SnapshotHandle in status, proceed with deletion
++//     (common-controller may not set the annotation for VSC-only, so we check status directly)
++//
++// Invariants enforced:
++//   - Does not delete if DeletionTimestamp is nil
++//   - Does not delete if CreateSnapshot is in progress (AnnVolumeSnapshotBeingCreated set)
++//   - Does not delete if snapshot not yet created (Status.SnapshotHandle is nil)
++//   - DeletionPolicy check is performed in sidecar-controller before calling DeleteSnapshot
++func (m *VSCOnlyMode) ShouldDeleteSnapshot(content *crdv1.VolumeSnapshotContent) bool {
++	if content.ObjectMeta.DeletionTimestamp == nil {
++		return false
++	}
++
++	// Don't delete if CreateSnapshot is in progress
++	if metav1.HasAnnotation(content.ObjectMeta, utils.AnnVolumeSnapshotBeingCreated) {
++		return false
++	}
++
++	// Legacy: For pre-provisioned snapshots (SnapshotHandle in Source and VolumeSnapshotRef.UID == ""), delete immediately.
++	if content.Spec.Source.SnapshotHandle != nil && content.Spec.VolumeSnapshotRef.UID == "" {
++		return true
++	}
++
++	// VSC-only or legacy: shouldDelete returns true if AnnVolumeSnapshotBeingDeleted annotation is set.
++	// This annotation is set by common-controller when deletion should proceed.
++	if metav1.HasAnnotation(content.ObjectMeta, utils.AnnVolumeSnapshotBeingDeleted) {
++		return true
++	}
++
++	// VSC-only model: If DeletionTimestamp is set and we have SnapshotHandle in status,
++	// we can proceed with deletion. This covers VSC-only snapshots created by VCR.
++	// Common-controller may not set the annotation for VSC-only, so we check status directly.
++	if content.Status != nil && content.Status.SnapshotHandle != nil {
++		// We have a snapshot to delete - proceed with deletion
++		return true
++	}
++
++	return false
++}
++
++// ShouldSkipCreateForInProgress returns true if CreateSnapshot should be skipped
++// because it's already in progress (annotation set but not completed).
++// For VSC-only mode, this handles async CreateSnapshot scenarios.
++func (m *VSCOnlyMode) ShouldSkipCreateForInProgress(content *crdv1.VolumeSnapshotContent) bool {
++	// Check if annotation is set
++	if !metav1.HasAnnotation(content.ObjectMeta, utils.AnnVolumeSnapshotBeingCreated) {
++		return false
++	}
++
++	// If annotation is set but content is not ready, CreateSnapshot is in progress
++	// Content is ready if Status exists, SnapshotHandle is set, and ReadyToUse is true
++	if content.Status == nil || content.Status.SnapshotHandle == nil {
++		return true // CreateSnapshot in progress, skip calling it again
++	}
++
++	// If SnapshotHandle exists but ReadyToUse is false, still in progress
++	if content.Status.ReadyToUse == nil || !*content.Status.ReadyToUse {
++		return true
++	}
++
++	return false // Content is ready, no need to skip
++}
++
++// ShouldSkip returns true if the VolumeSnapshotContent should be skipped entirely.
++// For VSC-only mode: skip if VolumeHandle is nil and SnapshotHandle is also nil.
++// This is downstream-specific behavior - upstream would consider this an error.
++func (m *VSCOnlyMode) ShouldSkip(content *crdv1.VolumeSnapshotContent) bool {
++	// VSC-only model: If VolumeHandle is nil, we can't create snapshot and can't check status.
++	// Skip processing such VSC if SnapshotHandle is also nil (it may be pre-provisioned
++	// with SnapshotHandle, but that's handled separately).
++	if content.Spec.Source.VolumeHandle == nil && (content.Status == nil || content.Status.SnapshotHandle == nil) {
++		return true
++	}
++	return false
++}
++
++// IsValidContentForReconcile returns true if the VolumeSnapshotContent should be
++// added to the controller's work queue for reconciliation.
++// For VSC-only mode: allows content without VolumeHandle/SnapshotHandle to be processed
++// (it will be skipped in syncContent via ShouldSkip, but we need to add it to reactor for testing).
++// This is downstream-specific behavior - upstream would filter out such content.
++func (m *VSCOnlyMode) IsValidContentForReconcile(content *crdv1.VolumeSnapshotContent) bool {
++	// VSC-only mode: allow content without VolumeHandle/SnapshotHandle to be processed
++	// The actual skipping logic is handled in syncContent via ShouldSkip()
++	return true
++}
+diff --git a/pkg/vscmode/vscmode.go b/pkg/vscmode/vscmode.go
+new file mode 100644
+index 000000000..0cc522460
+--- /dev/null
++++ b/pkg/vscmode/vscmode.go
+@@ -0,0 +1,72 @@
++/*
++Copyright 2019 The Kubernetes Authors.
++
++Licensed under the Apache License, Version 2.0 (the "License");
++you may not use this file except in compliance with the License.
++You may obtain a copy of the License at
++
++    http://www.apache.org/licenses/LICENSE-2.0
++
++Unless required by applicable law or agreed to in writing, software
++distributed under the License is distributed on an "AS IS" BASIS,
++WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++See the License for the specific language governing permissions and
++limitations under the License.
++*/
++
++package vscmode
++
++import (
++	crdv1 "github.com/kubernetes-csi/external-snapshotter/client/v8/apis/volumesnapshot/v1"
++)
++
++// VSCMode defines the interface for VolumeSnapshotContent mode handling.
++// This abstraction allows downstream extensions (like VSC-only mode) to be
++// isolated from upstream snapshot-controller logic, making rebases easier.
++type VSCMode interface {
++	// IsVSCOnly returns true if the VolumeSnapshotContent is in VSC-only mode
++	// (i.e., VolumeSnapshotRef is completely empty, no VolumeSnapshot involved).
++	IsVSCOnly(content *crdv1.VolumeSnapshotContent) bool
++
++	// SnapshotUID returns the UID to use for snapshot name generation.
++	// This UID is used to create a deterministic snapshot name that CSI drivers can use
++	// to identify and manage snapshots consistently.
++	//
++	// Upstream semantics (legacy mode):
++	//   - Returns VolumeSnapshotRef.UID (the UID of the bound VolumeSnapshot object)
++	//   - This ensures snapshot names are tied to VolumeSnapshot lifecycle
++	//
++	// Downstream extension (VSC-only mode):
++	//   - Returns VolumeSnapshotContent.UID when VolumeSnapshotRef is empty
++	//   - This allows VSC-only snapshots to work without VolumeSnapshot objects
++	//   - For backward compatibility, if VolumeSnapshotRef.UID is set, it's used instead
++	//
++	// The returned UID is used by makeSnapshotName() to generate CSI snapshot names
++	// in the format: "{prefix}-{snapshotUID}" (with optional truncation).
++	SnapshotUID(content *crdv1.VolumeSnapshotContent) string
++
++	// ShouldCreateSnapshot determines if CreateSnapshot should be called.
++	// This encapsulates the logic for when to create snapshots based on the mode.
++	ShouldCreateSnapshot(content *crdv1.VolumeSnapshotContent) bool
++
++	// ShouldDeleteSnapshot determines if DeleteSnapshot should be called.
++	// This encapsulates deletion logic based on the mode and content state.
++	ShouldDeleteSnapshot(content *crdv1.VolumeSnapshotContent) bool
++
++	// ShouldSkipCreateForInProgress returns true if CreateSnapshot should be skipped
++	// because it's already in progress (annotation set but not completed).
++	// This handles async CreateSnapshot scenarios where CSI drivers perform creation asynchronously.
++	ShouldSkipCreateForInProgress(content *crdv1.VolumeSnapshotContent) bool
++
++	// ShouldSkip returns true if the VolumeSnapshotContent should be skipped entirely
++	// (no CreateSnapshot, no status check). This is used for VSC-only content that
++	// lacks both VolumeHandle and SnapshotHandle.
++	ShouldSkip(content *crdv1.VolumeSnapshotContent) bool
++
++	// IsValidContentForReconcile returns true if the VolumeSnapshotContent should be
++	// added to the controller's work queue for reconciliation.
++	// This is used by isDriverMatch to determine if content should be processed.
++	// Upstream logic filters out contents without any source (VolumeHandle or SnapshotHandle).
++	// Downstream (VSC-only) needs to see such objects in sync for proper handling.
++	IsValidContentForReconcile(content *crdv1.VolumeSnapshotContent) bool
++}
+diff --git a/pkg/vscmode/vscmode_test.go b/pkg/vscmode/vscmode_test.go
+new file mode 100644
+index 000000000..060eb1e6b
+--- /dev/null
++++ b/pkg/vscmode/vscmode_test.go
+@@ -0,0 +1,699 @@
++/*
++Copyright 2019 The Kubernetes Authors.
++
++Licensed under the Apache License, Version 2.0 (the "License");
++you may not use this file except in compliance with the License.
++You may obtain a copy of the License at
++
++    http://www.apache.org/licenses/LICENSE-2.0
++
++Unless required by applicable law or agreed to in writing, software
++distributed under the License is distributed on an "AS IS" BASIS,
++WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++See the License for the specific language governing permissions and
++limitations under the License.
++*/
++
++package vscmode
++
++import (
++	"testing"
++
++	crdv1 "github.com/kubernetes-csi/external-snapshotter/client/v8/apis/volumesnapshot/v1"
++	"github.com/kubernetes-csi/external-snapshotter/v8/pkg/utils"
++	v1 "k8s.io/api/core/v1"
++	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
++	"k8s.io/apimachinery/pkg/types"
++)
++
++// TestVSCModeIsolation verifies that VSCMode implementations are properly isolated.
++// This test ensures that:
++// - VSC-only mode works correctly
++// - Legacy mode maintains upstream behavior
++// - Modes don't interfere with each other
++
++func TestVSCModeIsolation_LegacyMode(t *testing.T) {
++	legacyMode := NewLegacyVSCMode()
++
++	// Legacy VSC with VolumeSnapshotRef
++	legacyContent := &crdv1.VolumeSnapshotContent{
++		ObjectMeta: metav1.ObjectMeta{
++			Name: "legacy-content",
++			UID:  types.UID("legacy-content-uid"),
++		},
++		Spec: crdv1.VolumeSnapshotContentSpec{
++			VolumeSnapshotRef: v1.ObjectReference{
++				UID: types.UID("snapshot-uid"),
++			},
++		},
++	}
++
++	// Legacy mode should not recognize VSC-only
++	if legacyMode.IsVSCOnly(legacyContent) {
++		t.Error("Legacy mode should not recognize VSC with VolumeSnapshotRef as VSC-only")
++	}
++
++	// Legacy mode should use VolumeSnapshotRef.UID
++	uid := legacyMode.SnapshotUID(legacyContent)
++	if uid != "snapshot-uid" {
++		t.Errorf("Legacy mode should use VolumeSnapshotRef.UID, got %s", uid)
++	}
++}
++
++func TestVSCModeIsolation_VSCOnlyMode(t *testing.T) {
++	vscOnlyMode := NewVSCOnlyMode()
++
++	// VSC-only content without VolumeSnapshotRef
++	vscOnlyContent := &crdv1.VolumeSnapshotContent{
++		ObjectMeta: metav1.ObjectMeta{
++			Name: "vsc-only-content",
++			UID:  types.UID("vsc-only-content-uid"),
++		},
++		Spec: crdv1.VolumeSnapshotContentSpec{
++			VolumeSnapshotRef: v1.ObjectReference{}, // Empty
++		},
++	}
++
++	// VSC-only mode should recognize empty VolumeSnapshotRef
++	if !vscOnlyMode.IsVSCOnly(vscOnlyContent) {
++		t.Error("VSC-only mode should recognize VSC without VolumeSnapshotRef")
++	}
++
++	// VSC-only mode should use VSC.UID
++	uid := vscOnlyMode.SnapshotUID(vscOnlyContent)
++	if uid != "vsc-only-content-uid" {
++		t.Errorf("VSC-only mode should use VSC.UID, got %s", uid)
++	}
++}
++
++func TestVSCModeIsolation_VSCOnlyBackwardCompatibility(t *testing.T) {
++	vscOnlyMode := NewVSCOnlyMode()
++
++	// VSC with VolumeSnapshotRef (legacy) should still work in VSC-only mode
++	legacyContent := &crdv1.VolumeSnapshotContent{
++		ObjectMeta: metav1.ObjectMeta{
++			Name: "legacy-content",
++			UID:  types.UID("legacy-content-uid"),
++		},
++		Spec: crdv1.VolumeSnapshotContentSpec{
++			VolumeSnapshotRef: v1.ObjectReference{
++				UID: types.UID("snapshot-uid"),
++			},
++		},
++	}
++
++	// VSC-only mode should not recognize legacy VSC as VSC-only
++	if vscOnlyMode.IsVSCOnly(legacyContent) {
++		t.Error("VSC-only mode should not recognize VSC with VolumeSnapshotRef as VSC-only")
++	}
++
++	// But should still use VolumeSnapshotRef.UID for backward compatibility
++	uid := vscOnlyMode.SnapshotUID(legacyContent)
++	if uid != "snapshot-uid" {
++		t.Errorf("VSC-only mode should use VolumeSnapshotRef.UID for backward compatibility, got %s", uid)
++	}
++}
++
++func TestVSCModeIsolation_ShouldCreateSnapshot(t *testing.T) {
++	vscOnlyMode := NewVSCOnlyMode()
++	legacyMode := NewLegacyVSCMode()
++
++	volumeHandle := "volume-handle-1"
++
++	// VSC-only content without VolumeSnapshotRef
++	vscOnlyContent := &crdv1.VolumeSnapshotContent{
++		ObjectMeta: metav1.ObjectMeta{
++			Name: "vsc-only-content",
++			UID:  types.UID("vsc-only-content-uid"),
++		},
++		Spec: crdv1.VolumeSnapshotContentSpec{
++			Source: crdv1.VolumeSnapshotContentSource{
++				VolumeHandle: &volumeHandle,
++			},
++			VolumeSnapshotRef: v1.ObjectReference{}, // Empty
++		},
++		Status: nil,
++	}
++
++	// VSC-only mode should allow CreateSnapshot
++	if !vscOnlyMode.ShouldCreateSnapshot(vscOnlyContent) {
++		t.Error("VSC-only mode should allow CreateSnapshot for VSC without VolumeSnapshotRef")
++	}
++
++	// Legacy mode should NOT allow CreateSnapshot (requires VolumeSnapshotRef.UID)
++	if legacyMode.ShouldCreateSnapshot(vscOnlyContent) {
++		t.Error("Legacy mode should NOT allow CreateSnapshot for VSC without VolumeSnapshotRef.UID")
++	}
++
++	// Legacy VSC with VolumeSnapshotRef
++	legacyContent := &crdv1.VolumeSnapshotContent{
++		ObjectMeta: metav1.ObjectMeta{
++			Name: "legacy-content",
++			UID:  types.UID("legacy-content-uid"),
++		},
++		Spec: crdv1.VolumeSnapshotContentSpec{
++			Source: crdv1.VolumeSnapshotContentSource{
++				VolumeHandle: &volumeHandle,
++			},
++			VolumeSnapshotRef: v1.ObjectReference{
++				UID: types.UID("snapshot-uid"),
++			},
++		},
++		Status: nil,
++	}
++
++	// Both modes should allow CreateSnapshot for legacy VSC
++	if !legacyMode.ShouldCreateSnapshot(legacyContent) {
++		t.Error("Legacy mode should allow CreateSnapshot for VSC with VolumeSnapshotRef")
++	}
++
++	if !vscOnlyMode.ShouldCreateSnapshot(legacyContent) {
++		t.Error("VSC-only mode should allow CreateSnapshot for legacy VSC (backward compatibility)")
++	}
++}
++
++// TestVSCModeIsolation_ShouldSkipCreateForInProgress verifies that ShouldSkipCreateForInProgress
++// correctly handles async CreateSnapshot scenarios.
++func TestVSCModeIsolation_ShouldSkipCreateForInProgress(t *testing.T) {
++	legacyMode := NewLegacyVSCMode()
++	vscOnlyMode := NewVSCOnlyMode()
++
++	volumeHandle := "volume-handle-1"
++	True := true
++	False := false
++
++	tests := []struct {
++		name           string
++		mode           VSCMode
++		content        *crdv1.VolumeSnapshotContent
++		expectedResult bool
++		description    string
++	}{
++		{
++			name: "Legacy: No annotation - should not skip",
++			mode: legacyMode,
++			content: &crdv1.VolumeSnapshotContent{
++				ObjectMeta: metav1.ObjectMeta{
++					Name: "legacy-content",
++					UID:  types.UID("legacy-content-uid"),
++				},
++				Spec: crdv1.VolumeSnapshotContentSpec{
++					VolumeSnapshotRef: v1.ObjectReference{UID: types.UID("snapshot-uid")},
++					Source:            crdv1.VolumeSnapshotContentSource{VolumeHandle: &volumeHandle},
++				},
++			},
++			expectedResult: false,
++			description:    "No annotation set, should not skip",
++		},
++		{
++			name: "Legacy: Annotation set, no status - should skip",
++			mode: legacyMode,
++			content: &crdv1.VolumeSnapshotContent{
++				ObjectMeta: metav1.ObjectMeta{
++					Name: "legacy-content",
++					UID:  types.UID("legacy-content-uid"),
++					Annotations: map[string]string{
++						utils.AnnVolumeSnapshotBeingCreated: "yes",
++					},
++				},
++				Spec: crdv1.VolumeSnapshotContentSpec{
++					VolumeSnapshotRef: v1.ObjectReference{UID: types.UID("snapshot-uid")},
++					Source:            crdv1.VolumeSnapshotContentSource{VolumeHandle: &volumeHandle},
++				},
++			},
++			expectedResult: true,
++			description:    "Annotation set but no status, CreateSnapshot in progress",
++		},
++		{
++			name: "Legacy: Annotation set, SnapshotHandle exists but not ready - should skip",
++			mode: legacyMode,
++			content: &crdv1.VolumeSnapshotContent{
++				ObjectMeta: metav1.ObjectMeta{
++					Name: "legacy-content",
++					UID:  types.UID("legacy-content-uid"),
++					Annotations: map[string]string{
++						utils.AnnVolumeSnapshotBeingCreated: "yes",
++					},
++				},
++				Spec: crdv1.VolumeSnapshotContentSpec{
++					VolumeSnapshotRef: v1.ObjectReference{UID: types.UID("snapshot-uid")},
++					Source:            crdv1.VolumeSnapshotContentSource{VolumeHandle: &volumeHandle},
++				},
++				Status: &crdv1.VolumeSnapshotContentStatus{
++					SnapshotHandle: toStringPointer("snapshot-handle"),
++					ReadyToUse:     &False,
++				},
++			},
++			expectedResult: true,
++			description:    "Annotation set, SnapshotHandle exists but ReadyToUse is false",
++		},
++		{
++			name: "Legacy: Annotation set, ready - should not skip",
++			mode: legacyMode,
++			content: &crdv1.VolumeSnapshotContent{
++				ObjectMeta: metav1.ObjectMeta{
++					Name: "legacy-content",
++					UID:  types.UID("legacy-content-uid"),
++					Annotations: map[string]string{
++						utils.AnnVolumeSnapshotBeingCreated: "yes",
++					},
++				},
++				Spec: crdv1.VolumeSnapshotContentSpec{
++					VolumeSnapshotRef: v1.ObjectReference{UID: types.UID("snapshot-uid")},
++					Source:            crdv1.VolumeSnapshotContentSource{VolumeHandle: &volumeHandle},
++				},
++				Status: &crdv1.VolumeSnapshotContentStatus{
++					SnapshotHandle: toStringPointer("snapshot-handle"),
++					ReadyToUse:     &True,
++				},
++			},
++			expectedResult: false,
++			description:    "Annotation set but content is ready, no need to skip",
++		},
++		{
++			name: "VSC-only: No annotation - should not skip",
++			mode: vscOnlyMode,
++			content: &crdv1.VolumeSnapshotContent{
++				ObjectMeta: metav1.ObjectMeta{
++					Name: "vsc-only-content",
++					UID:  types.UID("vsc-only-content-uid"),
++				},
++				Spec: crdv1.VolumeSnapshotContentSpec{
++					Source: crdv1.VolumeSnapshotContentSource{VolumeHandle: &volumeHandle},
++				},
++			},
++			expectedResult: false,
++			description:    "No annotation set, should not skip",
++		},
++		{
++			name: "VSC-only: Annotation set, no status - should skip",
++			mode: vscOnlyMode,
++			content: &crdv1.VolumeSnapshotContent{
++				ObjectMeta: metav1.ObjectMeta{
++					Name: "vsc-only-content",
++					UID:  types.UID("vsc-only-content-uid"),
++					Annotations: map[string]string{
++						utils.AnnVolumeSnapshotBeingCreated: "yes",
++					},
++				},
++				Spec: crdv1.VolumeSnapshotContentSpec{
++					Source: crdv1.VolumeSnapshotContentSource{VolumeHandle: &volumeHandle},
++				},
++			},
++			expectedResult: true,
++			description:    "Annotation set but no status, CreateSnapshot in progress",
++		},
++		{
++			name: "VSC-only: Annotation set, ready - should not skip",
++			mode: vscOnlyMode,
++			content: &crdv1.VolumeSnapshotContent{
++				ObjectMeta: metav1.ObjectMeta{
++					Name: "vsc-only-content",
++					UID:  types.UID("vsc-only-content-uid"),
++					Annotations: map[string]string{
++						utils.AnnVolumeSnapshotBeingCreated: "yes",
++					},
++				},
++				Spec: crdv1.VolumeSnapshotContentSpec{
++					Source: crdv1.VolumeSnapshotContentSource{VolumeHandle: &volumeHandle},
++				},
++				Status: &crdv1.VolumeSnapshotContentStatus{
++					SnapshotHandle: toStringPointer("snapshot-handle"),
++					ReadyToUse:     &True,
++				},
++			},
++			expectedResult: false,
++			description:    "Annotation set but content is ready, no need to skip",
++		},
++	}
++
++	for _, test := range tests {
++		t.Run(test.name, func(t *testing.T) {
++			result := test.mode.ShouldSkipCreateForInProgress(test.content)
++			if result != test.expectedResult {
++				t.Errorf("Expected %v, got %v: %s", test.expectedResult, result, test.description)
++			}
++		})
++	}
++}
++
++// TestVSCModeIsolation_ShouldSkip verifies that ShouldSkip correctly identifies
++// content that should be skipped entirely.
++func TestVSCModeIsolation_ShouldSkip(t *testing.T) {
++	legacyMode := NewLegacyVSCMode()
++	vscOnlyMode := NewVSCOnlyMode()
++
++	volumeHandle := "volume-handle-1"
++	snapshotHandle := "snapshot-handle-1"
++
++	tests := []struct {
++		name           string
++		mode           VSCMode
++		content        *crdv1.VolumeSnapshotContent
++		expectedResult bool
++		description    string
++	}{
++		{
++			name: "Legacy: Never skip",
++			mode: legacyMode,
++			content: &crdv1.VolumeSnapshotContent{
++				ObjectMeta: metav1.ObjectMeta{
++					Name: "legacy-content",
++					UID:  types.UID("legacy-content-uid"),
++				},
++				Spec: crdv1.VolumeSnapshotContentSpec{
++					VolumeSnapshotRef: v1.ObjectReference{UID: types.UID("snapshot-uid")},
++					Source:            crdv1.VolumeSnapshotContentSource{VolumeHandle: &volumeHandle},
++				},
++			},
++			expectedResult: false,
++			description:    "Legacy mode never skips content processing",
++		},
++		{
++			name: "Legacy: No VolumeHandle - still don't skip",
++			mode: legacyMode,
++			content: &crdv1.VolumeSnapshotContent{
++				ObjectMeta: metav1.ObjectMeta{
++					Name: "legacy-content",
++					UID:  types.UID("legacy-content-uid"),
++				},
++				Spec: crdv1.VolumeSnapshotContentSpec{
++					VolumeSnapshotRef: v1.ObjectReference{UID: types.UID("snapshot-uid")},
++				},
++			},
++			expectedResult: false,
++			description:    "Legacy mode never skips, even without VolumeHandle",
++		},
++		{
++			name: "VSC-only: Has VolumeHandle - don't skip",
++			mode: vscOnlyMode,
++			content: &crdv1.VolumeSnapshotContent{
++				ObjectMeta: metav1.ObjectMeta{
++					Name: "vsc-only-content",
++					UID:  types.UID("vsc-only-content-uid"),
++				},
++				Spec: crdv1.VolumeSnapshotContentSpec{
++					Source: crdv1.VolumeSnapshotContentSource{VolumeHandle: &volumeHandle},
++				},
++			},
++			expectedResult: false,
++			description:    "VSC-only with VolumeHandle should not be skipped",
++		},
++		{
++			name: "VSC-only: No VolumeHandle but has SnapshotHandle - don't skip",
++			mode: vscOnlyMode,
++			content: &crdv1.VolumeSnapshotContent{
++				ObjectMeta: metav1.ObjectMeta{
++					Name: "vsc-only-content",
++					UID:  types.UID("vsc-only-content-uid"),
++				},
++				Spec: crdv1.VolumeSnapshotContentSpec{},
++				Status: &crdv1.VolumeSnapshotContentStatus{
++					SnapshotHandle: &snapshotHandle,
++				},
++			},
++			expectedResult: false,
++			description:    "VSC-only with SnapshotHandle should not be skipped (pre-provisioned)",
++		},
++		{
++			name: "VSC-only: No VolumeHandle and no SnapshotHandle - skip",
++			mode: vscOnlyMode,
++			content: &crdv1.VolumeSnapshotContent{
++				ObjectMeta: metav1.ObjectMeta{
++					Name: "vsc-only-content",
++					UID:  types.UID("vsc-only-content-uid"),
++				},
++				Spec: crdv1.VolumeSnapshotContentSpec{},
++			},
++			expectedResult: true,
++			description:    "VSC-only without VolumeHandle and SnapshotHandle should be skipped",
++		},
++		{
++			name: "VSC-only: No VolumeHandle, no status - skip",
++			mode: vscOnlyMode,
++			content: &crdv1.VolumeSnapshotContent{
++				ObjectMeta: metav1.ObjectMeta{
++					Name: "vsc-only-content",
++					UID:  types.UID("vsc-only-content-uid"),
++				},
++				Spec: crdv1.VolumeSnapshotContentSpec{},
++			},
++			expectedResult: true,
++			description:    "VSC-only without VolumeHandle and without status should be skipped",
++		},
++	}
++
++	for _, test := range tests {
++		t.Run(test.name, func(t *testing.T) {
++			result := test.mode.ShouldSkip(test.content)
++			if result != test.expectedResult {
++				t.Errorf("Expected %v, got %v: %s", test.expectedResult, result, test.description)
++			}
++		})
++	}
++}
++
++// TestVSCMode_SnapshotUID_Legacy verifies that SnapshotUID returns VolumeSnapshotRef.UID
++// for legacy mode, matching upstream behavior.
++func TestVSCMode_SnapshotUID_Legacy(t *testing.T) {
++	legacyMode := NewLegacyVSCMode()
++
++	tests := []struct {
++		name        string
++		content     *crdv1.VolumeSnapshotContent
++		expectedUID string
++		description string
++	}{
++		{
++			name: "Legacy: VolumeSnapshotRef.UID is used",
++			content: &crdv1.VolumeSnapshotContent{
++				ObjectMeta: metav1.ObjectMeta{
++					Name: "legacy-content",
++					UID:  types.UID("content-uid"),
++				},
++				Spec: crdv1.VolumeSnapshotContentSpec{
++					VolumeSnapshotRef: v1.ObjectReference{
++						UID: types.UID("snapshot-uid"),
++					},
++				},
++			},
++			expectedUID: "snapshot-uid",
++			description: "Legacy mode should use VolumeSnapshotRef.UID for snapshot name generation",
++		},
++		{
++			name: "Legacy: Empty VolumeSnapshotRef.UID returns empty string",
++			content: &crdv1.VolumeSnapshotContent{
++				ObjectMeta: metav1.ObjectMeta{
++					Name: "legacy-content",
++					UID:  types.UID("content-uid"),
++				},
++				Spec: crdv1.VolumeSnapshotContentSpec{
++					VolumeSnapshotRef: v1.ObjectReference{},
++				},
++			},
++			expectedUID: "",
++			description: "Legacy mode returns empty string when VolumeSnapshotRef.UID is not set",
++		},
++	}
++
++	for _, test := range tests {
++		t.Run(test.name, func(t *testing.T) {
++			uid := legacyMode.SnapshotUID(test.content)
++			if uid != test.expectedUID {
++				t.Errorf("Expected UID %q, got %q: %s", test.expectedUID, uid, test.description)
++			}
++		})
++	}
++}
++
++// TestVSCMode_SnapshotUID_VSCOnly verifies that SnapshotUID returns content.UID
++// for VSC-only mode, or VolumeSnapshotRef.UID for backward compatibility.
++func TestVSCMode_SnapshotUID_VSCOnly(t *testing.T) {
++	vscOnlyMode := NewVSCOnlyMode()
++
++	tests := []struct {
++		name        string
++		content     *crdv1.VolumeSnapshotContent
++		expectedUID string
++		description string
++	}{
++		{
++			name: "VSC-only: content.UID is used when VolumeSnapshotRef is empty",
++			content: &crdv1.VolumeSnapshotContent{
++				ObjectMeta: metav1.ObjectMeta{
++					Name: "vsc-only-content",
++					UID:  types.UID("vsc-content-uid"),
++				},
++				Spec: crdv1.VolumeSnapshotContentSpec{
++					VolumeSnapshotRef: v1.ObjectReference{}, // Empty
++				},
++			},
++			expectedUID: "vsc-content-uid",
++			description: "VSC-only mode should use content.UID when VolumeSnapshotRef is empty",
++		},
++		{
++			name: "VSC-only: VolumeSnapshotRef.UID is used for backward compatibility",
++			content: &crdv1.VolumeSnapshotContent{
++				ObjectMeta: metav1.ObjectMeta{
++					Name: "vsc-only-content",
++					UID:  types.UID("vsc-content-uid"),
++				},
++				Spec: crdv1.VolumeSnapshotContentSpec{
++					VolumeSnapshotRef: v1.ObjectReference{
++						UID: types.UID("snapshot-uid"),
++					},
++				},
++			},
++			expectedUID: "snapshot-uid",
++			description: "VSC-only mode should use VolumeSnapshotRef.UID for backward compatibility when set",
++		},
++		{
++			name: "VSC-only: Empty VolumeSnapshotRef and empty UID returns empty string",
++			content: &crdv1.VolumeSnapshotContent{
++				ObjectMeta: metav1.ObjectMeta{
++					Name: "vsc-only-content",
++					UID:  "", // Empty UID
++				},
++				Spec: crdv1.VolumeSnapshotContentSpec{
++					VolumeSnapshotRef: v1.ObjectReference{}, // Empty
++				},
++			},
++			expectedUID: "",
++			description: "VSC-only mode returns empty string when both VolumeSnapshotRef and content.UID are empty",
++		},
++	}
++
++	for _, test := range tests {
++		t.Run(test.name, func(t *testing.T) {
++			uid := vscOnlyMode.SnapshotUID(test.content)
++			if uid != test.expectedUID {
++				t.Errorf("Expected UID %q, got %q: %s", test.expectedUID, uid, test.description)
++			}
++		})
++	}
++}
++
++// TestVSCMode_IsValidContentForReconcile verifies that IsValidContentForReconcile
++// correctly determines which content should be added to the controller's work queue.
++func TestVSCMode_IsValidContentForReconcile(t *testing.T) {
++	legacyMode := NewLegacyVSCMode()
++	vscOnlyMode := NewVSCOnlyMode()
++
++	volumeHandle := "volume-handle-1"
++	snapshotHandle := "snapshot-handle-1"
++
++	tests := []struct {
++		name           string
++		mode           VSCMode
++		content        *crdv1.VolumeSnapshotContent
++		expectedResult bool
++		description    string
++	}{
++		{
++			name: "Legacy: Has VolumeHandle - valid",
++			mode: legacyMode,
++			content: &crdv1.VolumeSnapshotContent{
++				ObjectMeta: metav1.ObjectMeta{
++					Name: "legacy-content",
++					UID:  types.UID("legacy-content-uid"),
++				},
++				Spec: crdv1.VolumeSnapshotContentSpec{
++					VolumeSnapshotRef: v1.ObjectReference{UID: types.UID("snapshot-uid")},
++					Source:            crdv1.VolumeSnapshotContentSource{VolumeHandle: &volumeHandle},
++				},
++			},
++			expectedResult: true,
++			description:    "Legacy mode allows content with VolumeHandle",
++		},
++		{
++			name: "Legacy: Has SnapshotHandle - valid",
++			mode: legacyMode,
++			content: &crdv1.VolumeSnapshotContent{
++				ObjectMeta: metav1.ObjectMeta{
++					Name: "legacy-content",
++					UID:  types.UID("legacy-content-uid"),
++				},
++				Spec: crdv1.VolumeSnapshotContentSpec{
++					VolumeSnapshotRef: v1.ObjectReference{UID: types.UID("snapshot-uid")},
++					Source:            crdv1.VolumeSnapshotContentSource{SnapshotHandle: &snapshotHandle},
++				},
++			},
++			expectedResult: true,
++			description:    "Legacy mode allows content with SnapshotHandle (pre-provisioned)",
++		},
++		{
++			name: "Legacy: No VolumeHandle and no SnapshotHandle - invalid",
++			mode: legacyMode,
++			content: &crdv1.VolumeSnapshotContent{
++				ObjectMeta: metav1.ObjectMeta{
++					Name: "legacy-content",
++					UID:  types.UID("legacy-content-uid"),
++				},
++				Spec: crdv1.VolumeSnapshotContentSpec{
++					VolumeSnapshotRef: v1.ObjectReference{UID: types.UID("snapshot-uid")},
++					Source:            crdv1.VolumeSnapshotContentSource{},
++				},
++			},
++			expectedResult: false,
++			description:    "Legacy mode filters out content without VolumeHandle or SnapshotHandle (upstream behavior)",
++		},
++		{
++			name: "VSC-only: Has VolumeHandle - valid",
++			mode: vscOnlyMode,
++			content: &crdv1.VolumeSnapshotContent{
++				ObjectMeta: metav1.ObjectMeta{
++					Name: "vsc-only-content",
++					UID:  types.UID("vsc-only-content-uid"),
++				},
++				Spec: crdv1.VolumeSnapshotContentSpec{
++					Source: crdv1.VolumeSnapshotContentSource{VolumeHandle: &volumeHandle},
++				},
++			},
++			expectedResult: true,
++			description:    "VSC-only mode allows content with VolumeHandle",
++		},
++		{
++			name: "VSC-only: Has SnapshotHandle - valid",
++			mode: vscOnlyMode,
++			content: &crdv1.VolumeSnapshotContent{
++				ObjectMeta: metav1.ObjectMeta{
++					Name: "vsc-only-content",
++					UID:  types.UID("vsc-only-content-uid"),
++				},
++				Spec: crdv1.VolumeSnapshotContentSpec{
++					Source: crdv1.VolumeSnapshotContentSource{SnapshotHandle: &snapshotHandle},
++				},
++			},
++			expectedResult: true,
++			description:    "VSC-only mode allows content with SnapshotHandle",
++		},
++		{
++			name: "VSC-only: No VolumeHandle and no SnapshotHandle - valid (downstream-specific)",
++			mode: vscOnlyMode,
++			content: &crdv1.VolumeSnapshotContent{
++				ObjectMeta: metav1.ObjectMeta{
++					Name: "vsc-only-content",
++					UID:  types.UID("vsc-only-content-uid"),
++				},
++				Spec: crdv1.VolumeSnapshotContentSpec{
++					Source: crdv1.VolumeSnapshotContentSource{},
++				},
++			},
++			expectedResult: true,
++			description:    "VSC-only mode allows content without VolumeHandle or SnapshotHandle (downstream-specific, will be skipped in syncContent)",
++		},
++	}
++
++	for _, test := range tests {
++		t.Run(test.name, func(t *testing.T) {
++			result := test.mode.IsValidContentForReconcile(test.content)
++			if result != test.expectedResult {
++				t.Errorf("Expected %v, got %v: %s", test.expectedResult, result, test.description)
++			}
++		})
++	}
++}
++
++func toStringPointer(s string) *string {
++	return &s
++}
