@@ -72,6 +72,22 @@ func main() {
 	if err != nil {
 		log.Error(err, "[main] unable to KubernetesDefaultConfigCreate")
 	}
+	// Raise the shared manager client rate limit from the client-go default (QPS 5 / Burst 10). That
+	// default paces the whole VolumeCaptureRequest capture leg: under a concurrent multi-tree snapshot
+	// burst the VCR/VolumeSnapshotContent creates and status patches queue behind the 5 QPS limiter, so
+	// capture-done time grows ~linearly with tree count (measured ~13s for 10 trees, a ~0.77 tree/s
+	// staircase) regardless of MaxConcurrentReconciles. This mirrors the same fix already applied to the
+	// state-snapshotter controller client.
+	// Defaults 50/100; overridable via STORAGE_FOUNDATION_KUBE_QPS / _BURST (read once at start; changing
+	// requires a pod/rollout restart, not a hot reload).
+	kubeQPS, kubeBurst, rlErr := config.ParseClientRateLimit(config.EnvKubeQPS, config.EnvKubeBurst, 50, 100)
+	if rlErr != nil {
+		log.Error(rlErr, "[main] invalid manager client rate-limit env")
+		os.Exit(1)
+	}
+	kConfig.QPS = kubeQPS
+	kConfig.Burst = kubeBurst
+	log.Info(fmt.Sprintf("[main] manager client rate limit: QPS=%v Burst=%d", kubeQPS, kubeBurst))
 	log.Info("[main] kubernetes config has been successfully created.")
 
 	scheme := apiruntime.NewScheme()
