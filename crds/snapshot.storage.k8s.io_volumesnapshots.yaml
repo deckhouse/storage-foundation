@@ -93,8 +93,9 @@ spec:
                   mode selects how this VolumeSnapshot obtains its content and is immutable once set.
                   Capture (default): dynamic CSI snapshot from spec.source. Import: the data artifact is
                   produced by a DataImport in the same namespace (reverse-lookup by DataImport.spec.snapshotRef);
-                  spec.source stays empty and the upstream snapshot-controller does not reconcile such a
-                  VolumeSnapshot - the state-snapshotter common controller binds it (sets status).
+                  spec.source is omitted (required only when mode != Import) and the upstream
+                  snapshot-controller does not reconcile such a VolumeSnapshot - the state-snapshotter
+                  common controller binds it (sets status).
                   Deckhouse extension: parity with spec.mode on every other state-snapshotter snapshot kind.
                 enum:
                 - Capture
@@ -106,8 +107,9 @@ spec:
               source:
                 description: |-
                   source specifies where a snapshot will be created from.
-                  May be empty: restore intent (backup controller sets volumeSnapshotContentName after restore)
-                  or import mode (mode: Import - the data artifact comes from a DataImport, no CSI source).
+                  Required unless mode is Import (an import VolumeSnapshot omits it - the data artifact
+                  comes from a DataImport; symmetry with the other snapshot kinds).
+                  May be empty: restore intent (backup controller sets volumeSnapshotContentName after restore).
                   Otherwise exactly one of persistentVolumeClaimName or volumeSnapshotContentName must be set.
                   Immutable after creation (except one-shot set of volumeSnapshotContentName from empty).
                 properties:
@@ -160,14 +162,18 @@ spec:
                 - message: volumeSnapshotClassName must not be the empty string when
                     set
                   rule: size(self) > 0
-            required:
-            - source
             type: object
             x-kubernetes-validations:
-            # Import mode carries no CSI source: the data artifact comes from a DataImport.
-            - message: an import-mode VolumeSnapshot (mode = Import) must have an empty source
+            # Symmetry with every other snapshot kind: source is a Capture-family concern. An import
+            # VolumeSnapshot omits it entirely (the data artifact comes from a DataImport); everything
+            # else (dynamic capture, pre-provisioned, restore intent with an empty source) must carry it.
+            - message: source is required unless mode is Import
               rule: >-
-                !has(self.mode) || self.mode != 'Import' || (!has(self.source.persistentVolumeClaimName) && !has(self.source.volumeSnapshotContentName))
+                (has(self.mode) && self.mode == 'Import') || has(self.source)
+            # Import mode carries no CSI source: absent entirely, or empty if a typed client serialized it.
+            - message: an import-mode VolumeSnapshot (mode = Import) must have no CSI source
+              rule: >-
+                !has(self.mode) || self.mode != 'Import' || !has(self.source) || (!has(self.source.persistentVolumeClaimName) && !has(self.source.volumeSnapshotContentName))
           status:
             description: |-
               Current information of a snapshot.

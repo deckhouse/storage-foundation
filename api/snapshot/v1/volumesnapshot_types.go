@@ -120,8 +120,9 @@ type VolumeSnapshotSpec struct {
 const VolumeSnapshotModeImport = "Import"
 
 // VolumeSnapshotSource is the CSI snapshot source. Exactly one of PersistentVolumeClaimName /
-// VolumeSnapshotContentName is set on a stock CSI VolumeSnapshot; an EMPTY source is the fork's restore
-// intent or an import-mode snapshot (spec.mode: Import).
+// VolumeSnapshotContentName is set on a stock CSI VolumeSnapshot. Fork: source is required only when
+// spec.mode != Import (an import snapshot omits it; this non-pointer field then decodes as the zero
+// struct); an EMPTY source is the restore intent (volumeSnapshotContentName is one-shot set later).
 type VolumeSnapshotSource struct {
 	// PersistentVolumeClaimName names the source PVC (dynamic snapshot). When set, this VolumeSnapshot is a
 	// data-leaf domain snapshot: its data leg is the CSI VolumeSnapshotContent and its manifest leg captures

@@ -1,8 +1,8 @@
 diff --git a/client/apis/volumesnapshot/v1/types.go b/client/apis/volumesnapshot/v1/types.go
-index 36f60dc95..94023a758 100644
+index 36f60dc95..f45a6e148 100644
 --- a/client/apis/volumesnapshot/v1/types.go
 +++ b/client/apis/volumesnapshot/v1/types.go
-@@ -93,16 +93,32 @@ type VolumeSnapshotSpec struct {
+@@ -93,16 +93,34 @@ type VolumeSnapshotSpec struct {
  	// +optional
  	// +kubebuilder:validation:XValidation:rule="size(self) > 0",message="volumeSnapshotClassName must not be the empty string when set"
  	VolumeSnapshotClassName *string `json:"volumeSnapshotClassName,omitempty" protobuf:"bytes,2,opt,name=volumeSnapshotClassName"`
@@ -10,10 +10,11 @@ index 36f60dc95..94023a758 100644
 +	// mode selects how this VolumeSnapshot obtains its content (Capture | Import) and is immutable
 +	// once set. Capture (default): dynamic CSI snapshot from spec.source. Import: the data artifact
 +	// is produced by a DataImport (storage-foundation.deckhouse.io) in the same namespace, resolved
-+	// via reverse-lookup (DataImport.spec.targetRef); spec.source stays empty and the upstream
++	// via reverse-lookup (DataImport.spec.targetRef); spec.source is OMITTED (required only when
++	// mode != Import — full parity with the other snapshot kinds, where Import carries no source
++	// fields; a typed client may still serialize an empty source, which stays legal) and the upstream
 +	// snapshot-controller does NOT reconcile such a VolumeSnapshot — the state-snapshotter common
-+	// controller binds it (sets status). Deckhouse fork extension: parity with the spec.mode enum on
-+	// every other state-snapshotter snapshot kind.
++	// controller binds it (sets status). Deckhouse fork extension.
 +	// +optional
 +	// +kubebuilder:default=Capture
 +	// +kubebuilder:validation:Enum=Capture;Import
@@ -27,9 +28,10 @@ index 36f60dc95..94023a758 100644
 -// Exactly one of its members must be set.
  // Members in VolumeSnapshotSource are immutable.
 +//
-+// Deckhouse fork: an EMPTY source is legal — it carries the restore intent (the backup controller
-+// one-shot sets volumeSnapshotContentName from empty after a successful restore) and the import mode
-+// (spec.mode: Import — the data artifact comes from a DataImport, so there is no CSI source).
++// Deckhouse fork: source is required only when spec.mode != Import (import VolumeSnapshots omit it —
++// the data artifact comes from a DataImport, there is no CSI source). An EMPTY source is also legal:
++// it carries the restore intent (the backup controller one-shot sets volumeSnapshotContentName from
++// empty after a successful restore).
  // +kubebuilder:validation:XValidation:rule="!has(oldSelf.persistentVolumeClaimName) || has(self.persistentVolumeClaimName)", message="persistentVolumeClaimName is required once set"
  // +kubebuilder:validation:XValidation:rule="!has(oldSelf.volumeSnapshotContentName) || has(self.volumeSnapshotContentName)", message="volumeSnapshotContentName is required once set"
 -// +kubebuilder:validation:XValidation:rule="(has(self.volumeSnapshotContentName) && !has(self.persistentVolumeClaimName)) || (!has(self.volumeSnapshotContentName) && has(self.persistentVolumeClaimName))", message="exactly one of volumeSnapshotContentName and persistentVolumeClaimName must be set"
@@ -37,7 +39,7 @@ index 36f60dc95..94023a758 100644
  type VolumeSnapshotSource struct {
  	// persistentVolumeClaimName specifies the name of the PersistentVolumeClaim
  	// object representing the volume from which a snapshot should be created.
-@@ -124,6 +140,55 @@ type VolumeSnapshotSource struct {
+@@ -124,6 +142,55 @@ type VolumeSnapshotSource struct {
  	VolumeSnapshotContentName *string `json:"volumeSnapshotContentName,omitempty" protobuf:"bytes,2,opt,name=volumeSnapshotContentName"`
  }
  
@@ -93,7 +95,7 @@ index 36f60dc95..94023a758 100644
  // VolumeSnapshotStatus is the status of the VolumeSnapshot
  // Note that CreationTime, RestoreSize, ReadyToUse, and Error are in both
  // VolumeSnapshotStatus and VolumeSnapshotContentStatus. Fields in VolumeSnapshotStatus
-@@ -194,6 +259,116 @@ type VolumeSnapshotStatus struct {
+@@ -194,6 +261,116 @@ type VolumeSnapshotStatus struct {
  	// VolumeSnapshot is a part of.
  	// +optional
  	VolumeGroupSnapshotName *string `json:"volumeGroupSnapshotName,omitempty" protobuf:"bytes,6,opt,name=volumeGroupSnapshotName"`
@@ -489,10 +491,10 @@ index a489b9241..972446a8f 100644
  		// been add/update/sync
  		newSnapshot, err := ctrl.checkAndUpdateSnapshotClass(snapshot)
 diff --git a/vendor/github.com/kubernetes-csi/external-snapshotter/client/v8/apis/volumesnapshot/v1/types.go b/vendor/github.com/kubernetes-csi/external-snapshotter/client/v8/apis/volumesnapshot/v1/types.go
-index 36f60dc95..94023a758 100644
+index 36f60dc95..f45a6e148 100644
 --- a/vendor/github.com/kubernetes-csi/external-snapshotter/client/v8/apis/volumesnapshot/v1/types.go
 +++ b/vendor/github.com/kubernetes-csi/external-snapshotter/client/v8/apis/volumesnapshot/v1/types.go
-@@ -93,16 +93,32 @@ type VolumeSnapshotSpec struct {
+@@ -93,16 +93,34 @@ type VolumeSnapshotSpec struct {
  	// +optional
  	// +kubebuilder:validation:XValidation:rule="size(self) > 0",message="volumeSnapshotClassName must not be the empty string when set"
  	VolumeSnapshotClassName *string `json:"volumeSnapshotClassName,omitempty" protobuf:"bytes,2,opt,name=volumeSnapshotClassName"`
@@ -500,10 +502,11 @@ index 36f60dc95..94023a758 100644
 +	// mode selects how this VolumeSnapshot obtains its content (Capture | Import) and is immutable
 +	// once set. Capture (default): dynamic CSI snapshot from spec.source. Import: the data artifact
 +	// is produced by a DataImport (storage-foundation.deckhouse.io) in the same namespace, resolved
-+	// via reverse-lookup (DataImport.spec.targetRef); spec.source stays empty and the upstream
++	// via reverse-lookup (DataImport.spec.targetRef); spec.source is OMITTED (required only when
++	// mode != Import — full parity with the other snapshot kinds, where Import carries no source
++	// fields; a typed client may still serialize an empty source, which stays legal) and the upstream
 +	// snapshot-controller does NOT reconcile such a VolumeSnapshot — the state-snapshotter common
-+	// controller binds it (sets status). Deckhouse fork extension: parity with the spec.mode enum on
-+	// every other state-snapshotter snapshot kind.
++	// controller binds it (sets status). Deckhouse fork extension.
 +	// +optional
 +	// +kubebuilder:default=Capture
 +	// +kubebuilder:validation:Enum=Capture;Import
@@ -517,9 +520,10 @@ index 36f60dc95..94023a758 100644
 -// Exactly one of its members must be set.
  // Members in VolumeSnapshotSource are immutable.
 +//
-+// Deckhouse fork: an EMPTY source is legal — it carries the restore intent (the backup controller
-+// one-shot sets volumeSnapshotContentName from empty after a successful restore) and the import mode
-+// (spec.mode: Import — the data artifact comes from a DataImport, so there is no CSI source).
++// Deckhouse fork: source is required only when spec.mode != Import (import VolumeSnapshots omit it —
++// the data artifact comes from a DataImport, there is no CSI source). An EMPTY source is also legal:
++// it carries the restore intent (the backup controller one-shot sets volumeSnapshotContentName from
++// empty after a successful restore).
  // +kubebuilder:validation:XValidation:rule="!has(oldSelf.persistentVolumeClaimName) || has(self.persistentVolumeClaimName)", message="persistentVolumeClaimName is required once set"
  // +kubebuilder:validation:XValidation:rule="!has(oldSelf.volumeSnapshotContentName) || has(self.volumeSnapshotContentName)", message="volumeSnapshotContentName is required once set"
 -// +kubebuilder:validation:XValidation:rule="(has(self.volumeSnapshotContentName) && !has(self.persistentVolumeClaimName)) || (!has(self.volumeSnapshotContentName) && has(self.persistentVolumeClaimName))", message="exactly one of volumeSnapshotContentName and persistentVolumeClaimName must be set"
@@ -527,7 +531,7 @@ index 36f60dc95..94023a758 100644
  type VolumeSnapshotSource struct {
  	// persistentVolumeClaimName specifies the name of the PersistentVolumeClaim
  	// object representing the volume from which a snapshot should be created.
-@@ -124,6 +140,55 @@ type VolumeSnapshotSource struct {
+@@ -124,6 +142,55 @@ type VolumeSnapshotSource struct {
  	VolumeSnapshotContentName *string `json:"volumeSnapshotContentName,omitempty" protobuf:"bytes,2,opt,name=volumeSnapshotContentName"`
  }
  
@@ -583,7 +587,7 @@ index 36f60dc95..94023a758 100644
  // VolumeSnapshotStatus is the status of the VolumeSnapshot
  // Note that CreationTime, RestoreSize, ReadyToUse, and Error are in both
  // VolumeSnapshotStatus and VolumeSnapshotContentStatus. Fields in VolumeSnapshotStatus
-@@ -194,6 +259,116 @@ type VolumeSnapshotStatus struct {
+@@ -194,6 +261,116 @@ type VolumeSnapshotStatus struct {
  	// VolumeSnapshot is a part of.
  	// +optional
  	VolumeGroupSnapshotName *string `json:"volumeGroupSnapshotName,omitempty" protobuf:"bytes,6,opt,name=volumeGroupSnapshotName"`
