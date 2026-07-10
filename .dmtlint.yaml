@@ -16,10 +16,9 @@ linters-settings:
           name: snapshot-validation-webhook
           container: snapshot-validation
   module:
-    # The bundled CSI components are pinned to deliberately non-semver refs — a Deckhouse fork tag
-    # ("d8-63742164-vsc-only") for external-snapshotter/snapshot-controller and a commit SHA for
-    # data-source-validator — which the oss rule reports as "Invalid Semantic Version". Those refs are
-    # correct for this module, so the rule is disabled (matching sibling storage modules).
+    # data-source-validator is pinned to a deliberately non-semver ref (a commit SHA), which the oss
+    # rule reports as "Invalid Semantic Version". That ref is correct for this module, so the rule is
+    # disabled (matching sibling storage modules).
     oss:
       disable: true
     exclude-rules:

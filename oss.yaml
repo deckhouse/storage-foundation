@@ -50,14 +50,14 @@
 
 - name: external-snapshotter (csi-snapshotter sidecar)
   link: https://github.com/kubernetes-csi/external-snapshotter
-  description: CSI external-snapshotter sidecar (csi-snapshotter binary). Built by cloning the upstream tag and applying CVE patches under images/csi-external-snapshotter/patches/<version>/.
+  description: CSI external-snapshotter sidecar (csi-snapshotter binary). Built by cloning the upstream tag and applying the Deckhouse vsc-only fork patch + CVE patches under images/csi-external-snapshotter/patches/<version>/.
   logo: https://avatars.githubusercontent.com/u/52698954?s=200&v=4
   license: Apache License 2.0
   id: csi-external-snapshotter
   versions:
     - condition:
         k8s: ["1.20"]
-      version: d8-63742164-vsc-only
+      version: v8.5.0
 
 - name: livenessprobe
   link: https://github.com/kubernetes-csi/livenessprobe
@@ -83,11 +83,11 @@
 
 - name: snapshot-controller
   link: https://github.com/kubernetes-csi/external-snapshotter
-  description: The controller is required for CSI snapshotting to work and is not specific to any CSI driver. Built by cloning the upstream tag and applying CVE patches under images/snapshot-controller/patches/.
+  description: The controller is required for CSI snapshotting to work and is not specific to any CSI driver. Built by cloning the upstream tag and applying the Deckhouse fork patches (vsc-only mode, VolumeSnapshot dataimport) + CVE patches under images/snapshot-controller/patches/.
   logo: https://avatars.githubusercontent.com/u/52698954?s=200&v=4
   license: Apache License 2.0
   id: snapshot-controller
-  version: d8-63742164-vsc-only
+  version: v8.5.0
 
 - name: volume-data-source-validator
   link: https://github.com/kubernetes-csi/volume-data-source-validator

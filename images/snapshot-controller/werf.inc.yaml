@@ -57,10 +57,10 @@ shell:
     - cd /src/snapshot-controller
     - export CGO_ENABLED=0 GOOS=linux GOARCH=amd64
     - GOPROXY=$(cat /run/secrets/GOPROXY) go mod download
-    # Re-sync the vendor dir to the patched go.mod (004 bumps golang.org/x/* for
-    # CVEs); the fork ships a committed vendor tree, so without this make build
-    # would fail on inconsistent vendoring. The vsc-only fork changes live in
-    # ./client (replace target) and are preserved by go mod vendor.
+    # Rebuild the vendor dir against the patched go.mod (the src stage removed
+    # the committed vendor tree; 004 bumps golang.org/x/* for CVEs). The
+    # dataimport fork changes in ./client (go.mod replace target) are preserved
+    # by go mod vendor; the vsc-only patch touches pkg/ only.
     - GOPROXY=$(cat /run/secrets/GOPROXY) go mod vendor
     - |
       {{- include "image-build.build" (set $ "BuildCommand" (printf "make build")) | nindent 6 }}
