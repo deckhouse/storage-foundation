@@ -107,9 +107,6 @@ func (in *VolumeSnapshotSource) DeepCopyInto(out *VolumeSnapshotSource) {
 		v := *in.VolumeSnapshotContentName
 		out.VolumeSnapshotContentName = &v
 	}
-	if in.Import != nil {
-		out.Import = new(VolumeSnapshotImportSource)
-	}
 }
 
 // DeepCopyInto copies the receiver into out.

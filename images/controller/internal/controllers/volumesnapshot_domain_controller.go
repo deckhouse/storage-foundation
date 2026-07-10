@@ -147,9 +147,10 @@ func (r *VolumeSnapshotDomainReconciler) Reconcile(ctx context.Context, req ctrl
 		return ctrl.Result{}, nil
 	}
 
-	// (2) Import mode: capture is off (the source PVC may be absent); the core materializes content from
-	// uploaded manifests. Domain planning is trivially complete.
-	if vs.Spec.Source.Import != nil {
+	// (2) Import mode (spec.mode: Import — parity with every other snapshot kind): capture is off (the
+	// source PVC may be absent); the core materializes content from uploaded manifests. Domain planning
+	// is trivially complete.
+	if vs.Spec.Mode == sfsnapv1.VolumeSnapshotModeImport {
 		logger.V(1).Info("skip: import-mode VolumeSnapshot")
 		return ctrl.Result{}, nil
 	}

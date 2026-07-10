@@ -99,9 +99,14 @@ type VolumeSnapshotList struct {
 }
 
 // VolumeSnapshotSpec models the subset of the CSI VolumeSnapshot spec the domain reconciler reads: the
-// snapshot source discriminator (PVC name vs pre-provisioned content vs fork import marker). It is never
+// mode discriminator plus the snapshot source (PVC name vs pre-provisioned content). It is never
 // written by the domain reconciler.
 type VolumeSnapshotSpec struct {
+	// Mode selects how this VolumeSnapshot obtains its content (Capture | Import), immutable once set;
+	// default Capture (fork extension: parity with spec.mode on every other snapshot kind). Import
+	// disables capture planning — the data artifact comes from a DataImport and spec.source stays empty.
+	// +optional
+	Mode string `json:"mode,omitempty"`
 	// Source identifies where the snapshot comes from.
 	Source VolumeSnapshotSource `json:"source"`
 	// VolumeSnapshotClassName is the CSI snapshot class (read-only here; carried for completeness).
@@ -109,9 +114,14 @@ type VolumeSnapshotSpec struct {
 	VolumeSnapshotClassName *string `json:"volumeSnapshotClassName,omitempty"`
 }
 
-// VolumeSnapshotSource is the CSI snapshot source, plus the fork's import marker. Exactly one of
-// PersistentVolumeClaimName / VolumeSnapshotContentName is set on a stock CSI VolumeSnapshot; Import is a
-// fork extension that marks a d8-cli import-mode snapshot.
+// VolumeSnapshotModeImport is the spec.mode value marking an import-mode VolumeSnapshot (fork
+// extension). String-typed locally to keep this package free of a state-snapshotter api dependency for
+// one constant; the value matches storagev1alpha1.SnapshotModeImport verbatim.
+const VolumeSnapshotModeImport = "Import"
+
+// VolumeSnapshotSource is the CSI snapshot source. Exactly one of PersistentVolumeClaimName /
+// VolumeSnapshotContentName is set on a stock CSI VolumeSnapshot; an EMPTY source is the fork's restore
+// intent or an import-mode snapshot (spec.mode: Import).
 type VolumeSnapshotSource struct {
 	// PersistentVolumeClaimName names the source PVC (dynamic snapshot). When set, this VolumeSnapshot is a
 	// data-leaf domain snapshot: its data leg is the CSI VolumeSnapshotContent and its manifest leg captures
@@ -122,17 +132,7 @@ type VolumeSnapshotSource struct {
 	// snapshot has no live PVC source, so the domain reconciler skips it (no capture planning).
 	// +optional
 	VolumeSnapshotContentName *string `json:"volumeSnapshotContentName,omitempty"`
-	// Import, when present, marks a d8-cli import-mode snapshot (fork extension). Its inner fields are
-	// opaque to the domain reconciler — only presence matters, and it disables capture planning.
-	// +optional
-	Import *VolumeSnapshotImportSource `json:"import,omitempty"`
 }
-
-// VolumeSnapshotImportSource is the fork's import marker. Its content is opaque to the domain reconciler;
-// only its presence is meaningful (import mode disables capture planning). Modeled as an empty struct so
-// unmarshalling a populated "import" object yields a non-nil pointer without depending on the fork's
-// internal shape.
-type VolumeSnapshotImportSource struct{}
 
 // VolumeSnapshotStatus models the domain-protocol subset of the CSI VolumeSnapshot status. CSI-native
 // fields (readyToUse, boundVolumeSnapshotContentName, creationTime, restoreSize, error) and the fork's
