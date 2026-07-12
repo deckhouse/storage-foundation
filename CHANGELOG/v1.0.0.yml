@@ -1,0 +1,9 @@
+Changes:
+- General Availability release. storage-foundation is now the cluster owner of CSI snapshot support
+  (extended VolumeSnapshot with spec.mode), volume cloning and HTTP-based DataExport/DataImport.
+- Auto-enabled in the Default and Managed bundles; requires Deckhouse >= 1.76 (the release that
+  ships the matching d8 CLI) and the state-snapshotter module >= 1.0.0.
+- The deprecated snapshot-controller (v0.2.0+) and storage-volume-data-manager (v0.2.0+) modules
+  pin this v1.0.0 baseline and hand their functionality over to storage-foundation.
+- Added the hack/check-consumer-crds.sh CI check that guards the byte-for-byte CRD copies shipped by
+  the deprecated consumer modules against drift from this module's CRDs.

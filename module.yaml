@@ -9,7 +9,9 @@ descriptions:
 requirements:
   deckhouse: ">= 1.76"
   modules:
-    state-snapshotter: ">= 0.0.0"
+    # storage-foundation and state-snapshotter are released together as v1.0.0; the snapshot
+    # domain (SnapshotContent/VRR) lives in state-snapshotter, so pin the GA baseline explicitly.
+    state-snapshotter: ">= 1.0.0"
 accessibility:
   editions:
     _default:
