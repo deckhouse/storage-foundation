@@ -74,6 +74,13 @@ func main() {
 	}
 	log.Info("[main] kubernetes config has been successfully created.")
 
+	// Lift the client-go rate limiter above the default (QPS=5 / Burst=10): the default serializes the
+	// VolumeCaptureRequest controller's reads and status patches under a multi-tree snapshot burst,
+	// capping reconcile latency regardless of MaxConcurrentReconciles. 200/400 is the measured knee.
+	kConfig.QPS = 200
+	kConfig.Burst = 400
+	log.Info(fmt.Sprintf("[main] kubernetes client rate limiter set QPS=%.0f Burst=%d", kConfig.QPS, kConfig.Burst))
+
 	scheme := apiruntime.NewScheme()
 	for _, f := range resourcesSchemeFuncs {
 		err := f(scheme)
