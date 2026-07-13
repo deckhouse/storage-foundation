@@ -251,6 +251,13 @@ func (r *VolumeCaptureRequestController) processSnapshotTarget(
 		csiVSC = &snapshotv1.VolumeSnapshotContent{
 			ObjectMeta: metav1.ObjectMeta{
 				Name: csiVSCName,
+				// Provenance labels so a ReadyToUse flip on this cluster-scoped VSC can be routed back to
+				// the owning (namespaced) VolumeCaptureRequest by an event-driven watch (mapVSCToVCR),
+				// instead of the VCR polling with a 5s RequeueAfter for external-snapshotter.
+				Labels: map[string]string{
+					LabelKeyVCRNameFull:      vcr.Name,
+					LabelKeyVCRNamespaceFull: vcr.Namespace,
+				},
 				OwnerReferences: []metav1.OwnerReference{{
 					APIVersion:         APIGroupDeckhouse,
 					Kind:               KindObjectKeeper,
