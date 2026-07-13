@@ -74,6 +74,21 @@ func main() {
 	}
 	log.Info("[main] kubernetes config has been successfully created.")
 
+	// Raise the client-go rate limiter above the conservative library defaults (QPS=5 / Burst=10).
+	// Those defaults serialize reads and status patches on the shared manager client and become the
+	// dominant bottleneck under high controller concurrency and large snapshot fan-out — independent
+	// of MaxConcurrentReconciles. 200/400 is the measured saturation knee.
+	const (
+		kubeClientQPS   = 200
+		kubeClientBurst = 400
+	)
+	kConfig.QPS = kubeClientQPS
+	kConfig.Burst = kubeClientBurst
+	log.Info("[main] kubernetes client rate limiter configured",
+		"qps", kConfig.QPS,
+		"burst", kConfig.Burst,
+	)
+
 	scheme := apiruntime.NewScheme()
 	for _, f := range resourcesSchemeFuncs {
 		err := f(scheme)
