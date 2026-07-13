@@ -28,9 +28,12 @@ import (
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/util/retry"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/controller"
+	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	deckhousev1alpha1 "github.com/deckhouse/deckhouse/deckhouse-controller/pkg/apis/deckhouse.io/v1alpha1"
@@ -623,7 +626,32 @@ func (r *VolumeCaptureRequestController) finalizeVCR(
 func (r *VolumeCaptureRequestController) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&storagev1alpha1.VolumeCaptureRequest{}).
+		// Event-driven data leg: external-snapshotter sets ReadyToUse on the CSI VolumeSnapshotContent we
+		// created; without this watch the VCR only observes it on the 5s RequeueAfter poll (see
+		// snapshotTarget). The VSC carries the owning VCR name/namespace as provenance labels, so
+		// mapVolumeSnapshotContentToVCR routes the change back to the VCR directly. The poll remains a
+		// safety net for VSCs created before the labels existed / missed events.
+		Watches(&snapshotv1.VolumeSnapshotContent{}, handler.EnqueueRequestsFromMapFunc(mapVolumeSnapshotContentToVCR)).
+		// Independent VCRs (one per captured volume) fan out under a multi-volume snapshot burst; a single
+		// worker serializes them behind the slowest CSI wait. This controller keeps no shared mutable state
+		// across reconciles, so parallel workers are safe.
+		WithOptions(controller.Options{MaxConcurrentReconciles: 4}).
 		Complete(r)
+}
+
+// mapVolumeSnapshotContentToVCR routes a CSI VolumeSnapshotContent change back to the VolumeCaptureRequest
+// that created it, using the provenance labels stamped at creation (snapshotTarget). The VSC is
+// cluster-scoped and the VCR is namespaced, so both the name and namespace labels are required. Enqueue
+// only; the reconcile re-reads truth. A VSC without both labels (e.g. not created by this controller) is
+// ignored.
+func mapVolumeSnapshotContentToVCR(_ context.Context, obj client.Object) []ctrl.Request {
+	labels := obj.GetLabels()
+	name := labels[LabelKeyVCRNameFull]
+	namespace := labels[LabelKeyVCRNamespaceFull]
+	if name == "" || namespace == "" {
+		return nil
+	}
+	return []ctrl.Request{{NamespacedName: types.NamespacedName{Namespace: namespace, Name: name}}}
 }
 
 // StartTTLScanner starts the TTL scanner.
