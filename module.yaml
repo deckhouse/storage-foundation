@@ -1,5 +1,5 @@
 name: storage-foundation
-stage: "Experimental"
+stage: "General Availability"
 subsystems:
   - storage
 namespace: d8-storage-foundation
@@ -7,13 +7,15 @@ descriptions:
   en: "Enables snapshot support, volume cloning, and secure HTTP-based export/import of persistent volume contents for compatible CSI drivers in a Kubernetes cluster."
   ru: "Включает поддержку снапшотов, клонирование томов и безопасный экспорт/импорт содержимого постоянных томов по протоколу HTTP для совместимых CSI-драйверов в кластере Kubernetes."
 requirements:
-  deckhouse: ">= 1.74"
+  deckhouse: ">= 1.76"
   modules:
-    state-snapshotter: ">= 0.0.0"
-# accessibility:
-#   editions:
-#     _default:
-#       available: true
-#       enabledInBundles:
-#         - Default
-#         - Managed
+    # storage-foundation and state-snapshotter are released together as v1.0.0; the snapshot
+    # domain (SnapshotContent/VRR) lives in state-snapshotter, so pin the GA baseline explicitly.
+    state-snapshotter: ">= 1.0.0"
+accessibility:
+  editions:
+    _default:
+      available: true
+      enabledInBundles:
+        - Default
+        - Managed
