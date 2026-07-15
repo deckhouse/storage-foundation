@@ -59,10 +59,9 @@ var configRemoveFinalizersOnModuleDelete = &pkg.HookConfig{
 	OnAfterDeleteHelm: &pkg.OrderedConfig{Order: 10},
 }
 
+// handlerRemoveFinalizersOnModuleDelete is the thin OnAfterDeleteHelm wrapper: it builds the kube
+// client and delegates to cleanup, which holds the testable removal logic.
 func handlerRemoveFinalizersOnModuleDelete(ctx context.Context, input *pkg.HookInput) error {
-	input.Logger.Info(fmt.Sprintf("[%s]: Started removing finalizers on module delete", hookName))
-	var resultErr error
-
 	cl, err := kubeclient.New(
 		admissionregistrationv1.AddToScheme,
 		clientgoscheme.AddToScheme,
@@ -73,6 +72,12 @@ func handlerRemoveFinalizersOnModuleDelete(ctx context.Context, input *pkg.HookI
 	if err != nil {
 		return fmt.Errorf("failed to initialize kube client: %w", err)
 	}
+	return cleanup(ctx, cl, input.Logger)
+}
+
+func cleanup(ctx context.Context, cl client.Client, logger pkg.Logger) error {
+	logger.Info(fmt.Sprintf("[%s]: Started removing finalizers on module delete", hookName))
+	var resultErr error
 
 	// Remove finalizers from Secrets in module namespace
 	secretList := &corev1.SecretList{}
@@ -80,7 +85,7 @@ func handlerRemoveFinalizersOnModuleDelete(ctx context.Context, input *pkg.HookI
 		resultErr = errors.Join(resultErr, fmt.Errorf("[%s]: failed to list secrets: %w", hookName, err))
 	} else {
 		for i := range secretList.Items {
-			if err := removeFinalizersFromObject(ctx, cl, &secretList.Items[i], input.Logger); err != nil {
+			if err := removeFinalizersFromObject(ctx, cl, &secretList.Items[i], logger); err != nil {
 				resultErr = errors.Join(resultErr, err)
 			}
 		}
@@ -92,7 +97,7 @@ func handlerRemoveFinalizersOnModuleDelete(ctx context.Context, input *pkg.HookI
 		resultErr = errors.Join(resultErr, fmt.Errorf("[%s]: failed to list configmaps: %w", hookName, err))
 	} else {
 		for i := range configMapList.Items {
-			if err := removeFinalizersFromObject(ctx, cl, &configMapList.Items[i], input.Logger); err != nil {
+			if err := removeFinalizersFromObject(ctx, cl, &configMapList.Items[i], logger); err != nil {
 				resultErr = errors.Join(resultErr, err)
 			}
 		}
@@ -102,7 +107,7 @@ func handlerRemoveFinalizersOnModuleDelete(ctx context.Context, input *pkg.HookI
 	for _, name := range consts.WebhookConfigurationsToDelete {
 		vwc := &admissionregistrationv1.ValidatingWebhookConfiguration{}
 		if err := cl.Get(ctx, client.ObjectKey{Name: name}, vwc); err == nil {
-			input.Logger.Info(fmt.Sprintf("[%s]: Deleting ValidatingWebhookConfiguration %s", hookName, name))
+			logger.Info(fmt.Sprintf("[%s]: Deleting ValidatingWebhookConfiguration %s", hookName, name))
 			if err := cl.Delete(ctx, vwc); err != nil {
 				resultErr = errors.Join(resultErr, fmt.Errorf("[%s]: failed to delete ValidatingWebhookConfiguration %s: %w", hookName, name, err))
 			}
@@ -120,26 +125,26 @@ func handlerRemoveFinalizersOnModuleDelete(ctx context.Context, input *pkg.HookI
 			if scList.Items[i].Provisioner != provisioner {
 				continue
 			}
-			if err := removeFinalizersFromObject(ctx, cl, &scList.Items[i], input.Logger); err != nil {
+			if err := removeFinalizersFromObject(ctx, cl, &scList.Items[i], logger); err != nil {
 				resultErr = errors.Join(resultErr, err)
 			}
 		}
 	}
 
-	// Remove finalizers from CRs from module's crd folder
+	// Remove finalizers from CRs from module's crd folder. Listed CLUSTER-WIDE deliberately:
+	// the namespaced kinds here (VolumeSnapshot, DataExport, DataImport) live in arbitrary user
+	// namespaces, not in the module namespace — confining the list to consts.ModuleNamespace
+	// would leave their finalizers in place and hang deletion once the controller is gone.
+	// (The storage-volume-data-manager 030 hook lists these CRs cluster-wide for the same reason.)
 	for _, crgvk := range consts.CRGVKsForFinalizerRemoval {
-		ns := ""
-		if crgvk.Namespaced {
-			ns = consts.ModuleNamespace
-		}
 		crList := &unstructured.UnstructuredList{}
 		crList.SetGroupVersionKind(schema.GroupVersionKind{
 			Group:   crgvk.Group,
 			Version: crgvk.Version,
 			Kind:    crgvk.Kind + "List",
 		})
-		if err := cl.List(ctx, crList, client.InNamespace(ns)); err != nil {
-			input.Logger.Info(fmt.Sprintf("[%s]: skipping CR %s (may not exist): %v", hookName, crgvk.Kind, err))
+		if err := cl.List(ctx, crList); err != nil {
+			logger.Info(fmt.Sprintf("[%s]: skipping CR %s (may not exist): %v", hookName, crgvk.Kind, err))
 			continue
 		}
 		for i := range crList.Items {
@@ -147,12 +152,12 @@ func handlerRemoveFinalizersOnModuleDelete(ctx context.Context, input *pkg.HookI
 			if len(cr.GetFinalizers()) == 0 {
 				continue
 			}
-			if err := removeFinalizersFromObject(ctx, cl, cr, input.Logger); err != nil {
+			if err := removeFinalizersFromObject(ctx, cl, cr, logger); err != nil {
 				resultErr = errors.Join(resultErr, err)
 			}
 		}
 	}
 
-	input.Logger.Info(fmt.Sprintf("[%s]: Finished removing finalizers on module delete", hookName))
+	logger.Info(fmt.Sprintf("[%s]: Finished removing finalizers on module delete", hookName))
 	return resultErr
 }
