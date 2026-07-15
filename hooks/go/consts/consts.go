@@ -78,8 +78,11 @@ var CRGVKsForFinalizerRemoval = []CRGVK{
 }
 
 type CRGVK struct {
-	Group      string
-	Version    string
-	Kind       string
+	Group   string
+	Version string
+	Kind    string
+	// Namespaced is informational only. The on-delete cleanup lists ALL kinds cluster-wide:
+	// the namespaced ones (VolumeSnapshot, DataExport, DataImport) live in arbitrary user
+	// namespaces, so confining the list to the module namespace would miss them.
 	Namespaced bool
 }
