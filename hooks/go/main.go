@@ -19,6 +19,7 @@ package main
 import (
 	"github.com/deckhouse/module-sdk/pkg/app"
 	_ "github.com/deckhouse/storage-foundation/hooks/go/020-webhook-certs"
+	_ "github.com/deckhouse/storage-foundation/hooks/go/025-migrate-legacy-crds"
 	_ "github.com/deckhouse/storage-foundation/hooks/go/030-remove-finalizers-on-module-delete"
 	_ "github.com/deckhouse/storage-foundation/hooks/go/030-snapshot-validation-webhook-certs"
 	_ "github.com/deckhouse/storage-foundation/hooks/go/040-vrr-provisioner-rbac"
