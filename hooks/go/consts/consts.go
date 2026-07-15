@@ -25,6 +25,26 @@ const (
 )
 
 const (
+	// APIGroup is the unified DataExport/DataImport API group served by storage-foundation
+	// (shared with the storage-volume-data-manager module since its v0.2.0).
+	APIGroup = "storage-foundation.deckhouse.io"
+	// LegacyAPIGroup is the pre-unification API group. The 025-migrate-legacy-crds hook moves
+	// live DataExport/DataImport resources from it to APIGroup and deletes the legacy CRDs.
+	LegacyAPIGroup = "storage.deckhouse.io"
+
+	// LegacyStorageManagerFinalizerName is the pre-unification finalizer the old controller put
+	// on PVCs involved in an export/import. The unified controller only manages resources under
+	// APIGroup, so the migration hook strips the legacy finalizer (otherwise such PVCs would hang
+	// in Terminating forever once deleted).
+	LegacyStorageManagerFinalizerName = LegacyAPIGroup + "/storage-manager-controller"
+
+	// LegacyDataExportCRDName and LegacyDataImportCRDName are the names of the pre-unification
+	// CRDs the migration hook deletes after moving live resources to APIGroup.
+	LegacyDataExportCRDName = "dataexports." + LegacyAPIGroup
+	LegacyDataImportCRDName = "dataimports." + LegacyAPIGroup
+)
+
+const (
 	// VRRProvisionerExecutorClusterRoleName is the cluster-wide ClusterRole granting the patched
 	// csi-provisioner VRR executor read access to VolumeRestoreRequest across all namespaces.
 	VRRProvisionerExecutorClusterRoleName string = "d8:storage-foundation:vrr-provisioner-executor"
@@ -53,8 +73,8 @@ var CRGVKsForFinalizerRemoval = []CRGVK{
 	{Group: "snapshot.storage.k8s.io", Version: "v1", Kind: "VolumeSnapshot", Namespaced: true},
 	{Group: "snapshot.storage.k8s.io", Version: "v1", Kind: "VolumeSnapshotContent", Namespaced: false},
 	{Group: "snapshot.storage.k8s.io", Version: "v1", Kind: "VolumeSnapshotClass", Namespaced: false},
-	{Group: "storage-foundation.deckhouse.io", Version: "v1alpha1", Kind: "DataExport", Namespaced: true},
-	{Group: "storage-foundation.deckhouse.io", Version: "v1alpha1", Kind: "DataImport", Namespaced: true},
+	{Group: APIGroup, Version: "v1alpha1", Kind: "DataExport", Namespaced: true},
+	{Group: APIGroup, Version: "v1alpha1", Kind: "DataImport", Namespaced: true},
 }
 
 type CRGVK struct {
