@@ -27,14 +27,14 @@ import (
 )
 
 type TTLControl struct {
-	tsUpdater     DataManagerAccessTimestampUpdater
-	expiredSetter DataManagerStatusExpiredSetter
-	operation     common.Operation
-	namespace     string
-	name          string
-	ttl           time.Duration
-	logger        *slog.Logger
-	idleTimer     *IdleTimer
+	tsUpdater         DataManagerAccessTimestampUpdater
+	serverStateSetter DataManagerServerStateSetter
+	operation         common.Operation
+	namespace         string
+	name              string
+	ttl               time.Duration
+	logger            *slog.Logger
+	idleTimer         *IdleTimer
 }
 
 func NewTTLControl(
@@ -43,7 +43,7 @@ func NewTTLControl(
 	namespace string,
 	name string,
 	tsUpdater DataManagerAccessTimestampUpdater,
-	expiredSetter DataManagerStatusExpiredSetter,
+	serverStateSetter DataManagerServerStateSetter,
 	logger *slog.Logger,
 ) (*TTLControl, error) {
 	ttl, err := time.ParseDuration(ttlStr)
@@ -55,14 +55,14 @@ func NewTTLControl(
 	idleTimer := NewIdleTimer(ttl, logger)
 
 	return &TTLControl{
-		tsUpdater:     tsUpdater,
-		expiredSetter: expiredSetter,
-		operation:     operation,
-		namespace:     namespace,
-		name:          name,
-		ttl:           ttl,
-		logger:        logger,
-		idleTimer:     &idleTimer,
+		tsUpdater:         tsUpdater,
+		serverStateSetter: serverStateSetter,
+		operation:         operation,
+		namespace:         namespace,
+		name:              name,
+		ttl:               ttl,
+		logger:            logger,
+		idleTimer:         &idleTimer,
 	}, nil
 }
 
@@ -70,7 +70,7 @@ func (t *TTLControl) Start(ctx context.Context, handler http.Handler, wg *sync.W
 	wg.Add(3)
 	go t.idleTimer.Run(ctx, wg)
 	go UpdateDataManagerAccessTimestamp(ctx, t.operation, t.tsUpdater, t.namespace, t.name, t.idleTimer.TickerChan, t.logger, wg)
-	go SetDataManagerStatusExpired(ctx, t.operation, t.expiredSetter, t.namespace, t.name, t.idleTimer.ExpiredChan, t.logger, wg)
+	go SetDataManagerServerStateIdleExpired(ctx, t.operation, t.serverStateSetter, t.namespace, t.name, t.idleTimer.ExpiredChan, t.logger, wg)
 
 	return RequestNotifier(handler, t.idleTimer.RequestNotifierChan)
 }
