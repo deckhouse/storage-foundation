@@ -28,9 +28,56 @@ import (
 type ConditionType string
 type ConditionReason string
 
+// Phase is the coarse-grained lifecycle state of a DataImport/DataExport, written EXCLUSIVELY by the
+// data-manager controller (mirrors the virtualization VMOP status model). It is surfaced on
+// status.phase and drives the printer STATUS column and the garbage collector's terminal-only filter.
+type Phase string
+
+const (
+	// PhasePending — the controller has not yet driven the object to a serving state (endpoint not ready).
+	// A permanently-pending object is legal (like VMOP) and is never garbage-collected or auto-failed.
+	PhasePending Phase = "Pending"
+	// PhaseReady — the server endpoint is up and serving (upload/download may proceed).
+	PhaseReady Phase = "Ready"
+	// PhaseCompleted — DataImport only: the artifact was produced successfully. Terminal.
+	PhaseCompleted Phase = "Completed"
+	// PhaseExpired — the idle-TTL window elapsed without activity. Terminal; a normal outcome, not a failure.
+	PhaseExpired Phase = "Expired"
+	// PhaseFailed — a terminal error prevented completion. Terminal.
+	PhaseFailed Phase = "Failed"
+	// PhaseTerminating — DeletionTimestamp != nil; the object is being cleaned up. Transient, not an outcome.
+	PhaseTerminating Phase = "Terminating"
+)
+
+// IsTerminal reports whether a phase is a terminal outcome (Completed | Expired | Failed). The garbage
+// collector only ever considers terminal, non-Terminating objects for deletion.
+func (p Phase) IsTerminal() bool {
+	switch p {
+	case PhaseCompleted, PhaseExpired, PhaseFailed:
+		return true
+	default:
+		return false
+	}
+}
+
+// ServerState is the raw progress signal reported by the exporter/importer server pod on
+// status.serverState. The pod is the ONLY writer; the controller derives phase and conditions from it.
+type ServerState string
+
+const (
+	// ServerStateReady — the server started and is serving requests.
+	ServerStateReady ServerState = "Ready"
+	// ServerStateFinished — DataImport only: the client's upload finished and the server persisted the
+	// fact durably before answering the client 200. The controller turns this into UploadFinished=True and
+	// starts producing the durable artifact.
+	ServerStateFinished ServerState = "Finished"
+	// ServerStateIdleExpired — the idle-TTL window elapsed without activity (no in-flight transfer). The
+	// controller turns this into the terminal Expired phase.
+	ServerStateIdleExpired ServerState = "IdleExpired"
+)
+
 const (
 	ConditionReady          ConditionType = "Ready"
-	ConditionExpired        ConditionType = "Expired"
 	ConditionUploadFinished ConditionType = "UploadFinished"
 	ConditionCompleted      ConditionType = "Completed"
 

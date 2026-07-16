@@ -216,6 +216,28 @@ spec:
                   enum: ["Block", "Filesystem"]
                   description: |
                     Volume mode of the exported data.
+                phase:
+                  type: string
+                  enum:
+                    ["Pending", "Ready", "Completed", "Expired", "Failed", "Terminating"]
+                  description: |
+                    Coarse-grained lifecycle state, written exclusively by the controller:
+                    Pending → Ready → Completed | Expired | Failed. `Terminating` denotes an object with a
+                    deletion timestamp and is a transient state, not an outcome. `Expired` is a normal
+                    terminal outcome (the idle-TTL window elapsed), not a failure.
+                completionTimestamp:
+                  type: string
+                  format: date-time
+                  description: |
+                    Time the DataImport reached a terminal phase (Completed, Expired or Failed). Set once by
+                    the controller; the garbage collector measures retention age from this timestamp.
+                serverState:
+                  type: string
+                  enum: ["Ready", "Finished", "IdleExpired"]
+                  description: |
+                    Raw progress signal reported by the importer server pod (the only writer): `Ready` when
+                    the server is serving, `Finished` when the client upload finished durably, `IdleExpired`
+                    when the idle-TTL window elapsed. The controller derives phase and conditions from it.
                 data:
                   type: object
                   description: |
@@ -256,7 +278,7 @@ spec:
                         type: string
                         description: Condition type.
                         enum:
-                          ["Ready", "Expired", "UploadFinished", "Completed"]
+                          ["Ready", "UploadFinished", "Completed"]
                       status:
                         type: string
                         description: Condition status.
@@ -336,7 +358,7 @@ spec:
         - name: Status
           type: string
           description: The status of the DataImport resource.
-          jsonPath: '.status.conditions[?(@.type=="Ready")].reason'
+          jsonPath: .status.phase
         - name: Age
           type: date
           jsonPath: .metadata.creationTimestamp
