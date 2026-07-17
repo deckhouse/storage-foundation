@@ -157,13 +157,13 @@ spec:
                         enum:
                           [
                             "Pending",
+                            "ServerReady",
                             "ValidationFailed",
                             "TargetNotReady",
                             "TargetNotFound",
                             "PVConflict",
                             "DeploymentFailed",
                             "CleanupFailed",
-                            "PodReady",
                             "PublishFailed",
                             "Expired"
                           ]

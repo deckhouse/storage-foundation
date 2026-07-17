@@ -22,6 +22,8 @@ import (
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+
+	dev1alpha1 "github.com/deckhouse/storage-foundation/api/v1alpha1"
 )
 
 // type conditionField string
@@ -81,15 +83,16 @@ const (
 	ConditionUploadFinished ConditionType = "UploadFinished"
 	ConditionCompleted      ConditionType = "Completed"
 
-	// Progress reasons.
+	// Progress / terminal reasons.
 	ReasonPending        ConditionReason = "Pending"
 	ReasonPVCCreated     ConditionReason = "PVCCreated"
-	ReasonPodReady       ConditionReason = "PodReady"
-	ReasonIngressReady   ConditionReason = "IngressReady"
+	ReasonServerReady    ConditionReason = "ServerReady"
+	ReasonInProgress     ConditionReason = "InProgress"
 	ReasonExpired        ConditionReason = "Expired"
 	ReasonDeleted        ConditionReason = "Deleted"
 	ReasonUploadFinished ConditionReason = "UploadFinished"
 	ReasonCompleted      ConditionReason = "Completed"
+	ReasonFailed         ConditionReason = "Failed"
 
 	// Not ready error reasons (shared by DataExport and DataImport).
 	ReasonPublishFailed    ConditionReason = "PublishFailed"
@@ -101,6 +104,52 @@ const (
 	ReasonDeploymentFailed ConditionReason = "DeploymentFailed"
 	ReasonCleanupFailed    ConditionReason = "CleanupFailed"
 )
+
+// StripConditionsNotIn removes every status condition whose type is not in the allowed set and reports
+// whether anything was removed. It migrates legacy objects onto the current condition catalog: existing
+// DataImport/DataExport objects carry a stale condition (type "Expired") that the current controller
+// seeded and the narrowed CRD condition-type enum no longer permits. status.conditions is an atomic list
+// (no x-kubernetes-list-type), so a plain meta.SetStatusCondition leaves the stale entry in place and any
+// subsequent Status().Update would be rejected with an enum-validation error (and validation ratcheting
+// is absent on older Kubernetes). The controller MUST call this before its first status write so the
+// persisted conditions list only ever contains the current catalog.
+func StripConditionsNotIn(status *dev1alpha1.DataExportImportStatus, allowed ...ConditionType) bool {
+	if status == nil || len(status.Conditions) == 0 {
+		return false
+	}
+	allowedSet := make(map[string]struct{}, len(allowed))
+	for _, t := range allowed {
+		allowedSet[string(t)] = struct{}{}
+	}
+	kept := make([]metav1.Condition, 0, len(status.Conditions))
+	changed := false
+	for _, c := range status.Conditions {
+		if _, ok := allowedSet[c.Type]; ok {
+			kept = append(kept, c)
+		} else {
+			changed = true
+		}
+	}
+	if changed {
+		status.Conditions = kept
+	}
+	return changed
+}
+
+// SetCompletionTimestampOnce stamps status.completionTimestamp the first time the object reaches a
+// terminal phase (Completed | Expired | Failed) and leaves it untouched afterwards, so the value records
+// when the object first finished. The garbage collector measures retention age from this timestamp. It
+// reports whether the timestamp was set (for change detection). now is injected for testability.
+func SetCompletionTimestampOnce(status *dev1alpha1.DataExportImportStatus, phase Phase, now metav1.Time) bool {
+	if status == nil {
+		return false
+	}
+	if phase.IsTerminal() && status.CompletionTimestamp == nil {
+		status.CompletionTimestamp = &now
+		return true
+	}
+	return false
+}
 
 func GetCondition(conditions []metav1.Condition, conditionType ConditionType) *metav1.Condition {
 	for i := range conditions {

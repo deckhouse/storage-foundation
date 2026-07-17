@@ -35,6 +35,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/client-go/dynamic"
+	"k8s.io/client-go/util/retry"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
@@ -56,6 +57,21 @@ type DataexportReconciler struct {
 	// without compiling in domain types.
 	Dynamic    dynamic.Interface
 	RESTMapper meta.RESTMapper
+	// Now returns the current time; it is injectable so tests can assert completionTimestamp
+	// deterministically. Defaults to metav1.Now.
+	Now func() metav1.Time
+}
+
+// dataExportRequeueInterval is the soft requeue delay used when a benign write conflict survives the
+// update retry, so the reconcile is retried promptly without escalating to an error backoff.
+const dataExportRequeueInterval = 10 * time.Second
+
+// now returns the reconciler clock, defaulting to metav1.Now when unset.
+func (r *DataexportReconciler) now() metav1.Time {
+	if r.Now != nil {
+		return r.Now()
+	}
+	return metav1.Now()
 }
 
 // pvRecoveryInfo holds validated PV annotation data needed for orphan cleanup and idempotency checks.
@@ -87,6 +103,10 @@ var (
 	ErrPVConflict       = errors.New("pv conflict")
 	ErrDeploymentFailed = errors.New("deployment failed")
 	ErrCleanupFailed    = errors.New("cleanup failed")
+	// ErrTerminal marks a reconcile error as un-retryable (an invalid spec / target). The deferred block
+	// turns it into a terminal phase=Failed and stops requeueing. Transient errors (API/get failures) are
+	// NOT wrapped and keep the object retryable (a permanently-pending export is legal, never GC'd).
+	ErrTerminal = errors.New("terminal")
 )
 
 func (r *DataexportReconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ctrl.Result, err error) {
@@ -112,30 +132,88 @@ func (r *DataexportReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 	dataExportOrig := dataExport.DeepCopy()
 	defer func() {
 		mutateReadyByErr(dataExport, err)
+		r.finalizeDataExportStatus(dataExport, err)
 		updateErr := r.updateDataExport(ctx, dataExportOrig, dataExport)
-		// Preserve the original reconcile error while also surfacing the update failure.
-		// controller-runtime requeues on any non-nil error, so both failures are retried.
-		err = errors.Join(err, updateErr)
+		switch {
+		case errors.Is(err, ErrTerminal):
+			// Un-retryable failure, now recorded as phase=Failed. Do not requeue the error; surface only a
+			// (retryable) status-write failure so the terminal status still gets persisted on retry.
+			result = ctrl.Result{}
+			err = updateErr
+		case err != nil:
+			// Retryable reconcile error: its backoff governs the requeue, so drop any stale RequeueAfter
+			// and surface the update failure alongside the original error.
+			result = ctrl.Result{}
+			err = errors.Join(err, updateErr)
+		case updateErr != nil && kubeerrors.IsConflict(updateErr):
+			// updateDataExport already retried on conflict; a surviving conflict is benign — requeue soon
+			// instead of escalating to an error backoff.
+			result = ctrl.Result{RequeueAfter: dataExportRequeueInterval}
+		case updateErr != nil:
+			err = updateErr
+		}
 	}()
+
+	// Migrate legacy objects onto the current single-condition (Ready) catalog before any status write:
+	// pre-existing DataExports carry a stale "Expired" condition the narrowed CRD condition-type enum no
+	// longer permits; leaving it in the atomic conditions list would fail enum validation on every write.
+	StripConditionsNotIn(&dataExport.Status, ConditionReady)
+
+	// Migrate a legacy Ready=True reason (PodReady) onto the current catalog (ServerReady): a
+	// fully-provisioned DataExport reaches Case 5, which never rewrites the Ready reason, so without this a
+	// migrated object would keep PodReady forever and the narrowed reason enum would reject every write.
+	if ready := meta.FindStatusCondition(dataExport.Status.Conditions, string(ConditionReady)); ready != nil &&
+		ready.Status == metav1.ConditionTrue && ready.Reason != string(ReasonServerReady) {
+		ready.Reason = string(ReasonServerReady)
+	}
+
+	// Case 1: Resource marked for delete. Deletion takes precedence over validation so a terminally-invalid
+	// object (phase=Failed from a bad spec/target) stays deletable and the garbage collector can reap it.
+	// Nothing is provisioned for an invalid spec, so if the target cannot even be classified there is
+	// nothing to restore — just drop our finalizer to unblock deletion.
+	if dataExport.DeletionTimestamp != nil {
+		log.Printf("Case 1: DataExport resource %s/%s marked for delete", req.Namespace, req.Name)
+		_, delTargetKindShort, delClassifyErr := classifyTargetRef(dataExport.Spec.TargetRef.Group, dataExport.Spec.TargetRef.Kind)
+		if delClassifyErr != nil {
+			log.Printf("DataExport %s/%s target unclassifiable and nothing provisioned; dropping finalizer to allow deletion", req.Namespace, req.Name)
+			RemoveFinalizer(ctx, r.Client, dataExport, dev1alpha1.StorageManagerFinalizerName)
+			return ctrl.Result{}, nil
+		}
+		delNames := NewNamesFromShort(delTargetKindShort, dataExport.Spec.TargetRef.Name, dataExport.Namespace, dataExport.Name)
+		if err := r.clearDataExportProviding(ctx, dataExport, delNames); err != nil {
+			if errors.Is(err, ErrInvalidOriginalReclaimPolicy) {
+				// PV was labeled as inconsistent (missing or corrupted original reclaimPolicy).
+				// Stop reconcile without error or requeue — finalizer stays, admin must investigate.
+				return ctrl.Result{}, nil
+			}
+			return ctrl.Result{}, fmt.Errorf("%w: failed to restore configuration before DE: %w", ErrCleanupFailed, err)
+		}
+		return ctrl.Result{}, nil
+	}
 
 	err = r.validateDataExportSpec(ctx, dataExport)
 	if err != nil {
 		log.Printf("DataExport resource %s/%s spec validation failed: %v\n", req.Namespace, req.Name, err)
-		meta.SetStatusCondition(&dataExport.Status.Conditions, metav1.Condition{
-			Type:               string(ConditionReady),
-			Status:             metav1.ConditionFalse,
-			ObservedGeneration: dataExport.Generation,
-			Reason:             string(ReasonValidationFailed),
-			Message:            err.Error(),
-		})
-		// Return nil (no requeue): spec validation failure is permanent until the user
-		// corrects the spec. The next reconcile will be triggered by a spec change event.
-		return ctrl.Result{}, nil
+		if errors.Is(err, ErrTerminal) {
+			// Genuine spec/target validation failure — terminal until the user corrects the spec. Record
+			// Ready=ValidationFailed; the deferred maps ErrTerminal to phase=Failed and stops requeueing.
+			meta.SetStatusCondition(&dataExport.Status.Conditions, metav1.Condition{
+				Type:               string(ConditionReady),
+				Status:             metav1.ConditionFalse,
+				ObservedGeneration: dataExport.Generation,
+				Reason:             string(ReasonValidationFailed),
+				Message:            err.Error(),
+			})
+			return ctrl.Result{}, err
+		}
+		// Transient failure (e.g. an API error while probing the VirtualDisk CRD) — retry without marking
+		// the object Failed; leave the Ready reason untouched.
+		return ctrl.Result{}, err
 	}
 
 	// Resolve the GroupKind targetRef to a stable short kind (pvc/vd/snap) used for deterministic
 	// resource naming and orphan recovery. Classification failures (e.g. a bare VolumeSnapshotContent)
-	// are permanent spec errors, surfaced like validation failures (no requeue).
+	// are permanent spec errors, surfaced like validation failures.
 	_, targetKindShort, classifyErr := classifyTargetRef(dataExport.Spec.TargetRef.Group, dataExport.Spec.TargetRef.Kind)
 	if classifyErr != nil {
 		log.Printf("DataExport resource %s/%s targetRef invalid: %v\n", req.Namespace, req.Name, classifyErr)
@@ -146,49 +224,56 @@ func (r *DataexportReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 			Reason:             string(ReasonValidationFailed),
 			Message:            classifyErr.Error(),
 		})
-		return ctrl.Result{}, nil
+		// An invalid/forbidden targetRef is terminal until the spec is corrected: the deferred maps
+		// ErrTerminal to phase=Failed and stops requeueing.
+		return ctrl.Result{}, fmt.Errorf("%w: %w", ErrTerminal, classifyErr)
 	}
 	generatedNames := NewNamesFromShort(targetKindShort, dataExport.Spec.TargetRef.Name, dataExport.Namespace, dataExport.Name)
 
-	// Case 1: Resource marked for delete
-	if dataExport.DeletionTimestamp != nil {
-		log.Printf("Case 2: DataExport resource marked for delete")
-		err := r.clearDataExportProviding(ctx, dataExport, generatedNames)
-		if err != nil {
-			if errors.Is(err, ErrInvalidOriginalReclaimPolicy) {
-				// PV was labeled as inconsistent (missing or corrupted original reclaimPolicy).
-				// Stop reconcile without error or requeue — finalizer stays, admin must investigate.
-				return ctrl.Result{}, nil
-			}
-			return ctrl.Result{}, fmt.Errorf("%w: failed to restore configuration before DE: %w", ErrCleanupFailed, err)
-		}
-		return ctrl.Result{}, nil
-	}
-
-	// Case 2: DataExport pod time-to-live has expired
-	if meta.IsStatusConditionTrue(dataExport.Status.Conditions, string(ConditionExpired)) {
-		log.Printf("Case 2: DataExport pod time-to-live has expired")
+	// Case 2: DataExport idle-TTL expired — the exporter pod reported serverState=IdleExpired (idle >=
+	// spec.ttl with no in-flight download; the pod enforces the window via --ttl=spec.ttl), OR a legacy
+	// object was already expired under the old condition-based mechanism (Ready=False/Expired). Terminal
+	// Expired outcome: restore the exported PV/PVC and tear down. Deletion of the CR itself is left to the
+	// garbage collector after the retention window (no "please delete it manually" — removal is automatic).
+	if isDataExportExpired(dataExport) {
+		log.Printf("Case 2: DataExport idle TTL expired")
 		readyCond := meta.FindStatusCondition(dataExport.Status.Conditions, string(ConditionReady))
 		// Guard against redundant condition updates: if Ready is already Expired, skip the
 		// SetStatusCondition call to avoid a spurious lastTransitionTime bump on every reconcile.
-		if readyCond != nil && readyCond.Reason != string(ReasonExpired) {
+		if readyCond == nil || readyCond.Reason != string(ReasonExpired) {
 			meta.SetStatusCondition(&dataExport.Status.Conditions, metav1.Condition{
 				Type:               string(ConditionReady),
 				Status:             metav1.ConditionFalse,
 				Reason:             string(ReasonExpired),
-				Message:            "DataExport time to live expired. Please, delete it manually",
+				Message:            "DataExport idle timeout expired",
 				ObservedGeneration: dataExport.Generation,
 			})
 		}
-		err = r.clearDataExportProviding(ctx, dataExport, generatedNames)
-		if err != nil {
-			if errors.Is(err, ErrInvalidOriginalReclaimPolicy) {
-				// PV was labeled as inconsistent (missing or corrupted original reclaimPolicy).
-				// Stop reconcile without error or requeue — finalizer stays, admin must investigate.
-				return ctrl.Result{}, nil
+		// Run the PV/PVC restore + teardown ONCE: clearDataExportProviding removes our finalizer when it
+		// finishes, so gate on the finalizer still being present. Expired is a long-lived state (the CR is
+		// kept for the GC), and clearDataExportProviding -> recoverUserPVC is NOT idempotent — re-running it
+		// on an already-restored PV would mark the healthy PV inconsistent.
+		if ContainsString(dataExport.Finalizers, dev1alpha1.StorageManagerFinalizerName) {
+			err = r.clearDataExportProviding(ctx, dataExport, generatedNames)
+			if err != nil {
+				if errors.Is(err, ErrInvalidOriginalReclaimPolicy) {
+					// PV was labeled as inconsistent (missing or corrupted original reclaimPolicy).
+					// Stop reconcile without error or requeue — finalizer stays, admin must investigate.
+					return ctrl.Result{}, nil
+				}
+				return ctrl.Result{}, fmt.Errorf("%w: failed to restore configuration before DE: %w", ErrCleanupFailed, err)
 			}
-			return ctrl.Result{}, fmt.Errorf("%w: failed to restore configuration before DE: %w", ErrCleanupFailed, err)
 		}
+		return ctrl.Result{}, nil
+	}
+
+	// One-shot terminal (Failed): a DataExport that terminally failed validation is never re-provisioned
+	// (VMOP model). Keep the body inert so a later resync (e.g. the VirtualDisk CRD appearing) does not
+	// run Case 4 and detach the user PVC under a terminal phase, and so the GC clock (completionTimestamp,
+	// stamped once) is not disturbed. Expired is handled by Case 2 above; a DataExport has no Completed
+	// phase, so this only catches Failed.
+	if Phase(dataExport.Status.Phase).IsTerminal() {
+		log.Printf("DataExport %s/%s is terminal (phase=%s), skipping reconcile", req.Namespace, req.Name, dataExport.Status.Phase)
 		return ctrl.Result{}, nil
 	}
 
@@ -197,22 +282,14 @@ func (r *DataexportReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 	switch {
 	case readyCond == nil:
 		log.Printf("Case 3: DataExport resource newly created")
-		// Initialize both conditions so downstream cases (Expired check, mutateReadyByErr)
-		// always have a defined state to work with. The finalizer is added here to ensure
-		// clearDataExportProviding runs on deletion even if the controller restarts
-		// before implementation is complete.
+		// Initialize the Ready condition so downstream cases (Expired check, mutateReadyByErr) always have
+		// a defined state to work with. The finalizer is added here to ensure clearDataExportProviding
+		// runs on deletion even if the controller restarts before implementation is complete.
 		meta.SetStatusCondition(&dataExport.Status.Conditions, metav1.Condition{
 			Type:               string(ConditionReady),
 			Status:             metav1.ConditionFalse,
 			Reason:             string(ReasonPending),
 			Message:            "Started",
-			ObservedGeneration: dataExport.Generation,
-		})
-		meta.SetStatusCondition(&dataExport.Status.Conditions, metav1.Condition{
-			Type:               string(ConditionExpired),
-			Status:             metav1.ConditionFalse,
-			Reason:             string(ReasonPending),
-			Message:            "TTL not expired",
 			ObservedGeneration: dataExport.Generation,
 		})
 		EnsureFinalizer(ctx, r.Client, dataExport, dev1alpha1.StorageManagerFinalizerName)
@@ -289,52 +366,113 @@ func mutateReadyByErr(dataExport *dev1alpha1.DataExport, reconcileErr error) {
 	})
 }
 
-// updateDataExport persists all accumulated in-memory mutations (spec, metadata, status) in a single
-// deferred call at the end of Reconcile. Splits the write into two API calls: one for the main object
-// (spec/finalizers/labels/annotations) and one for the status subresource, because Kubernetes treats
-// them as independent resources. Uses deStatusCopy to preserve status across the main Update call,
-// since the API server response overwrites the in-memory status with the server-side value.
+// isDataExportExpired reports whether the export has terminally idle-expired: the exporter pod reported
+// serverState=IdleExpired, or a legacy object was expired under the old condition-based mechanism
+// (Ready=False/Expired). Recognizing the legacy form keeps a migrated pre-upgrade expired object terminal
+// instead of re-provisioning it (which would re-detach the user PVC).
+func isDataExportExpired(de *dev1alpha1.DataExport) bool {
+	if ServerState(de.Status.ServerState) == ServerStateIdleExpired {
+		return true
+	}
+	ready := meta.FindStatusCondition(de.Status.Conditions, string(ConditionReady))
+	return ready != nil && ready.Status == metav1.ConditionFalse && ready.Reason == string(ReasonExpired)
+}
+
+// computeDataExportPhase derives the coarse-grained phase (a DataExport has no Completed phase). A
+// terminal phase is STICKY, and terminal transitions are EXPLICIT: Failed only from an ErrTerminal
+// reconcile error (never from an ambiguous condition reason like ValidationFailed that is also used for
+// retryable failures), Expired from the idle signal. Precedence: deletion > sticky-terminal > expired >
+// failed > ready > pending.
+func computeDataExportPhase(de *dev1alpha1.DataExport, reconcileErr error) Phase {
+	if de.DeletionTimestamp != nil {
+		return PhaseTerminating
+	}
+	if Phase(de.Status.Phase).IsTerminal() {
+		return Phase(de.Status.Phase)
+	}
+	if isDataExportExpired(de) {
+		return PhaseExpired
+	}
+	if errors.Is(reconcileErr, ErrTerminal) {
+		return PhaseFailed
+	}
+	if meta.IsStatusConditionTrue(de.Status.Conditions, string(ConditionReady)) {
+		return PhaseReady
+	}
+	return PhasePending
+}
+
+// finalizeDataExportStatus computes phase and stamps completionTimestamp once. It runs in the deferred
+// block after the reconcile body and mutateReadyByErr, so it always sees the definitive Ready condition
+// (which the reconcile body already sets: Expired in Case 2, ValidationFailed on terminal errors). The
+// controller is the sole writer of phase, completionTimestamp and the Ready condition.
+func (r *DataexportReconciler) finalizeDataExportStatus(de *dev1alpha1.DataExport, reconcileErr error) {
+	if de == nil {
+		return
+	}
+	phase := computeDataExportPhase(de, reconcileErr)
+	de.Status.Phase = string(phase)
+	SetCompletionTimestampOnce(&de.Status, phase, r.now())
+}
+
+// updateDataExport persists the accumulated in-memory mutations (spec/metadata, status) at the end of
+// Reconcile. Metadata and the status subresource are independent resources, so each gets its own API
+// call. Both are wrapped in RetryOnConflict with a fresh GET: the exporter pod writes the pod-owned
+// status fields (serverState, accessTimestamp, url, ca) concurrently (heartbeat every 30s), so a blind
+// Status().Update off the reconcile-start snapshot would clobber a concurrent serverState=IdleExpired
+// write. Instead the controller-owned status is re-applied onto the freshly read object while the
+// pod-owned fields are carried over from the latest server-side state.
 func (r *DataexportReconciler) updateDataExport(ctx context.Context, dataExportOld, dataExportNew *dev1alpha1.DataExport) error {
 	if dataExportNew == nil || dataExportOld == nil {
 		return nil
 	}
 
-	needStatusUpdate := false
-	needUpdate := false
-	var deStatusCopy *dev1alpha1.DataExportImportStatus
-
-	// Detect spec/metadata changes by comparing against the pre-reconcile copy
-	if !reflect.DeepEqual(dataExportOld.Spec, dataExportNew.Spec) ||
-		!reflect.DeepEqual(dataExportOld.Finalizers, dataExportNew.Finalizers) ||
-		!reflect.DeepEqual(dataExportOld.Labels, dataExportNew.Labels) ||
-		!reflect.DeepEqual(dataExportOld.Annotations, dataExportNew.Annotations) {
-		needUpdate = true
+	// The controller only ever changes its own finalizer (and status); it never writes spec/labels/
+	// annotations. So the metadata write is reduced to reconciling that single finalizer onto the fresh
+	// object, which avoids clobbering concurrent third-party edits (spec, labels, foregroundDeletion).
+	// clearDataExportProviding zeroes Finalizers, so a removal here strips exactly our finalizer.
+	wantFinalizer := ContainsString(dataExportNew.Finalizers, dev1alpha1.StorageManagerFinalizerName)
+	needMeta := wantFinalizer != ContainsString(dataExportOld.Finalizers, dev1alpha1.StorageManagerFinalizerName)
+	needStatus := !reflect.DeepEqual(dataExportOld.Status, dataExportNew.Status)
+	if !needMeta && !needStatus {
+		return nil
 	}
 
-	// Save status before the main Update: the API server response will overwrite in-memory status
-	if !reflect.DeepEqual(dataExportOld.Status, dataExportNew.Status) {
-		needStatusUpdate = true
-		deStatusCopy = dataExportNew.Status.DeepCopy()
-	}
+	statusCopy := dataExportNew.Status.DeepCopy()
+	key := types.NamespacedName{Namespace: dataExportNew.Namespace, Name: dataExportNew.Name}
 
-	// Persist spec/metadata (non-status fields); updates ResourceVersion in dataExportNew
-	if needUpdate {
-		err := r.Client.Update(ctx, dataExportNew)
-		if err != nil {
-			return fmt.Errorf("update DataExport failed: %w", err)
+	err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		fresh := &dev1alpha1.DataExport{}
+		if err := r.Client.Get(ctx, key, fresh); err != nil {
+			return err
 		}
-	}
 
-	// Restore the saved status (overwritten by Update response) and persist via status subresource
-	if needStatusUpdate {
-		dataExportNew.Status = *deStatusCopy
-		err := r.Client.Status().Update(ctx, dataExportNew)
-		if err != nil {
-			return fmt.Errorf("update DataExport status failed: %w", err)
+		if needMeta {
+			fresh.Finalizers = ReconcileFinalizer(fresh.Finalizers, dev1alpha1.StorageManagerFinalizerName, wantFinalizer)
+			if err := r.Client.Update(ctx, fresh); err != nil {
+				return fmt.Errorf("update DataExport failed: %w", err)
+			}
 		}
-	}
 
-	return nil
+		if needStatus {
+			merged := statusCopy.DeepCopy()
+			// Preserve the pod-owned status fields from the latest server-side object; the controller owns
+			// everything else (the Ready condition, phase, completionTimestamp, publicURL, volumeMode).
+			merged.Url = fresh.Status.Url
+			merged.CA = fresh.Status.CA
+			merged.AccessTimestamp = fresh.Status.AccessTimestamp
+			merged.ServerState = fresh.Status.ServerState
+			fresh.Status = *merged
+			if err := r.Client.Status().Update(ctx, fresh); err != nil {
+				return fmt.Errorf("update DataExport status failed: %w", err)
+			}
+		}
+
+		return nil
+	})
+	// The object was deleted out from under us (finalizer just removed and Kubernetes finalized deletion,
+	// or the GC deleted it): nothing left to persist — treat as success.
+	return client.IgnoreNotFound(err)
 }
 
 func (r *DataexportReconciler) implementDataExportProviding(ctx context.Context, dataExport *dev1alpha1.DataExport, generatedNames Names) error {
@@ -1245,13 +1383,25 @@ func (r *DataexportReconciler) waitingForDeploymentLaunch(ctx context.Context, d
 
 		// Check for all replicas started
 		if deploy.Status.AvailableReplicas == *deploy.Spec.Replicas {
+			// The deployment is up; wait for the exporter pod to report it is actually serving
+			// (serverState=Ready, written by the pod once it is listening and its CA is published) before
+			// flipping Ready=True/ServerReady. Re-read the DataExport so the serverState the pod just wrote
+			// is observed inside this poll.
+			fresh := &dev1alpha1.DataExport{}
+			if getErr := r.Client.Get(ctx, types.NamespacedName{Namespace: dataExport.Namespace, Name: dataExport.Name}, fresh); getErr != nil {
+				return false, getErr
+			}
+			if ServerState(fresh.Status.ServerState) != ServerStateReady {
+				log.Printf("Deployment %q available; awaiting exporter serverState=Ready\n", deployName)
+				return false, nil
+			}
 			readyCond := meta.FindStatusCondition(dataExport.Status.Conditions, string(ConditionReady))
-			if readyCond != nil && readyCond.Reason != string(ReasonExpired) {
+			if readyCond == nil || readyCond.Reason != string(ReasonExpired) {
 				meta.SetStatusCondition(&dataExport.Status.Conditions, metav1.Condition{
 					Type:               string(ConditionReady),
 					Status:             metav1.ConditionTrue,
-					Reason:             string(ReasonPodReady),
-					Message:            "Pod is ready and export started",
+					Reason:             string(ReasonServerReady),
+					Message:            "Server is ready and export started",
 					ObservedGeneration: dataExport.Generation,
 				})
 			}
@@ -1692,30 +1842,43 @@ func isVDReady(vd *virtv1alpha2.VirtualDisk, condition metav1.Condition) bool {
 // targetRef (C6) there is no kind allowlist: classifyTargetRef rejects structurally invalid / forbidden
 // targets (e.g. a bare VolumeSnapshotContent), and only the live-VirtualDisk path needs a CRD presence
 // pre-check (the snapshot path is generic and surfaces missing targets through Ready conditions).
+// validateDataExportSpec performs cheap, permanent-until-spec-change validation. It returns an
+// ErrTerminal-wrapped error for genuine spec/target problems (mapped to phase=Failed by the caller) and a
+// plain (retryable) error for transient API failures — notably a failure to probe the VirtualDisk CRD,
+// which must NOT be collapsed into "CRD does not exist" and fail a healthy export.
 func (r *DataexportReconciler) validateDataExportSpec(ctx context.Context, dataExport *dev1alpha1.DataExport) error {
 	cat, _, err := classifyTargetRef(dataExport.Spec.TargetRef.Group, dataExport.Spec.TargetRef.Kind)
 	if err != nil {
-		return err
+		return fmt.Errorf("%w: %w", ErrTerminal, err)
 	}
 
-	if cat == categoryLiveVirtualDisk && !r.isVirtualDiskCRDExists(ctx) {
-		return fmt.Errorf("CRD %s does not exist in the cluster", virtv1alpha2.VirtualDiskKind)
+	if cat == categoryLiveVirtualDisk {
+		exists, err := r.isVirtualDiskCRDExists(ctx)
+		if err != nil {
+			// Transient API error probing the CRD — retryable, not a validation failure.
+			return err
+		}
+		if !exists {
+			return fmt.Errorf("%w: CRD %s does not exist in the cluster", ErrTerminal, virtv1alpha2.VirtualDiskKind)
+		}
 	}
 
 	return nil
 }
 
-func (r *DataexportReconciler) isVirtualDiskCRDExists(ctx context.Context) bool {
+// isVirtualDiskCRDExists reports whether the VirtualDisk CRD is registered. A NotFound means it is
+// genuinely absent (false, nil); any other error is transient and is propagated so the caller can retry
+// instead of mistaking an API hiccup for an absent CRD.
+func (r *DataexportReconciler) isVirtualDiskCRDExists(ctx context.Context) (bool, error) {
 	crd := &apiextensionsv1.CustomResourceDefinition{}
 	err := r.Reader.Get(ctx, types.NamespacedName{Name: dev1alpha1.VirtualDiskCRDName}, crd)
 	if err != nil {
 		if kubeerrors.IsNotFound(err) {
-			return false
+			return false, nil
 		}
-		log.Printf("Error checking for VirtualDisk CRD existence: %v", err)
-		return false
+		return false, fmt.Errorf("checking for VirtualDisk CRD existence: %w", err)
 	}
-	return true
+	return true, nil
 }
 
 // validatePVNotOwnedByAnotherDataExport checks if the PV is already being used
