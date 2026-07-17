@@ -79,15 +79,7 @@ const (
 // Annotation key constants
 const (
 	AnnotationKeyCSIVSName = "storage-foundation.deckhouse.io/csi-vs-name"
-	AnnotationKeyTTL       = "storage-foundation.deckhouse.io/ttl" // TTL annotation for automatic deletion
 	// AnnotationKeyReadyToStartSnapshot is set on VCR to signal that snapshot-controller should create VSC
 	// This annotation contains VCR UID and is used by snapshot-controller to identify VCR requests
 	AnnotationKeyReadyToStartSnapshot = "volumesnapshot.deckhouse.io/vcr"
-)
-
-// TTL constants
-const (
-	DefaultVolumeRequestTTL = "10m" // Default TTL for VolumeCaptureRequest and VolumeRestoreRequest
-	// DefaultRetentionSnapshotTTL and DefaultRetentionDetachTTL are defined in config package
-	// They are used as fallback if config is not available
 )

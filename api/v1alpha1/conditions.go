@@ -30,8 +30,6 @@ const (
 	ConditionReasonInvalidMode = "InvalidMode"
 	// ConditionReasonIncompatible indicates incompatible configuration (e.g., WFFC or cross-SC restore)
 	ConditionReasonIncompatible = "Incompatible"
-	// ConditionReasonInvalidTTL indicates invalid TTL annotation format
-	ConditionReasonInvalidTTL = "InvalidTTL"
 	// ConditionReasonInternalError indicates internal error
 	ConditionReasonInternalError = "InternalError"
 	// ConditionReasonNotFound indicates resource not found

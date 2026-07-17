@@ -39,9 +39,9 @@ import (
 //
 // Why DataImport keeps its own keeper even though storage-foundation already retains the artifact:
 // the VCR controller owns the produced VSC/PV via a retainer ObjectKeeper that FollowObject-follows the
-// *VCR*, and a background TTL scanner deletes completed VCRs at CompletionTimestamp + RequestTTL
-// (default 10m), cascading GC to that retainer keeper and the artifact object. So the storage-foundation
-// keeper only anchors the artifact to the VCR's (short) lifetime, not to the import's. DataImport adds
+// *VCR*, and the VCR garbage collector deletes a completed VCR at CompletionTimestamp + GC_VCR_TTL
+// (default 24h), cascading GC to that retainer keeper and the artifact object. So the storage-foundation
+// keeper only anchors the artifact to the VCR's (bounded) lifetime, not to the import's. DataImport adds
 // its own cluster-scoped keeper (FollowObject -> DataImport) as an ADDITIONAL, non-controller owner of
 // the artifact so the artifact's Kubernetes object survives the VCR TTL until the state-snapshotter
 // import orchestrator (C5) adopts it under a SnapshotContent (the durable owner). Multi-owner GC keeps

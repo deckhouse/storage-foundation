@@ -105,6 +105,27 @@ spec:
                   enum: ["Block", "Filesystem"]
                   description: |
                     Volume mode of the exported data.
+                phase:
+                  type: string
+                  enum: ["Pending", "Ready", "Expired", "Failed", "Terminating"]
+                  description: |
+                    Coarse-grained lifecycle state, written exclusively by the controller:
+                    Pending → Ready → Expired | Failed (a DataExport has no Completed phase). `Terminating`
+                    denotes an object with a deletion timestamp and is a transient state, not an outcome.
+                    `Expired` is a normal terminal outcome (the idle-TTL window elapsed), not a failure.
+                completionTimestamp:
+                  type: string
+                  format: date-time
+                  description: |
+                    Time the DataExport reached a terminal phase (Expired or Failed). Set once by the
+                    controller; the garbage collector measures retention age from this timestamp.
+                serverState:
+                  type: string
+                  enum: ["Ready", "IdleExpired"]
+                  description: |
+                    Raw progress signal reported by the exporter server pod (the only writer): `Ready` when
+                    the server is serving, `IdleExpired` when the idle-TTL window elapsed. The controller
+                    derives phase and conditions from it.
                 conditions:
                   type: array
                   description: |
@@ -123,7 +144,7 @@ spec:
                         type: string
                         description: |
                           Type of the condition.
-                        enum: ["Ready", "Expired"]
+                        enum: ["Ready"]
                       status:
                         type: string
                         description: |
@@ -136,13 +157,13 @@ spec:
                         enum:
                           [
                             "Pending",
+                            "ServerReady",
                             "ValidationFailed",
                             "TargetNotReady",
                             "TargetNotFound",
                             "PVConflict",
                             "DeploymentFailed",
                             "CleanupFailed",
-                            "PodReady",
                             "PublishFailed",
                             "Expired"
                           ]
@@ -185,7 +206,7 @@ spec:
         - name: Status
           type: string
           description: The status of the DataExport resource.
-          jsonPath: '.status.conditions[?(@.type=="Ready")].reason'
+          jsonPath: .status.phase
         - name: Age
           type: date
           jsonPath: .metadata.creationTimestamp

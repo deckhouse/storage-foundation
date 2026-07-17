@@ -31,9 +31,10 @@ import (
 // Ownership note: the produced VolumeSnapshotContent/PersistentVolume is NOT ownerless and DataImport is
 // NOT its controller owner. storage-foundation's VolumeCaptureRequest controller creates the artifact
 // controller-owned by its own retainer ObjectKeeper (retainer-vcr-<vcrUID> / ret-pv-<vcrUID>) which
-// FollowObject-follows the VCR — but that keeper only anchors the artifact to the VCR's lifetime, and a
-// background TTL scanner deletes completed VCRs (default 10m), cascading GC to the artifact. So
-// DataImport ALSO adds its own keeper (FollowObject -> DataImport) as a non-controller additional owner
+// FollowObject-follows the VCR — but that keeper only anchors the artifact to the VCR's lifetime, and the
+// VCR garbage collector deletes a completed VCR after GC_VCR_TTL (default 24h), cascading GC to the
+// artifact. So DataImport ALSO adds its own keeper (FollowObject -> DataImport) as a non-controller
+// additional owner
 // (object_keeper.go) to anchor the artifact to the import's lifetime until C5 adopts it under a durable
 // SnapshotContent owner. Independently, DataImport pins the reclaim policy to Retain so a deleted per-run
 // handle never reclaims the physical data before C5 adopts it.

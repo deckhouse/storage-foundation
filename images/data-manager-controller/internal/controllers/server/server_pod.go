@@ -70,6 +70,15 @@ func (r *PodReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.R
 
 			dataManager, err := common.GetDataManager(ctx, r.Client, dataExportNamespacedName, operation)
 			if err != nil {
+				if kubeerrors.IsNotFound(err) {
+					// The owning DataExport/DataImport is already gone (deleted or garbage-collected) while
+					// its pod is still terminating. There is nothing to update; the pod is reaped by the
+					// owner's finalizer cleanup, not by this reconciler. Log and stop without requeue so a
+					// short-lived orphan pod does not produce an error-requeue storm.
+					log.Printf("Owner DataManager %s/%s not found for pod %s/%s, skipping URL update\n",
+						dataExportNamespacedName.Namespace, dataExportNamespacedName.Name, req.Namespace, req.Name)
+					return ctrl.Result{}, nil
+				}
 				return ctrl.Result{}, fmt.Errorf("failed to get DataManager resource from cache: %w", err)
 			}
 

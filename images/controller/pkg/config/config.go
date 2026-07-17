@@ -17,7 +17,6 @@ limitations under the License.
 package config
 
 import (
-	"fmt"
 	"log"
 	"os"
 	"time"
@@ -36,10 +35,6 @@ const (
 	RetentionDetachTTLEnvName            = "RETENTION_DETACH_TTL"
 	DefaultRetentionSnapshotTTL          = 24 * time.Hour // Default TTL for snapshot artifacts (IRetainer)
 	DefaultRetentionDetachTTL            = 24 * time.Hour // Default TTL for detached PV artifacts (IRetainer)
-	// RequestTTLEnvName is for VCR/VRR request resources (short-lived, default 10 minutes)
-	RequestTTLEnvName    = "REQUEST_TTL"
-	DefaultRequestTTL    = 10 * time.Minute // Default TTL for VCR/VRR request resources
-	DefaultRequestTTLStr = "10m"            // String representation for annotation
 )
 
 type Options struct {
@@ -47,8 +42,6 @@ type Options struct {
 	HealthProbeBindAddress string
 	ControllerNamespace    string
 	Retention              RetentionConfig
-	RequestTTL             time.Duration // TTL for request resources (VCR/VRR) - short-lived
-	RequestTTLStr          string        // String representation for annotation (e.g., "10m")
 }
 
 type RetentionConfig struct {
@@ -88,28 +81,7 @@ func NewConfig() *Options {
 	opts.Retention.SnapshotTTL = parseDurationEnv(RetentionSnapshotTTLEnvName, DefaultRetentionSnapshotTTL)
 	opts.Retention.DetachTTL = parseDurationEnv(RetentionDetachTTLEnvName, DefaultRetentionDetachTTL)
 
-	// Load request TTL configuration (for VCR/VRR - short-lived request resources)
-	opts.RequestTTL = parseDurationEnv(RequestTTLEnvName, DefaultRequestTTL)
-	// Convert to string format for annotation (e.g., "10m", "1h")
-	opts.RequestTTLStr = formatDurationForAnnotation(opts.RequestTTL)
-
 	return &opts
-}
-
-// formatDurationForAnnotation formats duration as a readable string for annotation
-// Examples: 10m, 1h, 30m
-func formatDurationForAnnotation(d time.Duration) string {
-	// Round to nearest minute for readability
-	minutes := int(d.Round(time.Minute).Minutes())
-	if minutes < 60 {
-		return fmt.Sprintf("%dm", minutes)
-	}
-	hours := minutes / 60
-	remainingMinutes := minutes % 60
-	if remainingMinutes == 0 {
-		return fmt.Sprintf("%dh", hours)
-	}
-	return fmt.Sprintf("%dh%dm", hours, remainingMinutes)
 }
 
 // parseDurationEnv parses duration from environment variable or returns default

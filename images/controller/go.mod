@@ -7,10 +7,12 @@ require (
 	github.com/deckhouse/state-snapshotter/api v0.0.0-20260708003445-b0c4c2e3be2d
 	github.com/deckhouse/state-snapshotter/pkg/snapshotsdk v0.0.0-20260708003445-b0c4c2e3be2d
 	github.com/deckhouse/storage-foundation/api v0.0.0-00010101000000-000000000000
+	github.com/deckhouse/storage-foundation/common v0.0.0-00010101000000-000000000000
 	github.com/go-logr/logr v1.4.3
 	github.com/kubernetes-csi/external-snapshotter/client/v8 v8.2.0
 	github.com/onsi/ginkgo/v2 v2.23.3
 	github.com/onsi/gomega v1.37.0
+	github.com/stretchr/testify v1.11.1
 	k8s.io/api v0.34.1
 	k8s.io/apiextensions-apiserver v0.34.1
 	k8s.io/apimachinery v0.34.1
@@ -54,6 +56,7 @@ require (
 	github.com/prometheus/client_model v0.6.1 // indirect
 	github.com/prometheus/common v0.62.0 // indirect
 	github.com/prometheus/procfs v0.15.1 // indirect
+	github.com/robfig/cron/v3 v3.0.1 // indirect
 	github.com/spf13/pflag v1.0.6 // indirect
 	github.com/x448/float16 v0.8.4 // indirect
 	go.yaml.in/yaml/v2 v2.4.2 // indirect
@@ -77,3 +80,5 @@ require (
 	sigs.k8s.io/structured-merge-diff/v6 v6.3.0 // indirect
 	sigs.k8s.io/yaml v1.6.0 // indirect
 )
+
+replace github.com/deckhouse/storage-foundation/common => ../../common

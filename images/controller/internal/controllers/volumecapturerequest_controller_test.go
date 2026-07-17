@@ -66,8 +66,6 @@ var _ = Describe("VolumeCaptureRequest Controller", func() {
 		Expect(deckhousev1alpha1.AddToScheme(scheme)).To(Succeed())
 
 		cfg = &config.Options{
-			RequestTTL:    10 * time.Minute,
-			RequestTTLStr: "10m",
 			Retention: config.RetentionConfig{
 				SnapshotTTL: 24 * time.Hour,
 			},
@@ -883,50 +881,6 @@ var _ = Describe("VolumeCaptureRequest Controller", func() {
 			}
 			Expect(okControllerRef).To(BeTrue(), "ObjectKeeper should be controller owner")
 			Expect(controllerCount).To(Equal(1), "Should have exactly one controller owner")
-		})
-
-		It("should delete expired VCR via TTL scanner", func() {
-			// Given: terminal VCR with expired TTL
-			now := time.Now()
-			completionTime := metav1.NewTime(now.Add(-15 * time.Minute)) // 15 minutes ago, TTL=10m
-
-			vcr := &storagev1alpha1.VolumeCaptureRequest{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      "test-vcr-expired",
-					Namespace: "default",
-					UID:       types.UID("vcr-uid-expired"),
-				},
-				Spec: storagev1alpha1.VolumeCaptureRequestSpec{
-					Mode: ModeSnapshot,
-					Target: &storagev1alpha1.VolumeCaptureTarget{
-						UID:        "uid-test-pvc",
-						APIVersion: "v1",
-						Kind:       "PersistentVolumeClaim",
-						Namespace:  "default",
-						Name:       "test-pvc",
-					},
-				},
-				Status: storagev1alpha1.VolumeCaptureRequestStatus{
-					CompletionTimestamp: &completionTime,
-					Conditions: []metav1.Condition{
-						{
-							Type:               storagev1alpha1.ConditionTypeReady,
-							Status:             metav1.ConditionTrue,
-							Reason:             storagev1alpha1.ConditionReasonCompleted,
-							LastTransitionTime: completionTime,
-						},
-					},
-				},
-			}
-			Expect(client.Create(ctx, vcr)).To(Succeed())
-
-			// When: run TTL scanner
-			ctrl.scanAndDeleteExpiredVCRs(ctx, client)
-
-			// Then: VCR is deleted
-			deletedVCR := &storagev1alpha1.VolumeCaptureRequest{}
-			err := client.Get(ctx, types.NamespacedName{Name: vcr.Name, Namespace: vcr.Namespace}, deletedVCR)
-			Expect(apierrors.IsNotFound(err)).To(BeTrue(), "VCR should be deleted by TTL scanner")
 		})
 	})
 

@@ -408,7 +408,8 @@ func (r *VolumeRestoreRequestController) markFailed(
 	return ctrl.Result{}, nil
 }
 
-// finalizeVRR finalizes VRR by setting Ready condition, CompletionTimestamp, updating status, and TTL annotation.
+// finalizeVRR finalizes VRR by setting the Ready condition, CompletionTimestamp, and updating status.
+// The completionTimestamp is what the garbage collector measures the retention TTL from.
 // This is a unified helper to eliminate code duplication across all finalization paths.
 func (r *VolumeRestoreRequestController) finalizeVRR(
 	ctx context.Context,
@@ -444,198 +445,11 @@ func (r *VolumeRestoreRequestController) finalizeVRR(
 		return fmt.Errorf("failed to update VRR status: %w", err)
 	}
 
-	// Update TTL annotation (informational only, best-effort, no retry)
-	current := &storagev1alpha1.VolumeRestoreRequest{}
-	if err := r.Get(ctx, client.ObjectKeyFromObject(vrr), current); err == nil {
-		base := current.DeepCopy()
-		r.setTTLAnnotation(current)
-		_ = r.Patch(ctx, current, client.MergeFrom(base)) // Ignore errors - annotation is informational
-	}
-
 	return nil
-}
-
-// setTTLAnnotation sets TTL annotation on the object.
-//
-// IMPORTANT TTL SEMANTICS:
-// - TTL annotation (storage-foundation.deckhouse.io/ttl) is INFORMATIONAL ONLY.
-// - Actual TTL deletion timing is controlled by controller configuration (config.RequestTTL).
-// - TTL scanner uses config.RequestTTL, NOT the annotation value.
-// - Annotation is set for observability and post-mortem analysis, but does not affect deletion timing.
-//
-// TTL is set when Ready/Failed condition is set during finalization.
-// TTL comes from configuration (storage-foundation module settings), not from VRR spec.
-// If annotation already exists, it is not overwritten (idempotent).
-func (r *VolumeRestoreRequestController) setTTLAnnotation(vrr *storagev1alpha1.VolumeRestoreRequest) {
-	// Don't overwrite if annotation already exists
-	if vrr.Annotations != nil {
-		if _, exists := vrr.Annotations[AnnotationKeyTTL]; exists {
-			return
-		}
-	}
-	if vrr.Annotations == nil {
-		vrr.Annotations = make(map[string]string)
-	}
-	// Get TTL from configuration (default: 10m)
-	ttlStr := config.DefaultRequestTTLStr
-	if r.Config != nil && r.Config.RequestTTLStr != "" {
-		ttlStr = r.Config.RequestTTLStr
-	}
-	vrr.Annotations[AnnotationKeyTTL] = ttlStr
 }
 
 func (r *VolumeRestoreRequestController) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&storagev1alpha1.VolumeRestoreRequest{}).
 		Complete(r)
-}
-
-// StartTTLScanner starts the TTL scanner.
-// Should be called from manager.RunnableFunc to ensure it runs only on the leader replica.
-// Scanner periodically lists all VRRs and deletes expired ones based on completionTimestamp + TTL.
-//
-// IMPORTANT: This method should be called from manager.RunnableFunc to ensure leader-only execution.
-// RunnableFunc already runs in a separate goroutine, so we don't need an additional go statement.
-// When leadership changes, ctx.Done() triggers graceful shutdown of the scanner.
-// Scanner uses List() to get all VRRs and checks completionTimestamp + TTL from controller config.
-// This approach is simpler than per-object reconcile and doesn't block the reconcile loop.
-//
-// TTL SCANNER CONTRACT:
-//
-// 1. Works only with terminal VRRs:
-//   - Ready=True (completed successfully)
-//   - Ready=False (failed, terminal error)
-//   - Non-terminal VRRs are never touched
-//
-// 2. TTL source:
-//   - TTL is ALWAYS taken from controller configuration (config.RequestTTL), NOT from VRR annotations
-//   - TTL annotation (storage-foundation.deckhouse.io/ttl) is informational only and does not affect deletion timing
-//   - This ensures predictable cluster-wide retention policy
-//
-// 3. TTL calculation:
-//   - TTL starts counting from CompletionTimestamp (when VRR reaches Ready=True or Ready=False)
-//   - Expiration time = CompletionTimestamp + config.RequestTTL
-//   - Only VRRs with CompletionTimestamp are eligible for deletion
-//
-// 4. Scanner behavior:
-//   - Scanner does NOT update status
-//   - Scanner does NOT patch objects
-//   - Scanner only performs List() and Delete() operations
-//   - Deletion of VRR triggers cleanup through ObjectKeeper (FollowObject)
-//
-// 5. Leader-only execution:
-//   - Scanner runs only on the leader replica (enforced by manager.RunnableFunc)
-//   - When leadership changes, ctx.Done() triggers graceful shutdown
-func (r *VolumeRestoreRequestController) StartTTLScanner(ctx context.Context, client client.Client) {
-	// Scanner interval: check every 5 minutes
-	// This is a reasonable balance between responsiveness and API load
-	scannerInterval := 5 * time.Minute
-	ticker := time.NewTicker(scannerInterval)
-	defer ticker.Stop()
-
-	l := log.FromContext(ctx)
-	l.Info("TTL scanner started", "interval", scannerInterval)
-
-	// Run immediately on startup, then periodically
-	r.scanAndDeleteExpiredVRRs(ctx, client)
-
-	for {
-		select {
-		case <-ctx.Done():
-			l.Info("TTL scanner stopped (context cancelled)")
-			return
-		case <-ticker.C:
-			r.scanAndDeleteExpiredVRRs(ctx, client)
-		}
-	}
-}
-
-// scanAndDeleteExpiredVRRs lists all VRRs and deletes those where completionTimestamp + TTL < now.
-//
-// IMPORTANT:
-// TTL annotation (storage-foundation.deckhouse.io/ttl) is informational only.
-// Actual TTL is controlled exclusively by controller configuration.
-// This ensures predictable cluster-wide retention policy.
-//
-// TTL SEMANTICS:
-// - TTL is ALWAYS taken from controller configuration (config.RequestTTL), NOT from VRR annotations.
-// - TTL annotation (storage-foundation.deckhouse.io/ttl) is informational only and is IGNORED by the scanner.
-// - This ensures consistent cleanup behavior: all VRRs use the same TTL policy defined by controller config.
-// - TTL starts counting from CompletionTimestamp (when VRR reaches Ready=True or Ready=False).
-func (r *VolumeRestoreRequestController) scanAndDeleteExpiredVRRs(ctx context.Context, client client.Client) {
-	// Get TTL from controller config (this is the ONLY source of TTL timing)
-	// TTL annotation is informational only and is ignored here
-	defaultTTL := config.DefaultRequestTTL
-	if r.Config != nil && r.Config.RequestTTL > 0 {
-		defaultTTL = r.Config.RequestTTL
-	}
-
-	// Guard: if TTL is disabled (<= 0), skip scanning
-	if defaultTTL <= 0 {
-		log.FromContext(ctx).V(1).Info("TTL scanner disabled (ttl <= 0)")
-		return
-	}
-
-	// List all VRRs across all namespaces
-	vrrList := &storagev1alpha1.VolumeRestoreRequestList{}
-	if err := client.List(ctx, vrrList); err != nil {
-		log.FromContext(ctx).Error(err, "Failed to list VolumeRestoreRequests for TTL scan")
-		return
-	}
-
-	now := time.Now()
-	deletedCount := 0
-	skippedCount := 0
-
-	for i := range vrrList.Items {
-		vrr := &vrrList.Items[i]
-
-		// Skip if not terminal (Ready=True or Ready=False)
-		if !isTerminal(vrr.Status.Conditions, storagev1alpha1.ConditionTypeReady) {
-			skippedCount++
-			continue // Skip non-terminal VRRs
-		}
-
-		// Skip if no completionTimestamp
-		if vrr.Status.CompletionTimestamp == nil {
-			skippedCount++
-			continue
-		}
-
-		// Check if TTL expired: completionTimestamp + defaultTTL < now
-		completionTime := vrr.Status.CompletionTimestamp.Time
-		expirationTime := completionTime.Add(defaultTTL)
-
-		if now.After(expirationTime) {
-			// TTL expired, delete the object
-			log.FromContext(ctx).Info("TTL expired, deleting VolumeRestoreRequest",
-				"namespace", vrr.Namespace,
-				"name", vrr.Name,
-				"completionTime", completionTime,
-				"expirationTime", expirationTime,
-				"ttl", defaultTTL)
-
-			if err := client.Delete(ctx, vrr); err != nil {
-				if apierrors.IsNotFound(err) {
-					// Already deleted, that's fine (double-delete is safe)
-					log.FromContext(ctx).V(1).Info("VRR already deleted during TTL scan",
-						"namespace", vrr.Namespace,
-						"name", vrr.Name)
-				} else {
-					log.FromContext(ctx).Error(err, "Failed to delete expired VolumeRestoreRequest",
-						"namespace", vrr.Namespace,
-						"name", vrr.Name)
-				}
-			} else {
-				deletedCount++
-			}
-		}
-	}
-
-	if deletedCount > 0 || skippedCount > 0 {
-		log.FromContext(ctx).V(1).Info("TTL scan completed",
-			"total", len(vrrList.Items),
-			"deleted", deletedCount,
-			"skipped", skippedCount)
-	}
 }

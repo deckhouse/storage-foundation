@@ -31,7 +31,7 @@ const tickerInterval = 30 * time.Second
 // Generates messages to time-to_live timer with bytes amount, written to http.ResponseWriter
 // If all connections finished or freezed (zero bytes was written in tickerInterval), the time-to-live countdown begins
 // Each tickerInterval DataExport/DataImport.Status.AccessTimestamp fileld will be updated
-// After time-to-live period will expired, Condition "Expired" will be updated to true
+// After time-to-live period will expired, status.serverState will be set to IdleExpired
 func RequestNotifier(next http.Handler, notifyChan chan int) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// prohibit page cashing for update idle timer each user click
