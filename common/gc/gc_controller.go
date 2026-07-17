@@ -37,6 +37,14 @@ type ReconcileGCManager interface {
 	ListForDelete(ctx context.Context, now time.Time) ([]client.Object, error)
 }
 
+// PreDeleter is an optional interface a ReconcileGCManager may implement to run best-effort cleanup
+// immediately before the object is deleted — e.g. reaping companion artifacts that carry no ownerRef and
+// would otherwise be leaked. When the object's own finalizer / ownerRef cascade already covers cleanup,
+// the manager simply does not implement this.
+type PreDeleter interface {
+	PreDelete(ctx context.Context, obj client.Object) error
+}
+
 // SetupGcController wires a cron-triggered garbage-collection controller for a single kind onto mgr.
 func SetupGcController(
 	controllerName string,

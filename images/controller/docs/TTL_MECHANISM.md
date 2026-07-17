@@ -1,177 +1,76 @@
-# TTL Mechanism for VCR/VRR
+# Garbage collection of VCR/VRR request resources
 
 ## Overview
 
-TTL (Time-To-Live) is a mechanism that automatically deletes completed one-time request resources (VolumeCaptureRequest and VolumeRestoreRequest) after a specified duration following their completion.
+`VolumeCaptureRequest` (VCR) and `VolumeRestoreRequest` (VRR) are one-time request resources. Once they
+reach a terminal state they are no longer useful and are deleted automatically after a retention window by
+a cron-triggered garbage-collection controller (one per kind), built on the generic collector in
+`common/gc`.
 
-**Important**: TTL applies only to request resources. Artifacts (VolumeSnapshotContent, PersistentVolume) and IRetainer resources have their own independent TTL policies, unrelated to request TTL.
+**Scope**: garbage collection applies only to the request resources (VCR/VRR). The durable artifacts they
+produce (`VolumeSnapshotContent`, `PersistentVolume`) and the `IRetainer` resources have their own,
+independent retention policies (`RETENTION_SNAPSHOT_TTL`, `RETENTION_DETACH_TTL`) and are unaffected.
 
-## TTL Storage
+> Historical note: earlier versions used an informational `storage-foundation.deckhouse.io/ttl` annotation
+> plus a per-controller background TTL scanner driven by `REQUEST_TTL`. That mechanism has been removed —
+> there is **no TTL annotation** and **no `REQUEST_TTL`** anymore. Retention is configured exclusively by
+> the GC environment variables below.
 
-TTL is stored as an annotation on the object:
+## What gets deleted
 
-```yaml
-metadata:
-  annotations:
-    storage-foundation.deckhouse.io/ttl: "10m"
-```
+An object is deleted when **all** of the following hold:
 
-### TTL Value Source
+- it is **terminal** — its `Ready` condition is `True` (completed) or `False` (failed). A VCR that is
+  `Ready=False` with reason `TargetsPending` (a bulk capture still in progress) is NOT terminal and is
+  never collected;
+- it is not already being deleted (`metadata.deletionTimestamp` is unset);
+- its retention age has elapsed: `now - status.completionTimestamp > TTL`.
 
-The TTL annotation value comes from:
-- Module configuration: `REQUEST_TTL` environment variable
-- Default: `"10m"` (10 minutes)
+The age is measured from `status.completionTimestamp`, which the controller stamps once when the object
+first becomes terminal — never from `creationTimestamp`. A terminal object without a
+`completionTimestamp` is a fail-safe no-op (never collected).
 
-The annotation is set uniformly when transitioning to Ready/Failed state.
+## Configuration (env-only)
 
-## When TTL is Set
+| Variable          | Applies to | Default     |
+|-------------------|------------|-------------|
+| `GC_VCR_TTL`      | VCR        | `24h`       |
+| `GC_VCR_SCHEDULE` | VCR        | `0 * * * *` |
+| `GC_VRR_TTL`      | VRR        | `24h`       |
+| `GC_VRR_SCHEDULE` | VRR        | `0 * * * *` |
 
-TTL annotation must be set:
+`*_TTL` accepts a Go duration (e.g. `24h`, `30m`) and must be positive. `*_SCHEDULE` is a standard cron
+expression. With the hourly default schedule, worst-case retention is `TTL` plus one sweep interval
+(~25h). There are no module settings and no per-object TTL annotations.
 
-**Always on any final state:**
-- `Condition Ready=True` → successful completion
-- `Condition Ready=False` → error (Failed)
+## Deletion effects
 
-The TTL is set **first time** when the request completes.
+Deletion is a plain `DELETE`:
 
-**Behavior:**
-- If annotation already exists → do not overwrite (idempotent)
-- If not exists → create with TTL from configuration
+- **VCR**: its `ObjectKeeper` (created in `FollowObject` mode on the VCR) is deleted with it, and the owned
+  artifact (`VolumeSnapshotContent`/`PersistentVolume`) is reclaimed by Kubernetes GC through the ownerRef
+  cascade. As a safety net, the VCR GC first reaps an artifact that has **no ownerReferences at all** (a
+  true orphan the cascade cannot reach), via the `common/gc` `PreDeleter` hook — an artifact that still has
+  any owner (its VCR keeper, or a bridging keeper such as a live DataImport's) is left untouched, so GC of
+  the VCR never deletes an artifact another object is still retaining. The reap is best-effort.
+- **VRR**: the request is deleted; the export PVC it provisioned through the external-provisioner has its
+  own lifecycle.
 
-## TTL Countdown Logic
+### Interaction with DataImport artifact adoption
 
-TTL starts counting from:
+A DataImport captures its scratch volume by creating a VCR; the produced artifact is bridged to the
+DataImport by an additional (non-controller) ObjectKeeper so it survives past the VCR. That artifact is
+therefore retained until BOTH bridges fall away: the VCR keeper (dropped when the VCR is GC'd,
+`GC_VCR_TTL` after the VCR completes) and the DataImport keeper (dropped when the DataImport is GC'd,
+`GC_DATA_IMPORT_TTL` after the import completes). The effective artifact-adoption window before an
+unadopted artifact can be Kubernetes-GC'd is thus `min(GC_VCR_TTL from VCR completion, GC_DATA_IMPORT_TTL
+from import completion)`. Both default to 24h; an operator shortening only `GC_VCR_TTL` also shortens that
+window.
 
-```
-status.completionTimestamp
-```
+## Implementation
 
-`CompletionTimestamp` is mandatory when Ready/Failed is set.
-
-TTL calculation:
-
-```
-expiration = completionTimestamp + TTL
-```
-
-## When Resource is Deleted
-
-The controller deletes the object only if:
-
-1. TTL annotation exists
-2. `CompletionTimestamp` exists
-3. Current time > expiration
-
-**Deletion is performed before any Reconcile logic.**
-
-## Behavior When TTL Not Expired
-
-On each Reconcile, if TTL has not expired, the controller must:
-
-**Return RequeueAfter** to come back later.
-
-**Rules:**
-- `requeue = min(timeLeft, 1 minute)`
-- But not less than 30 seconds
-- Add jitter ±10% (to avoid reconcile storms)
-
-## Behavior on Invalid TTL
-
-If TTL annotation is invalid (e.g., "10minutes"):
-
-1. Controller sets:
-   - `Condition Ready=False`
-   - `Reason: InvalidTTL`
-   - `Message: "Invalid TTL annotation format: X (error: Y)"`
-
-2. Object is **not** automatically deleted
-
-3. Reconcile does **not** loop (no RequeueAfter)
-
-4. TTL annotation remains unchanged
-
-## Final States
-
-Final states are:
-
-| State | Conditions |
-|-------|------------|
-| Ready | `Condition Ready=True` |
-| Failed | `Condition Ready=False` and `Reason != Pending/Running` |
-| InvalidTTL | `Condition Ready=False` and `Reason=InvalidTTL` |
-
-TTL is applied uniformly to all these states.
-
-## Unified Reconcile Cycle
-
-At the start of Reconcile:
-
-```go
-obj := get()
-
-// 1. If final state — check TTL
-if isReady(obj) OR isFailed(obj):
-    if shouldDelete(obj):
-        delete(obj)
-        return
-    if ttlNotExpired:
-        return RequeueAfter
-```
-
-If object is not completed, TTL is not applied, and controller continues normal execution.
-
-## Relationship with IRetainer TTL
-
-**Important**: Request TTL and IRetainer TTL are **independent**:
-
-- **VCR/VRR TTL** (10m): Controls when the request resource is deleted (short-lived, cleanup API noise)
-- **IRetainer TTL** (24h+): Controls when artifacts (VSC/PV) are garbage collected (long-lived, retention policy)
-
-After VCR/VRR deletion, IRetainer continues to live and guard artifacts until its own TTL expires.
-
-## Implementation Details
-
-### TTL Annotation Key
-
-```go
-const AnnotationKeyTTL = "storage-foundation.deckhouse.io/ttl"
-```
-
-### Configuration
-
-```go
-// Default TTL for request resources
-const DefaultRequestTTL = 10 * time.Minute
-const DefaultRequestTTLStr = "10m"
-
-// Environment variable
-const RequestTTLEnvName = "REQUEST_TTL"
-```
-
-### Functions
-
-- `setTTLAnnotation(obj)` - Sets TTL annotation (idempotent)
-- `checkAndHandleTTL(ctx, obj)` - Checks TTL and deletes if expired, returns (shouldDelete, requeueAfter, error)
-
-### Retry on Conflict
-
-All TTL annotation updates use `retry.RetryOnConflict` to handle concurrent updates safely.
-
-## Testing Requirements
-
-See [TTL Tests](../../../test/ttl_test.go) for unit tests covering:
-
-1. ✅ TTL is written on Ready
-2. ✅ TTL is written on Failed
-3. ✅ TTL is not overwritten if already exists
-4. ✅ TTL is not applied until CompletionTimestamp exists
-5. ✅ TTL expired → object deleted
-6. ✅ TTL not expired → RequeueAfter (30s-60s with jitter)
-7. ✅ Invalid TTL → Condition InvalidTTL
-8. ✅ TTL independent from IRetainer TTL
-9. ✅ Same behavior for VCR and VRR
-
-## See Also
-
-- [ADR: TTL for Request Resources](../../../../docs/adr-ttl-requests.md)
-- [State-Snapshotter TTL Documentation](../../../../../state-snapshotter/images/state-snapshotter-controller/docs/TTL_MECHANISM.md)
+- Generic collector: `common/gc` — `CronSource`, `Reconciler`, `DefaultFilter`, the `ReconcileGCManager`
+  contract, and the optional `PreDeleter` hook. The controller reacts only to cron-source ticks (informer
+  events are dropped), and runs leader-only via the manager.
+- Per-kind managers and wiring: `internal/controllers/gc.go` (`vcrGCManager`, `vrrGCManager`,
+  `SetupVCRGC`, `SetupVRRGC`), registered from `add_reconcilers.go`.

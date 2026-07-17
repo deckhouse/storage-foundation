@@ -60,6 +60,13 @@ func (r *Reconciler) Reconcile(ctx context.Context, request reconcile.Request) (
 
 	if r.mgr.ShouldBeDeleted(obj) {
 		logger.Info("Garbage-collecting object", "namespace", obj.GetNamespace(), "name", obj.GetName())
+		// Optional best-effort pre-delete hook (e.g. reaping artifacts that never received an ownerRef, so
+		// deleting the object alone would leak them). A hook error aborts the delete and requeues.
+		if pd, ok := r.mgr.(PreDeleter); ok {
+			if err := pd.PreDelete(ctx, obj); err != nil {
+				return reconcile.Result{}, err
+			}
+		}
 		return reconcile.Result{}, client.IgnoreNotFound(r.client.Delete(ctx, obj))
 	}
 

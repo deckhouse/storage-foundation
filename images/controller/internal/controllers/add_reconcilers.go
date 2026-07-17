@@ -17,20 +17,16 @@ limitations under the License.
 package controllers
 
 import (
-	"context"
 	"fmt"
 
 	ctrl "sigs.k8s.io/controller-runtime"
-	"sigs.k8s.io/controller-runtime/pkg/manager"
 
 	"github.com/deckhouse/storage-foundation/images/controller/pkg/config"
 )
 
-// AddVolumeCaptureRequestControllerToManager adds VolumeCaptureRequestController to the manager
-// and starts TTL scanner as a leader-only runnable.
-//
-// TTL scanner runs only on the leader replica to prevent duplicate deletion attempts.
-// When leadership changes, the scanner context is cancelled and scanner stops gracefully.
+// AddVolumeCaptureRequestControllerToManager adds VolumeCaptureRequestController and its garbage-collection
+// controller to the manager. The GC controller (cron-triggered, leader-only via the manager) replaces the
+// former per-controller TTL scanner: it deletes terminal VolumeCaptureRequests after their TTL.
 func AddVolumeCaptureRequestControllerToManager(mgr ctrl.Manager, cfg *config.Options) error {
 	apiReader := mgr.GetAPIReader()
 	if apiReader == nil {
@@ -48,24 +44,11 @@ func AddVolumeCaptureRequestControllerToManager(mgr ctrl.Manager, cfg *config.Op
 		return err
 	}
 
-	// Start TTL scanner as leader-only runnable
-	// StartTTLScanner runs TTL scanner and blocks until ctx.Done()
-	// RunnableFunc ensures leader-only execution
-	if err := mgr.Add(manager.RunnableFunc(func(ctx context.Context) error {
-		reconciler.StartTTLScanner(ctx, mgr.GetClient())
-		return nil
-	})); err != nil {
-		return err
-	}
-
-	return nil
+	return SetupVCRGC(mgr)
 }
 
-// AddVolumeRestoreRequestControllerToManager adds VolumeRestoreRequestController to the manager
-// and starts TTL scanner as a leader-only runnable.
-//
-// TTL scanner runs only on the leader replica to prevent duplicate deletion attempts.
-// When leadership changes, the scanner context is cancelled and scanner stops gracefully.
+// AddVolumeRestoreRequestControllerToManager adds VolumeRestoreRequestController and its garbage-collection
+// controller to the manager. The GC controller replaces the former per-controller TTL scanner.
 func AddVolumeRestoreRequestControllerToManager(mgr ctrl.Manager, cfg *config.Options) error {
 	apiReader := mgr.GetAPIReader()
 	if apiReader == nil {
@@ -83,15 +66,5 @@ func AddVolumeRestoreRequestControllerToManager(mgr ctrl.Manager, cfg *config.Op
 		return err
 	}
 
-	// Start TTL scanner as leader-only runnable
-	// StartTTLScanner runs TTL scanner and blocks until ctx.Done()
-	// RunnableFunc ensures leader-only execution
-	if err := mgr.Add(manager.RunnableFunc(func(ctx context.Context) error {
-		reconciler.StartTTLScanner(ctx, mgr.GetClient())
-		return nil
-	})); err != nil {
-		return err
-	}
-
-	return nil
+	return SetupVRRGC(mgr)
 }
