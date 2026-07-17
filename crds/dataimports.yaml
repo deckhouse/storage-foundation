@@ -297,13 +297,7 @@ spec:
                             "UploadFinished",
                             "Completed",
                             "Failed",
-                            "PublishFailed",
-                            "ValidationFailed",
-                            "TargetNotFound",
-                            "TargetNotReady",
                             "TargetFailed",
-                            "PVConflict",
-                            "DeploymentFailed",
                             "CleanupFailed",
                           ]
                       message:
