@@ -576,15 +576,80 @@ func (r *DataexportReconciler) implementDataExportProviding(ctx context.Context,
 // current spec. It re-evaluates the Publish toggle so that enabling or disabling
 // external access takes effect without re-creating the DataExport object.
 func (r *DataexportReconciler) reconcilePodReadyResources(ctx context.Context, dataExport *dev1alpha1.DataExport, generatedNames Names) error {
+	// Drift repair: if the export Deployment was deleted mid-life (Case 5, Ready=True), downgrade readiness
+	// so the next reconcile recreates it via Case 4. implementDataExportProviding reuses the still-present
+	// export PVC (validateExportPVC returns it, so the user-PVC detach is NOT repeated) and recreates only
+	// the missing Deployment. The phase goes Ready->Pending, never to a terminal outcome: downtime does not
+	// burn the idle TTL, because the recreated exporter pod restarts its idle timer from scratch.
+	//
+	// Scope: only the Deployment is repaired here. The export PVC is intentionally NOT drift-checked — once
+	// the user PV has been rebound onto the export PVC, that PVC cannot be recreated (its bound PV pins the
+	// deleted PVC UID via claimRef), so treating its loss as drift would wedge the object in a permanent
+	// ValidationFailed requeue loop. The CA Secret is (re)created by the exporter pod on start, so its loss
+	// is repaired by the pod once the Deployment exists.
+	deploy, err := r.getServerDeployment(ctx, generatedNames.DeployName)
+	if err != nil {
+		return err
+	}
+	if deploy == nil {
+		log.Printf("DataExport %s/%s server Deployment missing; re-provisioning", dataExport.Namespace, dataExport.Name)
+		meta.SetStatusCondition(&dataExport.Status.Conditions, metav1.Condition{
+			Type:               string(ConditionReady),
+			Status:             metav1.ConditionFalse,
+			Reason:             string(ReasonPending),
+			Message:            "Server Deployment missing; re-provisioning",
+			ObservedGeneration: dataExport.Generation,
+		})
+		return nil
+	}
+
+	// One-time migration: stamp the owning-DataExport annotations onto a Deployment created before the
+	// controller carried them on the Deployment object, so its watch maps a mid-life delete/change back to
+	// this DataExport (createRequest reads these annotations) and drift-repair fires promptly rather than
+	// only on the periodic resync.
+	if err := r.ensureDeploymentTrackingAnnotations(ctx, deploy, dataExport); err != nil {
+		return err
+	}
+
 	if err := r.reconcilePublishResources(ctx, dataExport, generatedNames); err != nil {
 		return err
 	}
 
-	// TODO: Validate deployment
-	// TODO: Validate export PVC
-	// TODO: Validate CA Secret
-	// TODO: Validate PV recovery metadata for PVC/VD targets
+	return nil
+}
 
+// getServerDeployment returns the export server Deployment, or (nil, nil) if it does not exist. It is a
+// lightweight existence probe used for drift detection, without the blocking readiness poll of
+// validateExportDeploy.
+func (r *DataexportReconciler) getServerDeployment(ctx context.Context, deployName string) (*appsv1.Deployment, error) {
+	deploy := &appsv1.Deployment{}
+	err := r.Client.Get(ctx, types.NamespacedName{Namespace: r.Config.ControllerNamespace, Name: deployName}, deploy)
+	if err != nil {
+		if kubeerrors.IsNotFound(err) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("failed to get export deployment %s: %w", deployName, err)
+	}
+	return deploy, nil
+}
+
+// ensureDeploymentTrackingAnnotations back-fills the owning-DataExport annotations on an export Deployment
+// that predates the controller stamping them (upgrade migration), so its watch can map its events back to
+// the DataExport. It is a no-op once the annotations are present.
+func (r *DataexportReconciler) ensureDeploymentTrackingAnnotations(ctx context.Context, deploy *appsv1.Deployment, dataExport *dev1alpha1.DataExport) error {
+	if deploy.Annotations[dev1alpha1.AnnotationStorageManagerNamespaceKey] == dataExport.Namespace &&
+		deploy.Annotations[dev1alpha1.AnnotationStorageManagerNameKey] == dataExport.Name {
+		return nil
+	}
+	patched := deploy.DeepCopy()
+	if patched.Annotations == nil {
+		patched.Annotations = map[string]string{}
+	}
+	patched.Annotations[dev1alpha1.AnnotationStorageManagerNamespaceKey] = dataExport.Namespace
+	patched.Annotations[dev1alpha1.AnnotationStorageManagerNameKey] = dataExport.Name
+	if err := r.Client.Patch(ctx, patched, client.MergeFrom(deploy)); err != nil {
+		return fmt.Errorf("failed to stamp tracking annotations on export deployment %s: %w", deploy.Name, err)
+	}
 	return nil
 }
 
@@ -1339,6 +1404,13 @@ func (r *DataexportReconciler) createDeployment(ctx context.Context, dataExport 
 			Labels: map[string]string{
 				dev1alpha1.LabelApplicationKey: dev1alpha1.LabelDataExportValue,
 			},
+			// Carry the owning DataExport identity on the Deployment object itself (not just the pod
+			// template) so the controller's Deployment watch maps a mid-life delete/change back to this
+			// DataExport (createRequest reads these annotations) and drift-repair fires promptly.
+			Annotations: map[string]string{
+				dev1alpha1.AnnotationStorageManagerNamespaceKey: dataExport.Namespace,
+				dev1alpha1.AnnotationStorageManagerNameKey:      dataExport.Name,
+			},
 		},
 		Spec: makeExportDeploySpec(exportPVC.Spec.VolumeMode, dataExport, dataExportPodImageName, dataExport.Spec.Ttl, r.Config.ControllerNamespace, generatedNames),
 	}
@@ -1600,6 +1672,18 @@ func (r *DataexportReconciler) recoverUserPVC(ctx context.Context, userPVCNamesp
 		if err != nil {
 			return fmt.Errorf("failed to get PV %s for user PVC %s: %w", pvName, userPVC.GetName(), err)
 		}
+	}
+
+	// Idempotency / already-restored guard. recoverUserPVC is not otherwise re-runnable: a prior
+	// successful run strips the export metadata from the PV LAST (restoreOriginalPVState removes the
+	// original-reclaimPolicy annotation and the data-exporter label). If the controller crashed after that
+	// restore but before persisting the finalizer removal, a re-run would find no original-reclaimPolicy
+	// annotation and wrongly flag the healthy, already-restored PV as inconsistent (marking it and
+	// stalling cleanup forever). The absence of our export marker label means the PV was already restored
+	// (or never exported by us) — there is nothing to recover; just make the user PVC cleanup idempotent.
+	if pv.Labels[dev1alpha1.LabelPVDataExporter] != "true" {
+		log.Printf("PV %s carries no export marker; user PVC %s already restored, ensuring cleanup", pv.Name, userPVC.GetName())
+		return r.removeUserPVCExportingAnnotationsAndFinalizer(ctx, userPVC)
 	}
 
 	// If the original reclaimPolicy annotation is missing or corrupted, recovery is impossible —
