@@ -20,11 +20,19 @@ import (
 	"context"
 	"log/slog"
 	"net/http"
+	"strings"
 	"sync"
 	"time"
 
 	"github.com/deckhouse/storage-foundation/common"
 )
+
+// defaultServerTTL is the idle-TTL fallback used when the server is started without an explicit --ttl
+// (empty spec.ttl). spec.ttl is required by the CRD, but its pattern also matches the empty string, so a
+// producer that sets ttl:"" would otherwise crash the pod on ParseDuration(""). Falling back to the
+// documented default (1m) keeps the server serving and simply enforces a conservative idle window instead
+// of crash-looping.
+const defaultServerTTL = time.Minute
 
 type TTLControl struct {
 	tsUpdater         DataManagerAccessTimestampUpdater
@@ -46,6 +54,13 @@ func NewTTLControl(
 	serverStateSetter DataManagerServerStateSetter,
 	logger *slog.Logger,
 ) (*TTLControl, error) {
+	// Fallback for an empty --ttl (empty spec.ttl): use the documented default instead of failing
+	// ParseDuration and crash-looping the server pod.
+	if strings.TrimSpace(ttlStr) == "" {
+		logger.Warn("empty ttl argument; falling back to the default idle window", "default", defaultServerTTL.String())
+		ttlStr = defaultServerTTL.String()
+	}
+
 	ttl, err := time.ParseDuration(ttlStr)
 	if err != nil {
 		logger.Error("invalid program argument ", "ttl", ttlStr)
