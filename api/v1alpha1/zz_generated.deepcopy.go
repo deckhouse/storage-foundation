@@ -98,6 +98,10 @@ func (in *DataExportImportStatus) DeepCopyInto(out *DataExportImportStatus) {
 			(*in)[i].DeepCopyInto(&(*out)[i])
 		}
 	}
+	if in.CompletionTimestamp != nil {
+		in, out := &in.CompletionTimestamp, &out.CompletionTimestamp
+		*out = (*in).DeepCopy()
+	}
 	if in.Data != nil {
 		in, out := &in.Data, &out.Data
 		*out = new(DataExportImportData)

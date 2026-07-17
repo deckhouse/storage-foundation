@@ -20,21 +20,29 @@ import (
 	"context"
 	"log/slog"
 	"net/http"
+	"strings"
 	"sync"
 	"time"
 
 	"github.com/deckhouse/storage-foundation/common"
 )
 
+// defaultServerTTL is the idle-TTL fallback used when the server is started without an explicit --ttl
+// (empty spec.ttl). spec.ttl is required by the CRD, but its pattern also matches the empty string, so a
+// producer that sets ttl:"" would otherwise crash the pod on ParseDuration(""). Falling back to the
+// documented default (1m) keeps the server serving and simply enforces a conservative idle window instead
+// of crash-looping.
+const defaultServerTTL = time.Minute
+
 type TTLControl struct {
-	tsUpdater     DataManagerAccessTimestampUpdater
-	expiredSetter DataManagerStatusExpiredSetter
-	operation     common.Operation
-	namespace     string
-	name          string
-	ttl           time.Duration
-	logger        *slog.Logger
-	idleTimer     *IdleTimer
+	tsUpdater         DataManagerAccessTimestampUpdater
+	serverStateSetter DataManagerServerStateSetter
+	operation         common.Operation
+	namespace         string
+	name              string
+	ttl               time.Duration
+	logger            *slog.Logger
+	idleTimer         *IdleTimer
 }
 
 func NewTTLControl(
@@ -43,9 +51,16 @@ func NewTTLControl(
 	namespace string,
 	name string,
 	tsUpdater DataManagerAccessTimestampUpdater,
-	expiredSetter DataManagerStatusExpiredSetter,
+	serverStateSetter DataManagerServerStateSetter,
 	logger *slog.Logger,
 ) (*TTLControl, error) {
+	// Fallback for an empty --ttl (empty spec.ttl): use the documented default instead of failing
+	// ParseDuration and crash-looping the server pod.
+	if strings.TrimSpace(ttlStr) == "" {
+		logger.Warn("empty ttl argument; falling back to the default idle window", "default", defaultServerTTL.String())
+		ttlStr = defaultServerTTL.String()
+	}
+
 	ttl, err := time.ParseDuration(ttlStr)
 	if err != nil {
 		logger.Error("invalid program argument ", "ttl", ttlStr)
@@ -55,14 +70,14 @@ func NewTTLControl(
 	idleTimer := NewIdleTimer(ttl, logger)
 
 	return &TTLControl{
-		tsUpdater:     tsUpdater,
-		expiredSetter: expiredSetter,
-		operation:     operation,
-		namespace:     namespace,
-		name:          name,
-		ttl:           ttl,
-		logger:        logger,
-		idleTimer:     &idleTimer,
+		tsUpdater:         tsUpdater,
+		serverStateSetter: serverStateSetter,
+		operation:         operation,
+		namespace:         namespace,
+		name:              name,
+		ttl:               ttl,
+		logger:            logger,
+		idleTimer:         &idleTimer,
 	}, nil
 }
 
@@ -70,7 +85,7 @@ func (t *TTLControl) Start(ctx context.Context, handler http.Handler, wg *sync.W
 	wg.Add(3)
 	go t.idleTimer.Run(ctx, wg)
 	go UpdateDataManagerAccessTimestamp(ctx, t.operation, t.tsUpdater, t.namespace, t.name, t.idleTimer.TickerChan, t.logger, wg)
-	go SetDataManagerStatusExpired(ctx, t.operation, t.expiredSetter, t.namespace, t.name, t.idleTimer.ExpiredChan, t.logger, wg)
+	go SetDataManagerServerStateIdleExpired(ctx, t.operation, t.serverStateSetter, t.namespace, t.name, t.idleTimer.ExpiredChan, t.logger, wg)
 
 	return RequestNotifier(handler, t.idleTimer.RequestNotifierChan)
 }

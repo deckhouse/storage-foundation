@@ -19,13 +19,11 @@ package controllers
 import (
 	"context"
 	"fmt"
-	"strings"
 	"time"
 
 	snapshotv1 "github.com/kubernetes-csi/external-snapshotter/client/v8/apis/volumesnapshot/v1"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
-	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/util/retry"
@@ -535,37 +533,6 @@ func (r *VolumeCaptureRequestController) ensureObjectKeeper(
 	return objectKeeper, ctrl.Result{}, nil
 }
 
-// setTTLAnnotation sets TTL annotation on the object.
-// TTL annotation is informational only and does not affect deletion timing.
-// Actual TTL is controlled exclusively by controller configuration (config.RequestTTL).
-// This ensures predictable cluster-wide retention policy.
-//
-// IMPORTANT:
-// TTL annotation (storage-foundation.deckhouse.io/ttl) is informational only.
-// Actual TTL is controlled exclusively by controller configuration.
-// This ensures predictable cluster-wide retention policy.
-//
-// The annotation is set when Ready/Failed condition is set for operator visibility.
-// If annotation already exists, it is not overwritten (idempotent).
-func (r *VolumeCaptureRequestController) setTTLAnnotation(vcr *storagev1alpha1.VolumeCaptureRequest) {
-	// Don't overwrite if annotation already exists
-	if vcr.Annotations != nil {
-		if _, exists := vcr.Annotations[AnnotationKeyTTL]; exists {
-			return
-		}
-	}
-	if vcr.Annotations == nil {
-		vcr.Annotations = make(map[string]string)
-	}
-	// Get TTL from configuration (default: 10m)
-	// This is informational only - actual deletion uses config.RequestTTL
-	ttlStr := config.DefaultRequestTTLStr
-	if r.Config != nil && r.Config.RequestTTLStr != "" {
-		ttlStr = r.Config.RequestTTLStr
-	}
-	vcr.Annotations[AnnotationKeyTTL] = ttlStr
-}
-
 func (r *VolumeCaptureRequestController) markFailed(ctx context.Context, vcr *storagev1alpha1.VolumeCaptureRequest, reason, message string) (ctrl.Result, error) {
 	if err := r.finalizeVCR(ctx, vcr, metav1.ConditionFalse, reason, message); err != nil {
 		return ctrl.Result{}, err
@@ -573,8 +540,9 @@ func (r *VolumeCaptureRequestController) markFailed(ctx context.Context, vcr *st
 	return ctrl.Result{}, nil
 }
 
-// finalizeVCR finalizes VCR by setting Ready condition, CompletionTimestamp, updating status, and TTL annotation.
-// This is a unified helper to eliminate code duplication across all finalization paths.
+// finalizeVCR finalizes VCR by setting the Ready condition, CompletionTimestamp, and updating status.
+// This is a unified helper to eliminate code duplication across all finalization paths. The
+// completionTimestamp is what the garbage collector measures the retention TTL from.
 func (r *VolumeCaptureRequestController) finalizeVCR(
 	ctx context.Context,
 	vcr *storagev1alpha1.VolumeCaptureRequest,
@@ -609,14 +577,6 @@ func (r *VolumeCaptureRequestController) finalizeVCR(
 		return fmt.Errorf("failed to update VCR status: %w", err)
 	}
 
-	// Update TTL annotation (informational only, best-effort, no retry)
-	current := &storagev1alpha1.VolumeCaptureRequest{}
-	if err := r.Get(ctx, client.ObjectKeyFromObject(vcr), current); err == nil {
-		base := current.DeepCopy()
-		r.setTTLAnnotation(current)
-		_ = r.Patch(ctx, current, client.MergeFrom(base)) // Ignore errors - annotation is informational
-	}
-
 	return nil
 }
 
@@ -626,170 +586,13 @@ func (r *VolumeCaptureRequestController) SetupWithManager(mgr ctrl.Manager) erro
 		Complete(r)
 }
 
-// StartTTLScanner starts the TTL scanner.
-// Should be called from manager.RunnableFunc to ensure it runs only on the leader replica.
-// Scanner periodically lists all VCRs and deletes expired ones based on completionTimestamp + TTL.
-//
-// IMPORTANT: This method should be called from manager.RunnableFunc to ensure leader-only execution.
-// RunnableFunc already runs in a separate goroutine, so we don't need an additional go statement.
-// When leadership changes, ctx.Done() triggers graceful shutdown of the scanner.
-// Scanner uses List() to get all VCRs and checks completionTimestamp + TTL from controller config.
-// This approach is simpler than per-object reconcile and doesn't block the reconcile loop.
-//
-// TTL SCANNER CONTRACT:
-//
-// 1. Works only with terminal VCRs:
-//   - Ready=True (completed successfully)
-//   - Ready=False (failed, terminal error)
-//   - Non-terminal VCRs are never touched
-//
-// 2. TTL source:
-//   - TTL is ALWAYS taken from controller configuration (config.RequestTTL), NOT from VCR annotations
-//   - TTL annotation (storage-foundation.deckhouse.io/ttl) is informational only and does not affect deletion timing
-//   - This ensures predictable cluster-wide retention policy
-//
-// 3. TTL calculation:
-//   - TTL starts counting from CompletionTimestamp (when VCR reaches Ready=True or Ready=False)
-//   - Expiration time = CompletionTimestamp + config.RequestTTL
-//   - Only VCRs with CompletionTimestamp are eligible for deletion
-//
-// 4. Scanner behavior:
-//   - Scanner does NOT update status
-//   - Scanner does NOT patch objects
-//   - Scanner only performs List() and Delete() operations
-//   - Deletion of VCR triggers GC of ObjectKeeper and VSC through ownerReferences
-//
-// 5. Leader-only execution:
-//   - Scanner runs only on the leader replica (enforced by manager.RunnableFunc)
-//   - When leadership changes, ctx.Done() triggers graceful shutdown
-func (r *VolumeCaptureRequestController) StartTTLScanner(ctx context.Context, client client.Client) {
-	// Scanner interval: check every 5 minutes
-	// This is a reasonable balance between responsiveness and API load
-	scannerInterval := 5 * time.Minute
-	ticker := time.NewTicker(scannerInterval)
-	defer ticker.Stop()
-
-	l := log.FromContext(ctx)
-	l.Info("TTL scanner started", "interval", scannerInterval)
-
-	// Run immediately on startup, then periodically
-	r.scanAndDeleteExpiredVCRs(ctx, client)
-
-	for {
-		select {
-		case <-ctx.Done():
-			l.Info("TTL scanner stopped (context cancelled)")
-			return
-		case <-ticker.C:
-			r.scanAndDeleteExpiredVCRs(ctx, client)
-		}
-	}
-}
-
-// scanAndDeleteExpiredVCRs lists all VCRs and deletes those where completionTimestamp + TTL < now.
-//
-// IMPORTANT:
-// TTL annotation (storage-foundation.deckhouse.io/ttl) is informational only.
-// Actual TTL is controlled exclusively by controller configuration.
-// This ensures predictable cluster-wide retention policy.
-//
-// TTL SEMANTICS:
-// - TTL is ALWAYS taken from controller configuration (config.RequestTTL), NOT from VCR annotations.
-// - TTL annotation (storage-foundation.deckhouse.io/ttl) is informational only and is IGNORED by the scanner.
-// - This ensures consistent cleanup behavior: all VCRs use the same TTL policy defined by controller config.
-// - TTL starts counting from CompletionTimestamp (when VCR reaches Ready=True or Ready=False).
-func (r *VolumeCaptureRequestController) scanAndDeleteExpiredVCRs(ctx context.Context, client client.Client) {
-	// Get TTL from controller config (this is the ONLY source of TTL timing)
-	// TTL annotation is informational only and is ignored here
-	defaultTTL := config.DefaultRequestTTL
-	if r.Config != nil && r.Config.RequestTTL > 0 {
-		defaultTTL = r.Config.RequestTTL
-	}
-
-	// Guard: if TTL is disabled (<= 0), skip scanning
-	if defaultTTL <= 0 {
-		log.FromContext(ctx).V(1).Info("TTL scanner disabled (ttl <= 0)")
-		return
-	}
-
-	// List all VCRs across all namespaces
-	vcrList := &storagev1alpha1.VolumeCaptureRequestList{}
-	if err := client.List(ctx, vcrList); err != nil {
-		log.FromContext(ctx).Error(err, "Failed to list VolumeCaptureRequests for TTL scan")
-		return
-	}
-
-	now := time.Now()
-	deletedCount := 0
-	skippedCount := 0
-
-	for i := range vcrList.Items {
-		vcr := &vcrList.Items[i]
-
-		// Skip if not terminal (Ready=True or Ready=False)
-		readyCondition := meta.FindStatusCondition(vcr.Status.Conditions, storagev1alpha1.ConditionTypeReady)
-		isTerminal := (readyCondition != nil && readyCondition.Status == metav1.ConditionTrue) ||
-			(readyCondition != nil && readyCondition.Status == metav1.ConditionFalse)
-
-		if !isTerminal {
-			skippedCount++
-			continue // Skip non-terminal VCRs
-		}
-
-		// Skip if no completionTimestamp
-		if vcr.Status.CompletionTimestamp == nil {
-			skippedCount++
-			continue
-		}
-
-		// Check if TTL expired: completionTimestamp + defaultTTL < now
-		completionTime := vcr.Status.CompletionTimestamp.Time
-		expirationTime := completionTime.Add(defaultTTL)
-
-		if now.After(expirationTime) {
-			// TTL expired, delete the object
-			log.FromContext(ctx).Info("TTL expired, deleting VolumeCaptureRequest",
-				"namespace", vcr.Namespace,
-				"name", vcr.Name,
-				"completionTime", completionTime,
-				"expirationTime", expirationTime,
-				"ttl", defaultTTL)
-
-			// Best-effort cleanup of artifacts that have no ownerRef
-			if err := r.cleanupArtifactsForVCR(ctx, vcr); err != nil {
-				log.FromContext(ctx).Error(err, "Failed to cleanup VCR artifacts (ownerRef missing)",
-					"namespace", vcr.Namespace,
-					"name", vcr.Name)
-			}
-
-			if err := client.Delete(ctx, vcr); err != nil {
-				if apierrors.IsNotFound(err) {
-					// Already deleted, that's fine (double-delete is safe)
-					log.FromContext(ctx).V(1).Info("VCR already deleted during TTL scan",
-						"namespace", vcr.Namespace,
-						"name", vcr.Name)
-				} else {
-					log.FromContext(ctx).Error(err, "Failed to delete expired VolumeCaptureRequest",
-						"namespace", vcr.Namespace,
-						"name", vcr.Name)
-				}
-			} else {
-				deletedCount++
-			}
-		}
-	}
-
-	if deletedCount > 0 || skippedCount > 0 {
-		log.FromContext(ctx).V(1).Info("TTL scan completed",
-			"total", len(vcrList.Items),
-			"deleted", deletedCount,
-			"skipped", skippedCount)
-	}
-}
-
-// cleanupArtifactsForVCR deletes VCR-created artifacts if they have no ownerRef.
-// This is a best-effort cleanup used by the TTL scanner to avoid orphaned artifacts.
-func (r *VolumeCaptureRequestController) cleanupArtifactsForVCR(ctx context.Context, vcr *storagev1alpha1.VolumeCaptureRequest) error {
+// cleanupVCRArtifacts deletes a VCR's produced artifact (VolumeSnapshotContent / PersistentVolume) ONLY
+// when it is a true orphan — it carries no ownerReferences at all. This is the anti-leak for the case
+// where the VCR produced an artifact but it never received its ObjectKeeper owner. Any artifact that has
+// an owner (its VCR ObjectKeeper, or a bridging keeper such as a live DataImport's) is left to the
+// ownerRef cascade / Kubernetes GC and is NOT touched here, so garbage-collecting the VCR never deletes an
+// artifact another object is still retaining. Best-effort; used as the GC PreDelete hook.
+func cleanupVCRArtifacts(ctx context.Context, cl client.Client, vcr *storagev1alpha1.VolumeCaptureRequest) error {
 	if vcr.Status.Data == nil {
 		return nil
 	}
@@ -800,42 +603,33 @@ func (r *VolumeCaptureRequestController) cleanupArtifactsForVCR(ctx context.Cont
 	switch artifact.Kind {
 	case "VolumeSnapshotContent":
 		content := &snapshotv1.VolumeSnapshotContent{}
-		if err := r.Get(ctx, client.ObjectKey{Name: artifact.Name}, content); err != nil {
+		if err := cl.Get(ctx, client.ObjectKey{Name: artifact.Name}, content); err != nil {
 			if apierrors.IsNotFound(err) {
 				return nil
 			}
 			return err
 		}
-		if hasSnapshotContentOwnerRef(content.OwnerReferences) {
+		if len(content.OwnerReferences) > 0 {
 			return nil
 		}
-		if err := r.Delete(ctx, content); err != nil && !apierrors.IsNotFound(err) {
+		if err := cl.Delete(ctx, content); err != nil && !apierrors.IsNotFound(err) {
 			return err
 		}
 	case "PersistentVolume":
 		pv := &corev1.PersistentVolume{}
-		if err := r.Get(ctx, client.ObjectKey{Name: artifact.Name}, pv); err != nil {
+		if err := cl.Get(ctx, client.ObjectKey{Name: artifact.Name}, pv); err != nil {
 			if apierrors.IsNotFound(err) {
 				return nil
 			}
 			return err
 		}
-		if hasSnapshotContentOwnerRef(pv.OwnerReferences) {
+		if len(pv.OwnerReferences) > 0 {
 			return nil
 		}
-		if err := r.Delete(ctx, pv); err != nil && !apierrors.IsNotFound(err) {
+		if err := cl.Delete(ctx, pv); err != nil && !apierrors.IsNotFound(err) {
 			return err
 		}
 	}
 
 	return nil
-}
-
-func hasSnapshotContentOwnerRef(refs []metav1.OwnerReference) bool {
-	for _, ref := range refs {
-		if strings.HasSuffix(ref.Kind, "SnapshotContent") {
-			return true
-		}
-	}
-	return false
 }

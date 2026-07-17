@@ -56,9 +56,7 @@ func TestCleanupArtifactsForVCR_DeletesOrphans(t *testing.T) {
 	}
 
 	client := fake.NewClientBuilder().WithScheme(scheme).WithObjects(vcr, vsc).Build()
-	controller := &VolumeCaptureRequestController{Client: client}
-
-	if err := controller.cleanupArtifactsForVCR(context.Background(), vcr); err != nil {
+	if err := cleanupVCRArtifacts(context.Background(), client, vcr); err != nil {
 		t.Fatalf("cleanupArtifactsForVCR failed: %v", err)
 	}
 
@@ -90,9 +88,7 @@ func TestCleanupArtifactsForVCR_SkipsManaged(t *testing.T) {
 	}
 
 	client := fake.NewClientBuilder().WithScheme(scheme).WithObjects(vcr, vsc).Build()
-	controller := &VolumeCaptureRequestController{Client: client}
-
-	if err := controller.cleanupArtifactsForVCR(context.Background(), vcr); err != nil {
+	if err := cleanupVCRArtifacts(context.Background(), client, vcr); err != nil {
 		t.Fatalf("cleanupArtifactsForVCR failed: %v", err)
 	}
 
@@ -117,9 +113,7 @@ func TestCleanupArtifactsForVCR_DeletesPVOrphans(t *testing.T) {
 	}
 
 	client := fake.NewClientBuilder().WithScheme(scheme).WithObjects(vcr, pv).Build()
-	controller := &VolumeCaptureRequestController{Client: client}
-
-	if err := controller.cleanupArtifactsForVCR(context.Background(), vcr); err != nil {
+	if err := cleanupVCRArtifacts(context.Background(), client, vcr); err != nil {
 		t.Fatalf("cleanupArtifactsForVCR failed: %v", err)
 	}
 
@@ -138,9 +132,7 @@ func TestCleanupArtifactsForVCR_NilDataRefNoop(t *testing.T) {
 	}
 
 	client := fake.NewClientBuilder().WithScheme(scheme).WithObjects(vcr).Build()
-	controller := &VolumeCaptureRequestController{Client: client}
-
-	if err := controller.cleanupArtifactsForVCR(context.Background(), vcr); err != nil {
+	if err := cleanupVCRArtifacts(context.Background(), client, vcr); err != nil {
 		t.Fatalf("cleanupArtifactsForVCR with nil dataRef must be a no-op, got: %v", err)
 	}
 }

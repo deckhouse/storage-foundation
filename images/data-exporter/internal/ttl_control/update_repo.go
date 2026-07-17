@@ -25,12 +25,16 @@ import (
 	"github.com/deckhouse/storage-foundation/common"
 )
 
-const setStatusExiredRetryPeriod = 60 * time.Second
+const setServerStateIdleExpiredRetryPeriod = 60 * time.Second
 
-func SetDataManagerStatusExpired(
+// SetDataManagerServerStateIdleExpired waits for the idle timer to fire (idle >= ttl with no in-flight
+// transfer) and then publishes status.serverState = IdleExpired. It retries on failure so the signal is
+// durable; the controller turns IdleExpired into the terminal Expired phase. SetServerState itself
+// guards against clobbering a Finished import, so a late idle-expiry after a completed upload is a no-op.
+func SetDataManagerServerStateIdleExpired(
 	ctx context.Context,
 	operation common.Operation,
-	client DataManagerStatusExpiredSetter,
+	client DataManagerServerStateSetter,
 	dataManagerNamespace, dataManagerName string,
 	expiredChan <-chan time.Time,
 	logger *slog.Logger,
@@ -41,15 +45,15 @@ func SetDataManagerStatusExpired(
 	select {
 	case <-expiredChan:
 		for {
-			err := client.SetStatusExpired(ctx, operation, dataManagerNamespace, dataManagerName)
+			err := client.SetServerState(ctx, operation, dataManagerNamespace, dataManagerName, common.ServerStateIdleExpired)
 			if err != nil {
-				logger.Info("Setting Condition Expired failed", "error", err.Error())
+				logger.Info("Setting serverState IdleExpired failed", "error", err.Error())
 			} else {
 				return
 			}
 
 			select {
-			case <-time.After(setStatusExiredRetryPeriod):
+			case <-time.After(setServerStateIdleExpiredRetryPeriod):
 			case <-ctx.Done():
 				return
 			}

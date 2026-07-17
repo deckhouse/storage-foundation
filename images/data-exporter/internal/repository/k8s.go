@@ -40,12 +40,6 @@ import (
 	"github.com/deckhouse/storage-foundation/common"
 )
 
-type conditionField string
-
-const (
-	conditionExpired conditionField = "Expired"
-)
-
 type Client struct {
 	client.Client
 }
@@ -85,39 +79,65 @@ func NewK8sClient() (*Client, error) {
 	return &Client{k8sClient}, nil
 }
 
-func (c *Client) SetDataImportCompleted(ctx context.Context, namespace, name string) error {
-	// The controller writes DataImport status on every reconcile (~5s), so a plain Status().Update here
-	// races with it and would fail on a stale resourceVersion. Re-GET inside RetryOnConflict so the
-	// UploadFinished flip is applied onto the latest version instead of being lost.
+// SetServerState is the sole way the server pod publishes its progress. The pod is the only writer of
+// status.serverState; the controller reads it and derives phase + conditions. Writes are durable
+// (RetryOnConflict re-GETs the latest object so a concurrent controller status write — phase/conditions
+// or the accessTimestamp heartbeat — is preserved rather than clobbered) and monotonic
+// (shouldSetServerState guards the transition), which is what gives the POST /finished path its
+// guarantee: the Finished fact is persisted before the client is answered 200, and is never lost to a
+// concurrent writer or a later idle-expiry (regression guard, historically svdm 0.1.24/0.1.25 where a
+// missing/lost finished-signal hung the import forever).
+func (c *Client) SetServerState(ctx context.Context, operation common.Operation, namespace, name string, state common.ServerState) error {
+	nn := types.NamespacedName{Namespace: namespace, Name: name}
+
 	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
 		cwtGet, cancelGet := context.WithTimeout(ctx, 10*time.Second)
 		defer cancelGet()
 
-		dataImport := &dev1alpha1.DataImport{}
-		if err := c.Get(cwtGet, types.NamespacedName{Namespace: namespace, Name: name}, dataImport); err != nil {
+		dataManager, err := common.GetDataManager(cwtGet, c.Client, nn, operation)
+		if err != nil {
 			return err
 		}
 
-		needUpdate := common.UpdateCondition(
-			ctx,
-			c,
-			dataImport,
-			common.ConditionUploadFinished,
-			metav1.ConditionTrue,
-			common.ReasonUploadFinished,
-			"Import completed",
-		)
-		if !needUpdate {
+		status := dataManager.GetStatus()
+		if !shouldSetServerState(common.ServerState(status.ServerState), state) {
 			return nil
 		}
+		status.ServerState = string(state)
 
 		cwtUpdate, cancelUpdate := context.WithTimeout(ctx, 10*time.Second)
 		defer cancelUpdate()
 
-		return c.Status().Update(cwtUpdate, dataImport)
+		return c.Status().Update(cwtUpdate, dataManager)
 	})
 }
 
+// shouldSetServerState enforces a monotonic server-state machine so an out-of-order or duplicate signal
+// cannot corrupt a terminal state:
+//   - Ready is only set from the unset state (start of serving; safe to re-run on pod restart).
+//   - Finished always wins (a genuine client completion is authoritative for data integrity), except it
+//     is idempotent against itself.
+//   - IdleExpired is set from unset/Ready only — it must never clobber a Finished import (otherwise a
+//     completed import would be reported as abandoned).
+func shouldSetServerState(current, next common.ServerState) bool {
+	if current == next {
+		return false
+	}
+	switch next {
+	case common.ServerStateReady:
+		return current == ""
+	case common.ServerStateFinished:
+		return true
+	case common.ServerStateIdleExpired:
+		return current == "" || current == common.ServerStateReady
+	default:
+		return false
+	}
+}
+
+// CheckIsServiceAvailable reports whether the import has already finished (serverState == Finished). Its
+// caller uses the result to turn the upload endpoint OFF after a completed import, so that a pod restart
+// on a finished DataImport refuses new uploads instead of overwriting the produced artifact.
 func (c *Client) CheckIsServiceAvailable(ctx context.Context, namespace, name string) (bool, error) {
 	dataImport := &dev1alpha1.DataImport{}
 
@@ -129,12 +149,7 @@ func (c *Client) CheckIsServiceAvailable(ctx context.Context, namespace, name st
 		return false, err
 	}
 
-	condition := common.GetCondition(dataImport.Status.Conditions, common.ConditionUploadFinished)
-	if condition == nil {
-		return false, nil
-	}
-
-	return condition.Status == metav1.ConditionTrue, nil
+	return common.ServerState(dataImport.Status.ServerState) == common.ServerStateFinished, nil
 }
 
 func (c *Client) AuthenticateUserByToken(_ context.Context, token string) (authenticated bool, username string, groups []string, err error) {
@@ -204,51 +219,6 @@ func (c *Client) UpdateAccessTimestamp(ctx context.Context, operation common.Ope
 	}
 
 	return nil
-}
-
-func (c *Client) SetStatusExpired(ctx context.Context, operation common.Operation, dataManagerNamespace, dataManagerName string) error {
-	dataManagerNamespacedName := types.NamespacedName{
-		Namespace: dataManagerNamespace,
-		Name:      dataManagerName,
-	}
-
-	dataManager, err := common.GetDataManager(ctx, c.Client, dataManagerNamespacedName, operation)
-	if err != nil {
-		return err
-	}
-
-	status := dataManager.GetStatus()
-
-	hasConditionExpired, index := hasCondition(status.Conditions, string(conditionExpired))
-	if hasConditionExpired {
-		if status.Conditions[index].Status != metav1.ConditionTrue {
-			status.Conditions[index] = metav1.Condition{
-				Type:               string(conditionExpired),
-				Status:             metav1.ConditionTrue,
-				Reason:             string(conditionExpired),
-				Message:            "Server pod time to live expired",
-				ObservedGeneration: dataManager.GetGeneration(),
-				LastTransitionTime: metav1.NewTime(time.Now()),
-			}
-			if err := c.Status().Update(ctx, dataManager); err != nil {
-				return err
-			}
-			return nil
-		}
-
-		return nil
-	}
-
-	return fmt.Errorf("Server pod hasn't consition Expired")
-}
-
-func hasCondition(conditions []metav1.Condition, conditionType string) (bool, int) {
-	for i, condition := range conditions {
-		if condition.Type == conditionType {
-			return true, i
-		}
-	}
-	return false, 0
 }
 
 func (c *Client) UpdateDataManagerCA(ctx context.Context, operation common.Operation, dataManagerNamespace, dataManagerName string, caCertPEM []byte) error {

@@ -29,6 +29,6 @@ type DataManagerAccessTimestampUpdater interface {
 	UpdateAccessTimestamp(ctx context.Context, operation common.Operation, resourceNamespace, resourceName string, timestamp time.Time) error
 }
 
-type DataManagerStatusExpiredSetter interface {
-	SetStatusExpired(ctx context.Context, operation common.Operation, resourceNamespace, resourceName string) error
+type DataManagerServerStateSetter interface {
+	SetServerState(ctx context.Context, operation common.Operation, resourceNamespace, resourceName string, state common.ServerState) error
 }

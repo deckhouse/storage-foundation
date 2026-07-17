@@ -30,6 +30,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/dynamic"
+	"k8s.io/client-go/util/retry"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
@@ -46,6 +47,12 @@ import (
 var (
 	ErrCleanupFailed = errors.New("cleanup failed")
 	ErrTargetFailed  = errors.New("target failed")
+	// ErrTerminal marks a reconcile error as un-retryable (bad spec, a failed capture, a malformed
+	// artifact). It is composed with a specific sentinel (e.g. ErrTargetFailed) so mutateReadyByErr still
+	// derives the Ready reason. The deferred block turns it into a terminal phase=Failed and stops
+	// requeueing; transient errors (API/get failures) are NOT wrapped and keep the object retryable
+	// (a permanently-pending import is legal, never garbage-collected).
+	ErrTerminal = errors.New("terminal")
 )
 
 type DataImportReconciler struct {
@@ -54,9 +61,20 @@ type DataImportReconciler struct {
 	Config *config.Options
 	// Dynamic talks to CRDs SVDM has no Go types for (VolumeCaptureRequest, ObjectKeeper) without
 	// compiling in their modules.
-	Dynamic    dynamic.Interface
+	Dynamic dynamic.Interface
+	// Now returns the current time; it is injectable so tests can assert completionTimestamp
+	// deterministically. Defaults to metav1.Now.
+	Now        func() metav1.Time
 	dataImport *dev1alpha1.DataImport
 	names      common.Names
+}
+
+// now returns the reconciler clock, defaulting to metav1.Now when unset.
+func (r *DataImportReconciler) now() metav1.Time {
+	if r.Now != nil {
+		return r.Now()
+	}
+	return metav1.Now()
 }
 
 func (r *DataImportReconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ctrl.Result, err error) {
@@ -79,12 +97,31 @@ func (r *DataImportReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 	// (conditions, finalizers, status fields, etc.) without persisting intermediate states.
 	// The deferred function collects all mutations at the end:
 	//   1) mutateReadyByErr — translates reconcile errors into Ready condition reasons
-	//   2) updateDataImport — diffs against the original snapshot and persists only real changes
+	//   2) finalizeDataImportStatus — projects phase + completionTimestamp from the final condition set
+	//   3) updateDataImport — diffs against the original snapshot and persists only real changes
 	dataImportOriginal := dataImport.DeepCopy()
 	defer func() {
 		mutateReadyByErr(dataImport, err)
+		r.finalizeDataImportStatus(dataImport, err)
 		updateErr := updateDataImport(ctx, r.Client, dataImportOriginal, dataImport)
-		err = errors.Join(err, updateErr)
+		switch {
+		case errors.Is(err, ErrTerminal):
+			// Un-retryable failure, now recorded as phase=Failed. Do not requeue the error; surface only a
+			// (retryable) status-write failure so the terminal status still gets persisted on retry.
+			result = ctrl.Result{}
+			err = updateErr
+		case err != nil:
+			// Retryable reconcile error: its backoff governs the requeue, so drop any RequeueAfter left in
+			// result and surface the update failure alongside the original error.
+			result = ctrl.Result{}
+			err = errors.Join(err, updateErr)
+		case updateErr != nil && kubeerrors.IsConflict(updateErr):
+			// updateDataImport already retried on conflict; a surviving conflict is benign (a concurrent
+			// writer won the race). Requeue soon instead of escalating to an error+backoff.
+			result = ctrl.Result{RequeueAfter: dataImportRequeueInterval}
+		case updateErr != nil:
+			err = updateErr
+		}
 	}()
 
 	// TODO: do we need to validate DataImport?
@@ -96,6 +133,24 @@ func (r *DataImportReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 	r.names = common.NewNames(dev1alpha1.KindPVC, dataImport.Name, dataImport.Namespace, dataImport.Name)
 	r.dataImport = dataImport
 
+	// Migrate legacy objects onto the current condition catalog before any status write: pre-existing
+	// DataImports carry a stale "Expired" condition (seeded by the previous controller) that the
+	// narrowed CRD condition-type enum no longer permits; leaving it in the atomic conditions list would
+	// make every Status().Update fail enum validation.
+	common.StripConditionsNotIn(&r.dataImport.Status,
+		common.ConditionReady, common.ConditionUploadFinished, common.ConditionCompleted)
+
+	// Migrate a legacy Ready=True reason (PodReady/IngressReady) onto the current catalog (ServerReady):
+	// a mid-flight object never has its Ready reason rewritten otherwise, and the narrowed reason enum
+	// would reject the first status write. Rewriting the reason in place keeps lastTransitionTime.
+	if ready := meta.FindStatusCondition(r.dataImport.Status.Conditions, string(common.ConditionReady)); ready != nil &&
+		ready.Status == metav1.ConditionTrue && ready.Reason != string(common.ReasonServerReady) {
+		ready.Reason = string(common.ReasonServerReady)
+	}
+
+	// Ensure the base conditions of the DataImport catalog exist (independently, so a migrated legacy
+	// object that already has Ready still gets Completed). UploadFinished is created on demand from
+	// serverState=Finished.
 	if meta.FindStatusCondition(r.dataImport.Status.Conditions, string(common.ConditionReady)) == nil {
 		meta.SetStatusCondition(&r.dataImport.Status.Conditions, metav1.Condition{
 			Type:               string(common.ConditionReady),
@@ -104,15 +159,16 @@ func (r *DataImportReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 			Message:            "Started",
 			ObservedGeneration: r.dataImport.Generation,
 		})
+	}
+	if meta.FindStatusCondition(r.dataImport.Status.Conditions, string(common.ConditionCompleted)) == nil {
 		meta.SetStatusCondition(&r.dataImport.Status.Conditions, metav1.Condition{
-			Type:               string(common.ConditionExpired),
+			Type:               string(common.ConditionCompleted),
 			Status:             metav1.ConditionFalse,
-			Reason:             string(common.ReasonPending),
-			Message:            "TTL not expired",
+			Reason:             string(common.ReasonInProgress),
+			Message:            "Data import in progress",
 			ObservedGeneration: r.dataImport.Generation,
 		})
 	}
-	common.EnsureFinalizer(ctx, r.Client, r.dataImport, dev1alpha1.StorageManagerFinalizerName)
 
 	if r.dataImport.DeletionTimestamp != nil {
 		logger.Info("DataImport resource is marked for deletion")
@@ -130,20 +186,53 @@ func (r *DataImportReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 		return ctrl.Result{}, nil
 	}
 
-	if meta.IsStatusConditionTrue(r.dataImport.Status.Conditions, string(common.ConditionExpired)) {
-		logger.Info("DataImport resource TTL expired")
+	// Idle-TTL expiry: the importer pod reported serverState=IdleExpired (idle >= spec.ttl with no
+	// in-flight upload — the pod enforces the window using --ttl=spec.ttl), OR a legacy object was already
+	// expired under the old condition-based mechanism (Ready=False/Expired). This is the terminal Expired
+	// outcome. Tear down the server-side infrastructure but keep the CR and its finalizer so the garbage
+	// collector can delete it after the retention window (the deletion branch then performs the final
+	// finalizer cleanup). Setting Ready=Expired also makes the volume populator tear down the upload
+	// Deployment it owns. Checking this BEFORE the active pipeline prevents a migrated legacy-expired
+	// object from being resurrected into a new import.
+	if isDataImportExpired(r.dataImport) {
+		logger.Info("DataImport idle TTL expired")
 		meta.SetStatusCondition(&r.dataImport.Status.Conditions, metav1.Condition{
 			Type:               string(common.ConditionReady),
 			Status:             metav1.ConditionFalse,
 			Reason:             string(common.ReasonExpired),
-			Message:            "DataImport time to live expired. Please, delete this resource manually",
+			Message:            "DataImport idle timeout expired",
 			ObservedGeneration: r.dataImport.Generation,
 		})
-
-		if cleanupErr := r.cleanupDataImport(ctx); cleanupErr != nil {
+		if _, cleanupErr := r.teardownImportInfra(ctx); cleanupErr != nil {
 			return ctrl.Result{}, fmt.Errorf("%w: %w", ErrCleanupFailed, cleanupErr)
 		}
 		return ctrl.Result{}, nil
+	}
+
+	// One-shot terminal (Completed or Failed): the import is never resumed (VMOP model). Keep the body
+	// inert so a later event cannot restart the pipeline under a terminal phase — which would contradict
+	// the status and reset the GC retention clock (completionTimestamp is stamped once, at the real
+	// terminal). Completed leaves its artifact and Failed produced none; the CR (and its finalizer) is
+	// kept for the GC, whose Delete drives the deletion branch above. Expired is handled by its own branch
+	// (it still needs idempotent teardown/retry), so it is excluded here.
+	if p := common.Phase(r.dataImport.Status.Phase); p.IsTerminal() && p != common.PhaseExpired {
+		logger.Info("DataImport is terminal, skipping reconcile", "phase", p)
+		return ctrl.Result{}, nil
+	}
+
+	common.EnsureFinalizer(ctx, r.Client, r.dataImport, dev1alpha1.StorageManagerFinalizerName)
+
+	// The pod no longer writes conditions; translate its Finished signal into the controller-owned
+	// UploadFinished condition. The populator (cmd/main.go) and the capture step both gate on
+	// UploadFinished=True, so this must run before ensureTarget inspects it.
+	if common.ServerState(r.dataImport.Status.ServerState) == common.ServerStateFinished {
+		meta.SetStatusCondition(&r.dataImport.Status.Conditions, metav1.Condition{
+			Type:               string(common.ConditionUploadFinished),
+			Status:             metav1.ConditionTrue,
+			Reason:             string(common.ReasonUploadFinished),
+			Message:            "Client upload finished; producing artifact",
+			ObservedGeneration: r.dataImport.Generation,
+		})
 	}
 
 	result, err = r.ensureTarget(ctx)
@@ -212,6 +301,102 @@ func mutateReadyByErr(dataImport *dev1alpha1.DataImport, reconcileErr error) {
 	})
 }
 
+// isDataImportExpired reports whether the import has terminally idle-expired: the importer pod reported
+// serverState=IdleExpired, or a legacy object was expired under the old condition-based mechanism
+// (Ready=False/Expired). Recognizing the legacy form keeps a migrated pre-upgrade expired object terminal
+// instead of resurrecting it into a fresh import.
+func isDataImportExpired(di *dev1alpha1.DataImport) bool {
+	if common.ServerState(di.Status.ServerState) == common.ServerStateIdleExpired {
+		return true
+	}
+	ready := meta.FindStatusCondition(di.Status.Conditions, string(common.ConditionReady))
+	return ready != nil && ready.Status == metav1.ConditionFalse && ready.Reason == string(common.ReasonExpired)
+}
+
+// computeDataImportPhase derives the coarse-grained phase. A terminal phase is STICKY (once Completed /
+// Expired / Failed, it never reverts even if a later reconcile hits a transient state), which keeps
+// completionTimestamp meaningful and prevents the GC age from being reset. Terminal transitions are
+// EXPLICIT: Failed only from an ErrTerminal reconcile error (never from an ambiguous condition reason
+// that is also used for retryable failures), Expired from the idle signal, Completed from the produced
+// artifact. Precedence: deletion > sticky-terminal > completed > expired > failed > ready > pending.
+func (r *DataImportReconciler) computeDataImportPhase(di *dev1alpha1.DataImport, reconcileErr error) common.Phase {
+	if di.DeletionTimestamp != nil {
+		return common.PhaseTerminating
+	}
+	if common.Phase(di.Status.Phase).IsTerminal() {
+		return common.Phase(di.Status.Phase)
+	}
+	if meta.IsStatusConditionTrue(di.Status.Conditions, string(common.ConditionCompleted)) {
+		return common.PhaseCompleted
+	}
+	if isDataImportExpired(di) {
+		return common.PhaseExpired
+	}
+	if errors.Is(reconcileErr, ErrTerminal) {
+		return common.PhaseFailed
+	}
+	// Actively progressing (endpoint served, or the upload finished and the artifact is being produced) —
+	// keep Ready rather than dipping to Pending during the capture window.
+	if meta.IsStatusConditionTrue(di.Status.Conditions, string(common.ConditionReady)) ||
+		meta.IsStatusConditionTrue(di.Status.Conditions, string(common.ConditionUploadFinished)) {
+		return common.PhaseReady
+	}
+	return common.PhasePending
+}
+
+// finalizeDataImportStatus computes phase, keeps the terminal conditions consistent with it (idempotently,
+// so a settled terminal object produces no status churn), and stamps completionTimestamp once. It runs in
+// the deferred block after the reconcile body and mutateReadyByErr, so it always sees the definitive
+// state. The controller is the sole writer of phase, completionTimestamp and all conditions.
+func (r *DataImportReconciler) finalizeDataImportStatus(di *dev1alpha1.DataImport, reconcileErr error) {
+	if di == nil {
+		return
+	}
+	phase := r.computeDataImportPhase(di, reconcileErr)
+
+	switch phase {
+	case common.PhaseCompleted:
+		// The endpoint is done; move Ready off ServerReady to the terminal Completed reason.
+		meta.SetStatusCondition(&di.Status.Conditions, metav1.Condition{
+			Type:               string(common.ConditionReady),
+			Status:             metav1.ConditionFalse,
+			Reason:             string(common.ReasonCompleted),
+			Message:            "Data import completed",
+			ObservedGeneration: di.Generation,
+		})
+	case common.PhaseExpired:
+		meta.SetStatusCondition(&di.Status.Conditions, metav1.Condition{
+			Type:               string(common.ConditionReady),
+			Status:             metav1.ConditionFalse,
+			Reason:             string(common.ReasonExpired),
+			Message:            "DataImport idle timeout expired",
+			ObservedGeneration: di.Generation,
+		})
+		meta.SetStatusCondition(&di.Status.Conditions, metav1.Condition{
+			Type:               string(common.ConditionCompleted),
+			Status:             metav1.ConditionFalse,
+			Reason:             string(common.ReasonExpired),
+			Message:            "DataImport idle timeout expired before completion",
+			ObservedGeneration: di.Generation,
+		})
+	case common.PhaseFailed:
+		message := "DataImport failed"
+		if ready := meta.FindStatusCondition(di.Status.Conditions, string(common.ConditionReady)); ready != nil {
+			message = ready.Message
+		}
+		meta.SetStatusCondition(&di.Status.Conditions, metav1.Condition{
+			Type:               string(common.ConditionCompleted),
+			Status:             metav1.ConditionFalse,
+			Reason:             string(common.ReasonFailed),
+			Message:            message,
+			ObservedGeneration: di.Generation,
+		})
+	}
+
+	di.Status.Phase = string(phase)
+	common.SetCompletionTimestampOnce(&di.Status, phase, r.now())
+}
+
 // isCreatePVCMode reports whether this DataImport populates a preserved volume (CreatePVC): the imported
 // bytes are written into a created PVC (pvcTemplate), with no durable artifact produced. The mode is the
 // explicit spec.mode discriminator (defaulting to CreatePVC); the alternative is PopulateData.
@@ -258,7 +443,7 @@ func (r *DataImportReconciler) ensureSnapshotImportTarget(ctx context.Context) (
 	params, err := scratchVolumeParamsFromSpec(r.dataImport.Spec)
 	if err != nil {
 		logger.Error(err, "invalid scratch volume parameters in spec")
-		return ctrl.Result{}, fmt.Errorf("%w: %w", ErrTargetFailed, err)
+		return ctrl.Result{}, fmt.Errorf("%w: %w: %w", ErrTerminal, ErrTargetFailed, err)
 	}
 
 	// Fail fast: core import supports snapshot-capable CSI only. Snapshot capability is a static
@@ -445,7 +630,7 @@ func (r *DataImportReconciler) ensurePVCImportTarget(ctx context.Context) (ctrl.
 	pvcTemplate := r.dataImport.Spec.PvcTemplate
 	if pvcTemplate == nil || pvcTemplate.Name == "" {
 		// CRD CEL enforces this; guard anyway since the controller would otherwise build an unnamed PVC.
-		return ctrl.Result{}, fmt.Errorf("%w: pvcTemplate with metadata.name is required for CreatePVC", ErrTargetFailed)
+		return ctrl.Result{}, fmt.Errorf("%w: %w: pvcTemplate with metadata.name is required for CreatePVC", ErrTerminal, ErrTargetFailed)
 	}
 
 	if err := r.ensureImportPVC(ctx, pvcTemplate); err != nil {
@@ -562,7 +747,7 @@ func (r *DataImportReconciler) ensureDataArtifact(ctx context.Context, pvc *core
 		return ctrl.Result{}, err
 	}
 	if failed, reason := volumeCaptureRequestFailed(vcr); failed {
-		return ctrl.Result{}, fmt.Errorf("%w: VolumeCaptureRequest failed: %s", ErrTargetFailed, reason)
+		return ctrl.Result{}, fmt.Errorf("%w: %w: VolumeCaptureRequest failed: %s", ErrTerminal, ErrTargetFailed, reason)
 	}
 	if !volumeCaptureRequestReady(vcr) {
 		logger.Info("VolumeCaptureRequest not ready yet, waiting", "name", vcr.GetName())
@@ -579,7 +764,7 @@ func (r *DataImportReconciler) ensureDataArtifact(ctx context.Context, pvc *core
 	artifact, err := volumeCaptureArtifact(vcr, expectedKind)
 	if err != nil {
 		// A produced VCR with a malformed/mismatched dataRef is a contract violation, not transient.
-		return ctrl.Result{}, fmt.Errorf("%w: %w", ErrTargetFailed, err)
+		return ctrl.Result{}, fmt.Errorf("%w: %w: %w", ErrTerminal, ErrTargetFailed, err)
 	}
 	if err := r.pinArtifactRetain(ctx, artifact); err != nil {
 		return ctrl.Result{}, err
@@ -599,13 +784,13 @@ func (r *DataImportReconciler) ensureDataArtifact(ctx context.Context, pvc *core
 	return ctrl.Result{}, nil
 }
 
-func (r *DataImportReconciler) cleanupDataImport(ctx context.Context) error {
+// teardownImportInfra deletes the controller-owned server-side resources (dummy Job, publish
+// Service/Ingress) and reports whether ALL server-side infrastructure is gone — including the upload
+// Deployment, which the volume populator owns and tears down when it observes Ready=Expired/Deleted. It
+// never touches finalizers, so it is safe to call both on idle expiry (keep the CR for the GC) and as the
+// first phase of deletion cleanup. It is idempotent: not-found resources count as already gone.
+func (r *DataImportReconciler) teardownImportInfra(ctx context.Context) (allGone bool, err error) {
 	logger := log.FromContext(ctx)
-	logger.Info("Cleaning up DataImport")
-
-	// TODO: should we keep PVC if population is not finished successfully?
-	// NOTE: if we delete DataImport before population is started, PVC is kept in
-	// PENDING
 
 	// Delete dummy Job if it exists
 	jobName := types.NamespacedName{
@@ -615,25 +800,25 @@ func (r *DataImportReconciler) cleanupDataImport(ctx context.Context) error {
 	isJobExists, err := common.DeleteJob(ctx, r.Client, jobName)
 	if err != nil {
 		logger.Error(err, "Failed to delete dummy Job")
-		return err
+		return false, err
 	}
 	if isJobExists {
 		logger.Info("Dummy Job exists")
 	}
 
-	// Check if server deployment stopped
+	// Check if server deployment stopped (the populator owns and deletes it)
 	deploymentName := types.NamespacedName{
 		Namespace: r.Config.ControllerNamespace,
 		Name:      r.names.DeployName,
 	}
 
 	deploy := &appsv1.Deployment{}
-	err = r.Client.Get(ctx, deploymentName, deploy)
+	getErr := r.Client.Get(ctx, deploymentName, deploy)
 	isServerDeploymentExists := false
-	if err != nil && !kubeerrors.IsNotFound(err) {
-		logger.Error(err, "Failed to get server Deployment")
-		return err
-	} else if err == nil {
+	if getErr != nil && !kubeerrors.IsNotFound(getErr) {
+		logger.Error(getErr, "Failed to get server Deployment")
+		return false, getErr
+	} else if getErr == nil {
 		logger.Info("Server Deployment exists")
 		isServerDeploymentExists = true
 	}
@@ -641,15 +826,33 @@ func (r *DataImportReconciler) cleanupDataImport(ctx context.Context) error {
 	// Delete publish resources if created
 	isPublishExists, err := r.deletePublish(ctx)
 	if err != nil {
-		return err
+		return false, err
 	}
 	if isPublishExists {
 		logger.Info("Ingress or service exists")
 	}
 
-	// Check if we ready to shutdown or try again
 	if isJobExists || isServerDeploymentExists || isPublishExists {
 		logger.Info("Not all resources are deleted")
+		return false, nil
+	}
+	return true, nil
+}
+
+func (r *DataImportReconciler) cleanupDataImport(ctx context.Context) error {
+	logger := log.FromContext(ctx)
+	logger.Info("Cleaning up DataImport")
+
+	// TODO: should we keep PVC if population is not finished successfully?
+	// NOTE: if we delete DataImport before population is started, PVC is kept in
+	// PENDING
+
+	allGone, err := r.teardownImportInfra(ctx)
+	if err != nil {
+		return err
+	}
+	// Check if we ready to shutdown or try again
+	if !allGone {
 		return nil
 	}
 
@@ -778,61 +981,76 @@ func (r *DataImportReconciler) deletePublish(ctx context.Context) (bool, error) 
 	return deleted, err
 }
 
-// updateDataImport persists all accumulated in-memory mutations (spec, metadata, status) in a single
-// deferred call at the end of Reconcile. Splits the write into two API calls: one for the main object
-// (spec/finalizers/labels/annotations) and one for the status subresource, because Kubernetes treats
-// them as independent resources. Uses diStatusCopy to preserve status across the main Update call,
-// since the API server response overwrites the in-memory status with the server-side value.
+// updateDataImport persists the accumulated in-memory mutations (spec/metadata, status) at the end of
+// Reconcile. Metadata (spec/finalizers/labels/annotations) and the status subresource are independent
+// resources, so each gets its own API call. Both are wrapped in RetryOnConflict with a fresh GET: the
+// importer pod writes the pod-owned status fields (serverState, accessTimestamp, url, ca) concurrently
+// (heartbeat every 30s), so a blind Status().Update off the reconcile-start snapshot would clobber a
+// concurrent serverState=Finished/IdleExpired write and hang the import. Instead the controller-owned
+// status is re-applied onto the freshly read object while the pod-owned fields are carried over from the
+// latest server-side state.
 func updateDataImport(ctx context.Context, c client.Client, dataImportOld, dataImportNew *dev1alpha1.DataImport) error {
 	if dataImportOld == nil || dataImportNew == nil {
 		return nil
 	}
 
-	needStatusUpdate := false
-	needUpdate := needDataImportUpdate(dataImportOld, dataImportNew)
-	var diStatusCopy *dev1alpha1.DataExportImportStatus
-
-	// Save status before the main Update: the API server response will overwrite in-memory status
-	if !reflect.DeepEqual(dataImportOld.Status, dataImportNew.Status) {
-		needStatusUpdate = true
-		diStatusCopy = dataImportNew.Status.DeepCopy()
+	// The controller only ever changes its own finalizer (and status); it never writes spec/labels/
+	// annotations. So the metadata write is reduced to reconciling that single finalizer onto the fresh
+	// object, which avoids clobbering concurrent third-party edits (spec, labels, foregroundDeletion).
+	wantFinalizer := common.ContainsString(dataImportNew.Finalizers, dev1alpha1.StorageManagerFinalizerName)
+	needMeta := wantFinalizer != common.ContainsString(dataImportOld.Finalizers, dev1alpha1.StorageManagerFinalizerName)
+	needStatus := !reflect.DeepEqual(dataImportOld.Status, dataImportNew.Status)
+	if !needMeta && !needStatus {
+		return nil
 	}
 
-	// Persist spec/metadata (non-status fields); updates ResourceVersion in dataImportNew
-	if needUpdate {
-		if err := c.Update(ctx, dataImportNew); err != nil {
-			return fmt.Errorf("update DataImport failed: %w", err)
+	statusCopy := dataImportNew.Status.DeepCopy()
+	key := types.NamespacedName{Namespace: dataImportNew.Namespace, Name: dataImportNew.Name}
+
+	err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		fresh := &dev1alpha1.DataImport{}
+		if err := c.Get(ctx, key, fresh); err != nil {
+			return err
 		}
-	}
 
-	// Restore the saved status (overwritten by Update response) and persist via status subresource
-	if needStatusUpdate {
-		dataImportNew.Status = *diStatusCopy
-		if err := c.Status().Update(ctx, dataImportNew); err != nil {
-			return fmt.Errorf("update DataImport status failed: %w", err)
+		if needMeta {
+			fresh.Finalizers = common.ReconcileFinalizer(fresh.Finalizers, dev1alpha1.StorageManagerFinalizerName, wantFinalizer)
+			if err := c.Update(ctx, fresh); err != nil {
+				return fmt.Errorf("update DataImport failed: %w", err)
+			}
 		}
-	}
 
-	return nil
+		if needStatus {
+			merged := statusCopy.DeepCopy()
+			// Preserve the pod-owned status fields from the latest server-side object; the controller
+			// owns everything else (conditions, phase, completionTimestamp, publicURL, volumeMode, data).
+			merged.Url = fresh.Status.Url
+			merged.CA = fresh.Status.CA
+			merged.AccessTimestamp = fresh.Status.AccessTimestamp
+			merged.ServerState = fresh.Status.ServerState
+			fresh.Status = *merged
+			if err := c.Status().Update(ctx, fresh); err != nil {
+				return fmt.Errorf("update DataImport status failed: %w", err)
+			}
+		}
+
+		return nil
+	})
+	// The object was deleted out from under us (e.g. its finalizer was just removed and Kubernetes
+	// finalized the deletion, or the GC deleted it): there is nothing left to persist — treat as success.
+	return client.IgnoreNotFound(err)
 }
 
-func needDataImportUpdate(dataImportOld, dataImportNew *dev1alpha1.DataImport) bool {
-	return !reflect.DeepEqual(dataImportOld.Spec, dataImportNew.Spec) ||
-		!reflect.DeepEqual(dataImportOld.Finalizers, dataImportNew.Finalizers) ||
-		!reflect.DeepEqual(dataImportOld.Labels, dataImportNew.Labels) ||
-		!reflect.DeepEqual(dataImportOld.Annotations, dataImportNew.Annotations)
-}
-
-// updateReadiness flips the Ready condition to True once the upload server (and the ingress, when the
-// import is published) is up. It is upgrade-only: when the server is not ready yet it leaves the Ready
-// condition untouched so the more specific progress reason set by ensureTarget (e.g. PVCCreated, or a
-// target precondition) stays visible instead of being masked by a generic "awaiting server readiness".
-// Ready=True is the signal the client waits on before streaming bytes into the scratch PVC, and in the
-// populator flow that PVC is still Pending at that point, so this must run even while ensureTarget
-// requeues.
+// updateReadiness flips the Ready condition to True/ServerReady once the upload server reports it is
+// serving (status.serverState=Ready, written by the importer pod) and, for a published import, the
+// ingress is up too. It is upgrade-only: when the endpoint is not ready yet it leaves the Ready condition
+// untouched so the more specific progress reason set by ensureTarget (e.g. PVCCreated, or a target
+// precondition) stays visible instead of being masked by a generic "awaiting server readiness". Ready=True
+// is the signal the client waits on before streaming bytes into the scratch PVC, and in the populator
+// flow that PVC is still Pending at that point, so this must run even while ensureTarget requeues.
 //
 // NOTE: this only handles the "not ready" -> "ready" transition; it does not downgrade Ready if the
-// server later fails or is deleted.
+// server later fails or is deleted (the terminal Expired/Failed transitions own the downgrade).
 func (r *DataImportReconciler) updateReadiness(ctx context.Context) error {
 	// Once the upload has finished, the capture/complete phase owns the Ready condition: ensureTarget
 	// reports "Capturing ..." while the VolumeCaptureRequest runs and then Completed. The upload server
@@ -843,17 +1061,12 @@ func (r *DataImportReconciler) updateReadiness(ctx context.Context) error {
 		return nil
 	}
 
-	isServerReady, err := common.IsDeploymentReady(
-		ctx,
-		r.Client,
-		types.NamespacedName{Namespace: r.Config.ControllerNamespace, Name: r.names.DeployName})
-	if err != nil {
-		return err
+	// The importer pod publishes serverState=Ready once it is actually serving (listening + CA
+	// published). That is the authoritative endpoint-readiness signal; the pod is brought up out of band
+	// by the volume populator, so the controller keys readiness off the pod's own report.
+	if common.ServerState(r.dataImport.Status.ServerState) != common.ServerStateReady {
+		return nil
 	}
-
-	reason := common.ReasonPodReady
-	message := "Server is ready"
-	isReady := isServerReady
 
 	if r.dataImport.Spec.Publish {
 		isIngressReady, err := publish.IsPublishReady(
@@ -863,24 +1076,16 @@ func (r *DataImportReconciler) updateReadiness(ctx context.Context) error {
 		if err != nil {
 			return err
 		}
-
-		if isIngressReady {
-			reason = common.ReasonIngressReady
-			message = "Ingress is ready"
+		if !isIngressReady {
+			return nil
 		}
-
-		isReady = isServerReady && isIngressReady
-	}
-
-	if !isReady {
-		return nil
 	}
 
 	meta.SetStatusCondition(&r.dataImport.Status.Conditions, metav1.Condition{
 		Type:               string(common.ConditionReady),
 		Status:             metav1.ConditionTrue,
-		Reason:             string(reason),
-		Message:            message,
+		Reason:             string(common.ReasonServerReady),
+		Message:            "Server is ready",
 		ObservedGeneration: r.dataImport.Generation,
 	})
 

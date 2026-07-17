@@ -29,6 +29,7 @@ import (
 	"sync"
 
 	"github.com/deckhouse/sds-common-lib/fs/fsext"
+	"github.com/deckhouse/storage-foundation/common"
 	"github.com/deckhouse/storage-foundation/images/data-exporter/internal/config"
 	"github.com/deckhouse/storage-foundation/images/data-exporter/internal/httpiohelpers"
 	"github.com/deckhouse/storage-foundation/images/data-exporter/internal/repository"
@@ -262,10 +263,10 @@ func (h *ImportFilesystemHandler) CreateFile(w http.ResponseWriter, r *http.Requ
 }
 
 func (h *ImportFilesystemHandler) CompleteImport(w http.ResponseWriter, _ *http.Request) {
-	err := h.client.SetDataImportCompleted(context.Background(), h.cfg.URLOpt.DataManagerNamespace, h.cfg.DataManagerName)
+	err := h.client.SetServerState(context.Background(), common.OperationImport, h.cfg.URLOpt.DataManagerNamespace, h.cfg.DataManagerName, common.ServerStateFinished)
 	if err != nil {
-		h.logger.Error("failed to set data import completed", "error", err)
-		http.Error(w, "failed to set data import completed", http.StatusInternalServerError)
+		h.logger.Error("failed to set data import finished", "error", err)
+		http.Error(w, "failed to set data import finished", http.StatusInternalServerError)
 		return
 	}
 	w.WriteHeader(http.StatusOK)

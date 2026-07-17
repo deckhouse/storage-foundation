@@ -217,6 +217,18 @@ func main() {
 		os.Exit(1)
 	}
 
+	// Publish serverState=Ready now that the server is listening and its CA is published: this is the
+	// pod's only readiness signal to the controller, which turns it into the Ready condition/phase. The
+	// pod is the sole writer of serverState and SetServerState is monotonic (Ready is set only from the
+	// unset state), so on a restart over an already-terminal object (Finished/IdleExpired) this is a
+	// no-op. A failed write exits so the Deployment restarts the pod and republishes — matching the CA
+	// step and the plan's "pod died -> Deployment recreates" fault-tolerance model.
+	err = k8sClient.SetServerState(ctx, cfg.Operation, cfg.URLOpt.DataManagerNamespace, cfg.DataManagerName, common.ServerStateReady)
+	if err != nil {
+		logger.Error("Set DataManager serverState Ready", "failed", err.Error())
+		os.Exit(1)
+	}
+
 	// Waiting for shutdown events
 	<-signalChan
 	logger.Info("OS interrupt - shutting down...")

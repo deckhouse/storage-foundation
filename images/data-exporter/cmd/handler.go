@@ -22,6 +22,7 @@ import (
 	"net/http"
 
 	"github.com/deckhouse/sds-common-lib/fs/fsext"
+	"github.com/deckhouse/storage-foundation/common"
 	"github.com/deckhouse/storage-foundation/images/data-exporter/internal/config"
 	"github.com/deckhouse/storage-foundation/images/data-exporter/internal/export_block"
 	"github.com/deckhouse/storage-foundation/images/data-exporter/internal/export_filesystem"
@@ -94,9 +95,9 @@ func MuxAddFinishedHandler(mux *http.ServeMux, opt config.URLOpt, client *reposi
 			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 			return
 		}
-		if err := client.SetDataImportCompleted(r.Context(), cfg.URLOpt.DataManagerNamespace, cfg.DataManagerName); err != nil {
-			logger.Error("failed to set data import completed", "error", err)
-			http.Error(w, "failed to set data import completed", http.StatusInternalServerError)
+		if err := client.SetServerState(r.Context(), common.OperationImport, cfg.URLOpt.DataManagerNamespace, cfg.DataManagerName, common.ServerStateFinished); err != nil {
+			logger.Error("failed to set data import finished", "error", err)
+			http.Error(w, "failed to set data import finished", http.StatusInternalServerError)
 			return
 		}
 		w.WriteHeader(http.StatusNoContent)

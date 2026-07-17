@@ -79,29 +79,34 @@ var volumeCaptureRequestGVR = schema.GroupVersionResource{
 func (r *DataImportReconciler) resolveSnapshotCaptureMode(ctx context.Context) (mode, expectedKind string, err error) {
 	tmpl := r.dataImport.Spec.StorageParams
 	if tmpl == nil || tmpl.StorageClassName == "" {
-		return "", "", fmt.Errorf("spec.storageParams.storageClassName is required to select a VolumeSnapshotClass")
+		// Bad spec — terminal (user-fixable), not transient.
+		return "", "", fmt.Errorf("%w: spec.storageParams.storageClassName is required to select a VolumeSnapshotClass", ErrTerminal)
 	}
 	scName := tmpl.StorageClassName
 
 	sc := &storagev1.StorageClass{}
 	if err := r.Client.Get(ctx, types.NamespacedName{Name: scName}, sc); err != nil {
+		// Transient API error — retryable (no ErrTerminal), recovers on requeue.
 		return "", "", fmt.Errorf("get StorageClass %q: %w", scName, err)
 	}
 
 	vscName := sc.Annotations[storageClassVSCAnnotation]
 	if vscName == "" {
-		return "", "", fmt.Errorf("StorageClass %q is not snapshot-capable: missing %s annotation; core import supports CSI snapshots only (PersistentVolume/Detach import is not supported)",
-			scName, storageClassVSCAnnotation)
+		// A non-snapshot-capable StorageClass is a terminal configuration error for core import.
+		return "", "", fmt.Errorf("%w: StorageClass %q is not snapshot-capable: missing %s annotation; core import supports CSI snapshots only (PersistentVolume/Detach import is not supported)",
+			ErrTerminal, scName, storageClassVSCAnnotation)
 	}
 
 	vsc := &snapv1.VolumeSnapshotClass{}
 	if err := r.Client.Get(ctx, types.NamespacedName{Name: vscName}, vsc); err != nil {
+		// Transient API error — retryable.
 		return "", "", fmt.Errorf("get VolumeSnapshotClass %q (from StorageClass %q %s annotation): %w",
 			vscName, scName, storageClassVSCAnnotation, err)
 	}
 	if vsc.Driver != sc.Provisioner {
-		return "", "", fmt.Errorf("VolumeSnapshotClass %q driver %q does not match StorageClass %q provisioner %q",
-			vscName, vsc.Driver, scName, sc.Provisioner)
+		// Misconfigured snapshot class — terminal.
+		return "", "", fmt.Errorf("%w: VolumeSnapshotClass %q driver %q does not match StorageClass %q provisioner %q",
+			ErrTerminal, vscName, vsc.Driver, scName, sc.Provisioner)
 	}
 
 	return vcrModeSnapshot, artifactKindVolumeSnapshotContent, nil

@@ -96,6 +96,23 @@ func RemoveFinalizer[T client.Object](ctx context.Context, client client.Client,
 	return false
 }
 
+// ReconcileFinalizer applies the controller's single-finalizer intent (want = should the finalizer be
+// present?) onto a freshly-read object's finalizer list, preserving every OTHER finalizer already on it
+// (e.g. Kubernetes' foregroundDeletion). It is used by the RetryOnConflict status/metadata update path so
+// re-reading the live object does not clobber concurrent third-party finalizers by blindly overwriting
+// the whole list with a stale snapshot.
+func ReconcileFinalizer(live []string, finalizerName string, want bool) []string {
+	has := ContainsString(live, finalizerName)
+	switch {
+	case want && !has:
+		return append(live, finalizerName)
+	case !want && has:
+		return RemoveString(live, finalizerName)
+	default:
+		return live
+	}
+}
+
 // Retrieves container image from ConfigMap
 func GetImage(ctx context.Context, client client.Client, name types.NamespacedName) (string, error) {
 	logger := log.FromContext(ctx).WithValues("configMapNamespace", name.Namespace, "configMapName", name.Name)

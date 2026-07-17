@@ -53,6 +53,7 @@ import (
 	"github.com/deckhouse/storage-foundation/common/config"
 	dataexport "github.com/deckhouse/storage-foundation/images/data-manager-controller/internal/controllers/data-export"
 	dataimport "github.com/deckhouse/storage-foundation/images/data-manager-controller/internal/controllers/data-import"
+	gccontroller "github.com/deckhouse/storage-foundation/images/data-manager-controller/internal/controllers/gc"
 	"github.com/deckhouse/storage-foundation/images/data-manager-controller/internal/controllers/server"
 	virtv1alpha2 "github.com/deckhouse/virtualization/api/core/v1alpha2"
 )
@@ -302,6 +303,16 @@ func createController(manager manager.Manager, cfgParams *config.Options) error 
 			Dynamic: dynamicClient,
 		})
 	if err != nil {
+		return err
+	}
+
+	// Cron-triggered garbage collectors that delete terminal DataImport/DataExport objects after their TTL.
+	if err := gccontroller.SetupDataImportGC(manager); err != nil {
+		log.Log.Error(err, "Failed to create DataImport GC controller")
+		return err
+	}
+	if err := gccontroller.SetupDataExportGC(manager); err != nil {
+		log.Log.Error(err, "Failed to create DataExport GC controller")
 		return err
 	}
 

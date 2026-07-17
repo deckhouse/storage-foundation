@@ -18,6 +18,7 @@ package dataexport
 
 import (
 	"context"
+	"fmt"
 	"testing"
 	"time"
 
@@ -27,6 +28,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	networkingv1 "k8s.io/api/networking/v1"
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -34,6 +36,7 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
 	dev1alpha1 "github.com/deckhouse/storage-foundation/api/v1alpha1"
 	"github.com/deckhouse/storage-foundation/common"
@@ -212,20 +215,16 @@ func TestReconcile_TTLExpired(t *testing.T) {
 			Name: "test-pvc",
 		},
 	})
+	// New expiry model: the exporter pod signals idle-TTL expiry via serverState=IdleExpired (there is
+	// no standalone Expired condition anymore). Ready starts up (ServerReady); the controller must flip
+	// it to False/Expired and remove the finalizer.
+	dataExport.Status.ServerState = string(common.ServerStateIdleExpired)
 	dataExport.Status.Conditions = []metav1.Condition{
-		{
-			Type:               string(common.ConditionExpired),
-			Status:             metav1.ConditionTrue,
-			Reason:             string(common.ReasonExpired),
-			Message:            "TTL expired",
-			ObservedGeneration: dataExport.Generation,
-			LastTransitionTime: metav1.NewTime(time.Now()),
-		},
 		{
 			Type:               string(common.ConditionReady),
 			Status:             metav1.ConditionTrue,
-			Reason:             string(common.ReasonPodReady),
-			Message:            "Pod is ready",
+			Reason:             string(common.ReasonServerReady),
+			Message:            "Server is ready and export started",
 			ObservedGeneration: dataExport.Generation,
 			LastTransitionTime: metav1.NewTime(time.Now()),
 		},
@@ -299,8 +298,11 @@ func TestReconcile_NewlyCreatedResource(t *testing.T) {
 	condition := common.GetCondition(updatedDE.Status.Conditions, common.ConditionReady)
 	assert.Equal(t, condition.Type, string(common.ConditionReady))
 
-	condition = common.GetCondition(updatedDE.Status.Conditions, common.ConditionExpired)
-	assert.Equal(t, condition.Type, string(common.ConditionExpired))
+	// DataExport catalog has a single condition (Ready). There is no standalone Expired condition
+	// anymore — expiry is Ready=False/Expired + phase=Expired. (ConditionExpired was removed from the
+	// catalog, so probe by string literal.)
+	assert.Nil(t, common.GetCondition(updatedDE.Status.Conditions, common.ConditionType("Expired")),
+		"DataExport must not carry a standalone Expired condition")
 
 	// Verify finalizer was added
 	assert.Contains(t, updatedDE.Finalizers, dev1alpha1.StorageManagerFinalizerName)
@@ -396,8 +398,8 @@ func TestReconcile_ResourceAlreadyImplemented(t *testing.T) {
 		{
 			Type:               string(common.ConditionReady),
 			Status:             metav1.ConditionTrue,
-			Reason:             string(common.ReasonPodReady),
-			Message:            "Pod is ready and export started",
+			Reason:             string(common.ReasonServerReady),
+			Message:            "Server is ready and export started",
 			ObservedGeneration: dataExport.Generation,
 			LastTransitionTime: metav1.NewTime(time.Now()),
 		},
@@ -449,19 +451,29 @@ func TestReconcile_ClientGetError(t *testing.T) {
 func TestReconcile_UpdateConditionError(t *testing.T) {
 	scheme := setupTestScheme()
 
-	// Create DataExport with VirtualDisk kind but without CRD
 	dataExport := createDataExport(dev1alpha1.DataExportSpec{
 		Ttl:     "1h",
 		Publish: false,
 		TargetRef: dev1alpha1.DataExportTargetRefSpec{
-			Group: virtualDisksGroup,
-			Kind:  virtualDiskKind,
-			Name:  "test-vd",
+			Kind: dev1alpha1.KindPVC,
+			Name: "test-pvc",
 		},
 	})
 
-	// Intentionally do NOT enable status subresource: deferred status flush should fail and Reconcile should surface it.
-	fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(dataExport).Build()
+	// Force a NON-conflict error on the deferred status flush so Reconcile surfaces it. A plain fake
+	// client without a status subresource no longer errors on Status().Update (it just persists the
+	// whole object), so an interceptor is the reliable trigger. RetryOnConflict does not retry a
+	// non-conflict error, so it propagates immediately, wrapped as "update DataExport status failed".
+	fakeClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithStatusSubresource(dataExport).
+		WithObjects(dataExport).
+		WithInterceptorFuncs(interceptor.Funcs{
+			SubResourceUpdate: func(_ context.Context, _ client.Client, _ string, _ client.Object, _ ...client.SubResourceUpdateOption) error {
+				return apierrors.NewInternalError(fmt.Errorf("injected status update failure"))
+			},
+		}).
+		Build()
 	cfg := createTestConfig()
 	reconciler := createTestReconciler(fakeClient, fakeClient, cfg)
 
