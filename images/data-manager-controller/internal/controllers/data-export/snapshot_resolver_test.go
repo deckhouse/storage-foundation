@@ -87,7 +87,7 @@ func TestVerifySnapshotContentNamespace(t *testing.T) {
 			_ = unstructured.SetNestedField(c.Object, snapshotRefNS, "spec", "snapshotRef", "namespace")
 		}
 		if sourceNS != "" {
-			_ = unstructured.SetNestedField(c.Object, sourceNS, "status", "data", "source", "namespace")
+			_ = unstructured.SetNestedField(c.Object, sourceNS, "status", "data", "sourceRef", "namespace")
 		}
 		return c
 	}
@@ -101,9 +101,9 @@ func TestVerifySnapshotContentNamespace(t *testing.T) {
 	}{
 		{name: "snapshotRef namespace matches", snapshotRefNS: "test-ns", wantNamespace: "test-ns"},
 		{name: "snapshotRef namespace mismatches -> rejected", snapshotRefNS: "victim-ns", wantNamespace: "test-ns", wantErr: true},
-		{name: "fallback to data.source namespace matches", sourceNS: "test-ns", wantNamespace: "test-ns"},
-		{name: "fallback to data.source namespace mismatches -> rejected", sourceNS: "victim-ns", wantNamespace: "test-ns", wantErr: true},
-		{name: "snapshotRef takes precedence over data.source", snapshotRefNS: "test-ns", sourceNS: "victim-ns", wantNamespace: "test-ns"},
+		{name: "fallback to data.sourceRef namespace matches", sourceNS: "test-ns", wantNamespace: "test-ns"},
+		{name: "fallback to data.sourceRef namespace mismatches -> rejected", sourceNS: "victim-ns", wantNamespace: "test-ns", wantErr: true},
+		{name: "snapshotRef takes precedence over data.sourceRef", snapshotRefNS: "test-ns", sourceNS: "victim-ns", wantNamespace: "test-ns"},
 		{name: "no anchor recorded -> accepted", wantNamespace: "test-ns"},
 	}
 
@@ -152,10 +152,10 @@ func newSnapshotContent(name, snapshotRefNS, artifactKind, artifactName, volumeM
 		_ = unstructured.SetNestedField(content.Object, snapshotRefNS, "spec", "snapshotRef", "namespace")
 	}
 	if artifactKind != "" {
-		_ = unstructured.SetNestedField(content.Object, artifactKind, "status", "data", "artifact", "kind")
+		_ = unstructured.SetNestedField(content.Object, artifactKind, "status", "data", "artifactRef", "kind")
 	}
 	if artifactName != "" {
-		_ = unstructured.SetNestedField(content.Object, artifactName, "status", "data", "artifact", "name")
+		_ = unstructured.SetNestedField(content.Object, artifactName, "status", "data", "artifactRef", "name")
 	}
 	if volumeMode != "" {
 		_ = unstructured.SetNestedField(content.Object, volumeMode, "status", "data", "volumeMode")

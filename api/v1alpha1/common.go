@@ -53,21 +53,21 @@ type DataExportImportStatus struct {
 	ServerState string `json:"serverState,omitempty"`
 
 	// Data carries the durable cluster-scoped data artifact produced by a DataImport under a nested
-	// data.artifact (VolumeSnapshotContent or PersistentVolume). It is written once the backing
-	// VolumeCaptureRequest completes; the state-snapshotter import orchestrator reads data.artifact to
-	// populate SnapshotContent.status.data.artifact. Empty for DataExport.
+	// data.artifactRef (VolumeSnapshotContent or PersistentVolume). It is written once the backing
+	// VolumeCaptureRequest completes; the state-snapshotter import orchestrator reads data.artifactRef to
+	// populate SnapshotContent.status.data.artifactRef. Empty for DataExport.
 	// +optional
 	Data *DataExportImportData `json:"data,omitempty"`
 }
 
 // DataExportImportData is the self-contained captured-data block on a DataImport status. It nests the
-// durable artifact under data.artifact (symmetric with SnapshotContent.status.data and
+// durable artifact under data.artifactRef (symmetric with SnapshotContent.status.data and
 // VolumeCaptureRequest.status.data).
 // +k8s:deepcopy-gen=true
 type DataExportImportData struct {
-	// Artifact references the durable cluster-scoped data artifact (VolumeSnapshotContent or PersistentVolume).
+	// ArtifactRef references the durable cluster-scoped data artifact (VolumeSnapshotContent or PersistentVolume).
 	// +optional
-	Artifact *DataArtifactReference `json:"artifact,omitempty"`
+	ArtifactRef *DataArtifactReference `json:"artifactRef,omitempty"`
 }
 
 // DataArtifactReference references a cluster-scoped durable data artifact (VolumeSnapshotContent or
@@ -78,7 +78,7 @@ type DataArtifactReference struct {
 	Kind       string `json:"kind"`
 	Name       string `json:"name"`
 	// UID is the durable data artifact UID (for example the VolumeSnapshotContent UID). It makes the
-	// artifact reference self-contained, symmetric with VolumeCaptureRequest's status.data.artifact.uid.
+	// artifact reference self-contained, symmetric with VolumeCaptureRequest's status.data.artifactRef.uid.
 	// Optional: producers fill it best-effort (the artifact may be referenced before its UID is known).
 	// +optional
 	UID string `json:"uid,omitempty"`

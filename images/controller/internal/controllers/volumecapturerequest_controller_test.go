@@ -452,9 +452,9 @@ var _ = Describe("VolumeCaptureRequest Controller", func() {
 				Expect(readyCondition.Status).To(Equal(metav1.ConditionTrue))
 
 				Expect(updatedVCR.Status.Data).ToNot(BeNil())
-				Expect(updatedVCR.Status.Data.Artifact.Kind).To(Equal("VolumeSnapshotContent"))
-				Expect(updatedVCR.Status.Data.Artifact.Name).To(Equal(csiVSCName))
-				Expect(updatedVCR.Status.Data.Artifact.UID).To(Equal("vsc-uid-happy"))
+				Expect(updatedVCR.Status.Data.ArtifactRef.Kind).To(Equal("VolumeSnapshotContent"))
+				Expect(updatedVCR.Status.Data.ArtifactRef.Name).To(Equal(csiVSCName))
+				Expect(updatedVCR.Status.Data.ArtifactRef.UID).To(Equal("vsc-uid-happy"))
 			})
 		})
 
@@ -537,9 +537,9 @@ var _ = Describe("VolumeCaptureRequest Controller", func() {
 				Expect(readyCondition.Message).To(ContainSubstring(errorMsg))
 
 				Expect(updatedVCR.Status.Data).ToNot(BeNil())
-				Expect(updatedVCR.Status.Data.Artifact.Kind).To(Equal("VolumeSnapshotContent"))
-				Expect(updatedVCR.Status.Data.Artifact.Name).To(Equal(csiVSCName))
-				Expect(updatedVCR.Status.Data.Artifact.UID).To(Equal("vsc-uid-error"))
+				Expect(updatedVCR.Status.Data.ArtifactRef.Kind).To(Equal("VolumeSnapshotContent"))
+				Expect(updatedVCR.Status.Data.ArtifactRef.Name).To(Equal(csiVSCName))
+				Expect(updatedVCR.Status.Data.ArtifactRef.UID).To(Equal("vsc-uid-error"))
 
 				// VSC still exists (not deleted)
 				existingVSC := &snapshotv1.VolumeSnapshotContent{}
@@ -729,9 +729,9 @@ var _ = Describe("VolumeCaptureRequest Controller", func() {
 				updatedVCR := &storagev1alpha1.VolumeCaptureRequest{}
 				Expect(client.Get(ctx, types.NamespacedName{Name: vcr.Name, Namespace: vcr.Namespace}, updatedVCR)).To(Succeed())
 				Expect(updatedVCR.Status.Data).ToNot(BeNil())
-				Expect(updatedVCR.Status.Data.Artifact.Kind).To(Equal("PersistentVolume"))
-				Expect(updatedVCR.Status.Data.Artifact.Name).To(Equal("test-pv-detach"))
-				Expect(updatedVCR.Status.Data.Artifact.UID).To(Equal("pv-uid-detach"))
+				Expect(updatedVCR.Status.Data.ArtifactRef.Kind).To(Equal("PersistentVolume"))
+				Expect(updatedVCR.Status.Data.ArtifactRef.Name).To(Equal("test-pv-detach"))
+				Expect(updatedVCR.Status.Data.ArtifactRef.UID).To(Equal("pv-uid-detach"))
 
 				readyCondition := getReadyCondition(updatedVCR.Status.Conditions)
 				Expect(readyCondition).ToNot(BeNil())

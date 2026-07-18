@@ -51,10 +51,10 @@ func TestTargetUIDHashDeterministic(t *testing.T) {
 func TestVolumeSnapshotBindingSetsArtifact(t *testing.T) {
 	target := storagev1alpha1.VolumeCaptureTarget{UID: "uid-a", Namespace: "ns", Name: "pvc-a"}
 	binding := volumeSnapshotBinding(target, "vsc-a", "vsc-uid-a")
-	if binding.Artifact.Name != "vsc-a" || binding.Artifact.Kind != "VolumeSnapshotContent" {
-		t.Fatalf("unexpected artifact: %#v", binding.Artifact)
+	if binding.ArtifactRef.Name != "vsc-a" || binding.ArtifactRef.Kind != "VolumeSnapshotContent" {
+		t.Fatalf("unexpected artifact: %#v", binding.ArtifactRef)
 	}
-	if binding.Artifact.UID != "vsc-uid-a" {
-		t.Fatalf("Artifact.UID = %q, want %q", binding.Artifact.UID, "vsc-uid-a")
+	if binding.ArtifactRef.UID != "vsc-uid-a" {
+		t.Fatalf("ArtifactRef.UID = %q, want %q", binding.ArtifactRef.UID, "vsc-uid-a")
 	}
 }

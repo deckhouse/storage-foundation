@@ -596,7 +596,7 @@ func cleanupVCRArtifacts(ctx context.Context, cl client.Client, vcr *storagev1al
 	if vcr.Status.Data == nil {
 		return nil
 	}
-	artifact := vcr.Status.Data.Artifact
+	artifact := vcr.Status.Data.ArtifactRef
 	if artifact.Name == "" {
 		return nil
 	}

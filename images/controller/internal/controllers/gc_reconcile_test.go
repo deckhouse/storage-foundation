@@ -54,7 +54,7 @@ func TestVCRGC_ReconcileThroughManager(t *testing.T) {
 
 	aged := vcr("aged", readyC(metav1.ConditionTrue, storagev1alpha1.ConditionReasonCompleted), &old, false)
 	aged.Status.Data = &storagev1alpha1.VolumeDataBinding{
-		Artifact: storagev1alpha1.VolumeDataArtifactRef{Kind: "PersistentVolume", Name: "orphan-pv"},
+		ArtifactRef: storagev1alpha1.VolumeDataArtifactRef{Kind: "PersistentVolume", Name: "orphan-pv"},
 	}
 	orphanPV := &corev1.PersistentVolume{ObjectMeta: metav1.ObjectMeta{Name: "orphan-pv"}} // no ownerReferences
 

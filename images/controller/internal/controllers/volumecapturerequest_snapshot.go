@@ -71,7 +71,7 @@ func snapshotVSCName(vcrUID types.UID, targetUID string) string {
 
 func volumeSnapshotBinding(_ storagev1alpha1.VolumeCaptureTarget, vscName, vscUID string) storagev1alpha1.VolumeDataBinding {
 	return storagev1alpha1.VolumeDataBinding{
-		Artifact: storagev1alpha1.VolumeDataArtifactRef{
+		ArtifactRef: storagev1alpha1.VolumeDataArtifactRef{
 			APIVersion: "snapshot.storage.k8s.io/v1",
 			Kind:       "VolumeSnapshotContent",
 			Name:       vscName,

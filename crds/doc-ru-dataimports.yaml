@@ -130,9 +130,9 @@ spec:
                     истекло окно неактивности. Контроллер выводит из него фазу и условия.
                 data:
                   description: |
-                    Блок захваченных данных импорта. Содержит долговечный кластерный артефакт данных под data.artifact (VolumeSnapshotContent). Заполняется после завершения соответствующего VolumeCaptureRequest.
+                    Блок захваченных данных импорта. Содержит долговечный кластерный артефакт данных под data.artifactRef (VolumeSnapshotContent). Заполняется после завершения соответствующего VolumeCaptureRequest.
                   properties:
-                    artifact:
+                    artifactRef:
                       description: |
                         Ссылка на долговечный кластерный артефакт данных (VolumeSnapshotContent), созданный этим импортом.
                       properties:

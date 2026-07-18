@@ -226,7 +226,7 @@ func volumeCaptureArtifact(vcr *unstructured.Unstructured, expectedKind string) 
 		return nil, fmt.Errorf("VolumeCaptureRequest has no status.data")
 	}
 
-	artifact, isMap := dataRef["artifact"].(map[string]interface{})
+	artifact, isMap := dataRef["artifactRef"].(map[string]interface{})
 	if !isMap {
 		return nil, fmt.Errorf("VolumeCaptureRequest data has no artifact")
 	}
