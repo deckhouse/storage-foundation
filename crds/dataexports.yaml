@@ -24,7 +24,11 @@ spec:
       schema:
         openAPIV3Schema:
           type: object
-          x-kubernetes-immutable: true
+          # NOTE: the whole DataExport object is intentionally NOT immutable (previously it was locked with the
+          # Deckhouse-only x-kubernetes-immutable extension): only spec.targetRef — the export identity — is
+          # locked after creation, via the CEL transition rule (self == oldSelf) on the spec node below. The
+          # other spec fields (ttl, publish, publicIngress) may still change. This mirrors DataImport, which
+          # locks only spec.mode + spec.snapshotRef.
           description: |
             Resource for exporting persistent volume files and blocks.
           properties:
@@ -33,6 +37,11 @@ spec:
               required:
                 - ttl
                 - targetRef
+              x-kubernetes-validations:
+                # targetRef is the export identity (what is exported): set once at creation and never changed.
+                # The other spec fields (ttl, publish, publicIngress) may be updated freely.
+                - rule: "self.targetRef == oldSelf.targetRef"
+                  message: "spec.targetRef is immutable"
               properties:
                 ttl:
                   type: string
