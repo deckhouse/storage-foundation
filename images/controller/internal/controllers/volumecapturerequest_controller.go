@@ -154,9 +154,12 @@ func (r *VolumeCaptureRequestController) Reconcile(ctx context.Context, req ctrl
 // - TTL and request cleanup are handled by VCR controller, not ObjectKeeper
 //
 // INVARIANT:
-// - VCR creates VSC exactly once
-// - Any error in VSC.status.error is terminal
-// - VCR never retries snapshot creation
+//   - VCR creates VSC exactly once
+//   - A CSI VSC.status.error is NOT terminal: it is surfaced as a non-terminal
+//     Ready=False/TargetsPending condition and requeued, because the external-snapshotter
+//     sidecar retries CreateSnapshot without a cap and clears status.error once ReadyToUse=true.
+//   - Terminal states are success (ReadyToUse=true -> Completed) or the controller's own
+//     precondition failures (NotFound/RBACDenied/InternalError/... ), never a CSI error.
 func (r *VolumeCaptureRequestController) processSnapshotMode(ctx context.Context, vcr *storagev1alpha1.VolumeCaptureRequest) (ctrl.Result, error) {
 	l := log.FromContext(ctx).WithValues("vcr", fmt.Sprintf("%s/%s", vcr.Namespace, vcr.Name), "mode", "Snapshot")
 	l.Info("Processing VolumeCaptureRequest in Snapshot mode")
@@ -186,7 +189,7 @@ func (r *VolumeCaptureRequestController) processSnapshotMode(ctx context.Context
 
 	if tr.terminal != nil {
 		l.Error(nil, "Target capture failed", "targetUID", tr.terminal.target.UID, "reason", tr.terminal.reason)
-		return r.markFailedSnapshotForTarget(ctx, vcr, tr.terminal.target, tr.terminal.vscName, tr.terminal.vscUID, tr.terminal.reason, tr.terminal.message)
+		return r.markFailed(ctx, vcr, tr.terminal.reason, tr.terminal.message)
 	}
 
 	if tr.ready && tr.binding != nil {
@@ -199,7 +202,7 @@ func (r *VolumeCaptureRequestController) processSnapshotMode(ctx context.Context
 	}
 
 	// Still capturing: surface progress and requeue.
-	if err := r.patchVCRSnapshotPending(ctx, vcr); err != nil {
+	if err := r.patchVCRSnapshotPending(ctx, vcr, tr.pendingMessage); err != nil {
 		return ctrl.Result{}, err
 	}
 	requeueAfter := targetResult.RequeueAfter
