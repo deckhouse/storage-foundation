@@ -955,6 +955,11 @@ func (r *DataImportReconciler) ensurePublish(ctx context.Context) error {
 			TargetSecretName: common.IngressSecretName,
 			Path:             fmt.Sprintf("/%s/%s/%s", r.dataImport.Namespace, r.names.TargetKindShort, r.names.TargetName),
 			CorsAllowMethods: "PUT, POST, HEAD, OPTIONS",
+			// Uploads are PUT with a body; the block/filesystem import protocol is resumable (offset-based,
+			// X-Next-Offset), so clients chunk. Cap a single request at 64m instead of the controller default
+			// (1m, which 413s any real upload) — bounded to avoid unbounded nginx request buffering on the
+			// ingress node while still allowing arbitrarily large volumes via chunked PUTs.
+			ProxyBodySize: "64m",
 		})
 	if err != nil {
 		return err
