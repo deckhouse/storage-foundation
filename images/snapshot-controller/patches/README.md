@@ -48,7 +48,7 @@ applying on top of that pair (see the ordering note above).
 - Adds `status.boundSnapshotContentName` (points at the cluster-scoped
   state-snapshotter `SnapshotContent`, alongside legacy
   `boundVolumeSnapshotContentName`) plus `status.data` — a self-contained data
-  binding (`source` + `artifact` + volume metadata: `volumeMode` / `fsType` /
+  binding (`sourceRef` + `artifactRef` + volume metadata: `volumeMode` / `fsType` /
   `accessModes` / `storageClassName` / `size`) whose JSON wire shape is
   byte-identical to the state-snapshotter `SnapshotContent.status.data` and to
   the domain data leaves, so d8 resolves the captured-volume descriptor from the
