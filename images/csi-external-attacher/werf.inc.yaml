@@ -76,4 +76,13 @@ shell:
     - cp bin/csi-attacher /csi-attacher
     - chown 64535:64535 /csi-attacher
     - chmod 0755 /csi-attacher
+
+{{- /*
+Attach an OpenVEX attestation to each published csi-attacher image
+({{ $.ImageName }}-ForK8SGE-<k8s>) so trivy suppresses the unfixable
+golang.org/x/crypto/openpgp advisory (GO-2026-5932) reported against the
+csi-attacher binary. Predicate:
+/images/csi-external-attacher/known_vulnerabilities.vex (per the "vex mitigation" template).
+*/ -}}
+{{- include "vex mitigation" (list $ (printf "%s%s-ForK8SGE-%s" $.ModuleNamePrefix $.ImageName ($version | replace "." "-"))) }}
 {{- end }}

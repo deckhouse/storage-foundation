@@ -87,4 +87,13 @@ shell:
     - cp bin/csi-provisioner /csi-provisioner
     - chown 64535:64535 /csi-provisioner
     - chmod 0755 /csi-provisioner
+
+{{- /*
+Attach an OpenVEX attestation to each published csi-provisioner image
+({{ $.ImageName }}-ForK8SGE-<k8s>) so trivy suppresses the unfixable
+golang.org/x/crypto/openpgp advisory (GO-2026-5932) reported against the
+csi-provisioner binary. Predicate:
+/images/csi-external-provisioner/known_vulnerabilities.vex (per the "vex mitigation" template).
+*/ -}}
+{{- include "vex mitigation" (list $ (printf "%s%s-ForK8SGE-%s" $.ModuleNamePrefix $.ImageName ($version | replace "." "-"))) }}
 {{- end }}

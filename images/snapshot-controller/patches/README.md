@@ -70,9 +70,10 @@ hand.
 
 ## 004-fix-cve-golang-x.patch
 
-Bumps `golang.org/x/net` -> `v0.55.0`, `golang.org/x/crypto` -> `v0.52.0`
-and `golang.org/x/sys` -> `v0.45.0` in `go.mod` / `go.sum` to fix the
-`golang.org/x/net/html`, `golang.org/x/crypto/ssh` and
-`golang.org/x/sys/windows` CVEs reported by Trivy on the
+Bumps `golang.org/x/net` -> `v0.56.0` (CVE-2026-46600) and
+`golang.org/x/text` -> `v0.39.0` (CVE-2026-56852) in `go.mod` / `go.sum` to
+clear the findings reported by Trivy; this also pulls the transitive
+`golang.org/x/crypto` -> `v0.53.0`, `golang.org/x/sys` -> `v0.46.0`,
+`golang.org/x/sync` -> `v0.21.0` and `golang.org/x/term` -> `v0.44.0` bumps on the
 snapshot-controller / csi-snapshotter binaries. The build re-runs
 `go mod vendor`, so the patch only touches `go.mod` / `go.sum`.

@@ -76,4 +76,13 @@ shell:
     - cp bin/snapshot-controller bin/csi-snapshotter /
     - chown 64535:64535 /snapshot-controller /csi-snapshotter
     - chmod 0755 /snapshot-controller /csi-snapshotter
+
+{{- /*
+Attach an OpenVEX attestation to each published csi-snapshotter image
+({{ $.ImageName }}-ForK8SGE-<k8s>) so trivy suppresses the unfixable
+golang.org/x/crypto/openpgp advisory (GO-2026-5932) reported against the
+csi-snapshotter binary. Predicate:
+/images/csi-external-snapshotter/known_vulnerabilities.vex (per the "vex mitigation" template).
+*/ -}}
+{{- include "vex mitigation" (list $ (printf "%s%s-ForK8SGE-%s" $.ModuleNamePrefix $.ImageName ($version | replace "." "-"))) }}
 {{- end }}
