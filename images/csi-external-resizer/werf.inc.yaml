@@ -76,4 +76,16 @@ shell:
     - cp bin/csi-resizer /csi-resizer
     - chown 64535:64535 /csi-resizer
     - chmod 0755 /csi-resizer
+
+{{- /*
+Attach an OpenVEX attestation to the published csi-resizer image so trivy
+suppresses the unfixable golang.org/x/crypto/openpgp advisory (GO-2026-5932)
+reported against the csi-resizer binary. Only the v2.1.0 build links
+golang.org/x/crypto (via k8s.io/apiserver); the v1.14.0 build does not, so it
+needs no attestation. Predicate:
+/images/csi-external-resizer/known_vulnerabilities.vex (per the "vex mitigation" template).
+*/ -}}
+{{- if eq $src_version "v2.1.0" }}
+{{- include "vex mitigation" (list $ (printf "%s%s-ForK8SGE-%s" $.ModuleNamePrefix $.ImageName ($version | replace "." "-"))) }}
+{{- end }}
 {{- end }}
