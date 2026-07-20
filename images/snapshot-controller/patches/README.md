@@ -15,11 +15,11 @@ flow relies on this. vsc-only is the default mode (`SNAPSHOT_CONTROLLER_VSC_MODE
 unset); legacy per-content behavior is preserved for bound (wired-ref) contents.
 Touches `pkg/` only (no `client/`, `vendor/`, `go.mod`).
 
-Provenance: byte-identical to `git diff v8.5.0..d8-63742164-vsc-only` (commit
-`d648e7e94` "Add VSC-only snapshot content mode") in the fox mirror
-`deckhouse/3p/kubernetes-csi/external-snapshotter`; the build used to clone that
-branch directly. Keep this file in sync with the identically named patch in
-`images/csi-external-snapshotter/patches/v8.5.0/` — same content, both builds.
+This patch is the sole source of the VSC-only changes: they are maintained here as a
+patch in this repo, not on any external-snapshotter fork/branch (the `3p`
+external-snapshotter repo only mirrors upstream). Keep this file byte-for-byte in sync
+with the identically named patch in `images/csi-external-snapshotter/patches/v8.5.0/` —
+same content, both builds.
 
 ## 001-fix-cve.patch
 
