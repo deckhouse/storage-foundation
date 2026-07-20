@@ -26,9 +26,9 @@ spec:
           type: object
           # NOTE: the whole DataExport object is intentionally NOT immutable (previously it was locked with the
           # Deckhouse-only x-kubernetes-immutable extension): only spec.targetRef — the export identity — is
-          # locked after creation, via the CEL transition rule (self == oldSelf) on the spec node below. The
-          # other spec fields (ttl, publish, publicIngress) may still change. This mirrors DataImport, which
-          # locks only spec.mode + spec.snapshotRef.
+          # locked after creation, via the CEL transition rule (pinning kind/name/group) on the spec node
+          # below. The other spec fields (ttl, publish, publicIngress) may still change. This mirrors
+          # DataImport, which locks only spec.mode + spec.snapshotRef.
           description: |
             Resource for exporting persistent volume files and blocks.
           properties:
@@ -39,8 +39,13 @@ spec:
                 - targetRef
               x-kubernetes-validations:
                 # targetRef is the export identity (what is exported): set once at creation and never changed.
-                # The other spec fields (ttl, publish, publicIngress) may be updated freely.
-                - rule: "self.targetRef == oldSelf.targetRef"
+                # The other spec fields (ttl, publish, publicIngress) may be updated freely. Compare the
+                # identity field-by-field and normalize the optional group (absent == core group == ''): the
+                # controller round-trips targetRef through a Go struct whose group is `json:",omitempty"`, so
+                # a create that sent group:"" is written back with group omitted. A whole-object
+                # self.targetRef == oldSelf.targetRef would wrongly flag that serialization no-op as a
+                # mutation and reject the controller's own finalizer/status update, wedging reconciliation.
+                - rule: "self.targetRef.kind == oldSelf.targetRef.kind && self.targetRef.name == oldSelf.targetRef.name && (has(self.targetRef.group) ? self.targetRef.group : '') == (has(oldSelf.targetRef.group) ? oldSelf.targetRef.group : '')"
                   message: "spec.targetRef is immutable"
               properties:
                 ttl:
