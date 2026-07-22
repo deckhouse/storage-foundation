@@ -35,6 +35,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	deckhousev1alpha1 "github.com/deckhouse/deckhouse/deckhouse-controller/pkg/apis/deckhouse.io/v1alpha1"
+	ssstoragev1alpha1 "github.com/deckhouse/state-snapshotter/api/storage/v1alpha1"
 	storagev1alpha1 "github.com/deckhouse/storage-foundation/api/v1alpha1"
 )
 
@@ -270,6 +271,11 @@ func (r *VolumeCaptureRequestController) processSnapshotTarget(
 				VolumeSnapshotRef: corev1.ObjectReference{},
 			},
 		}
+		// Stamp the authoritative delete-protection state into the CREATE payload so the managed VSC
+		// appears in the Kubernetes API already protected: there is no guaranteed ordering between Create
+		// and a follow-up Patch, so a post-create patch would leave a short unprotected window
+		// (delete-protection-contract.md §6.1/§6.2). This does NOT change VCR lifecycle/retry/CSI semantics.
+		ssstoragev1alpha1.StampDeleteProtected(csiVSC)
 		if err := r.Create(ctx, csiVSC); err != nil {
 			return snapshotTargetResult{}, ctrl.Result{}, fmt.Errorf("failed to create VolumeSnapshotContent: %w", err)
 		}

@@ -22,6 +22,13 @@ require (
 
 replace github.com/deckhouse/storage-foundation/api => ../../api
 
+// Local-dev shim: the delete-protection marker (LabelDeleteProtected / StampDeleteProtected) lives in the
+// state-snapshotter/api module. Until that module is published and this go.mod pins the new version,
+// resolve it from the sibling checkout. This is additive (new constant + helpers) — the pinned SDK is left
+// untouched, so no consumer SDK migration is pulled in. MUST be swapped for a real api version bump before
+// merge/CI (see unified-snapshot-delete-protection plan, P2b: "bump SDK/constants").
+replace github.com/deckhouse/state-snapshotter/api => ../../../state-snapshotter/api
+
 require (
 	github.com/Masterminds/semver/v3 v3.3.1 // indirect
 	github.com/beorn7/perks v1.0.1 // indirect
