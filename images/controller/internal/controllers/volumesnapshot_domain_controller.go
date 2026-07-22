@@ -288,6 +288,13 @@ func (r *VolumeSnapshotDomainReconciler) latchManagedLabel(ctx context.Context, 
 			cur.Labels = map[string]string{}
 		}
 		cur.Labels[labelSnapshotManaged] = desired
+		// A VolumeSnapshot adopted as a domain-managed node (managed=true) is a protected tree node: stamp
+		// the authoritative delete-protection state in the SAME patch that latches adoption, i.e. before any
+		// graph edge is published (delete-protection-contract.md §6.1/§8.1). A vetoed (managed=false)
+		// VolumeSnapshot is a plain CSI snapshot, not a tree node, and MUST NOT be protected.
+		if desired == managedValueTrue {
+			storagev1alpha1.StampDeleteProtected(cur)
+		}
 		if err := r.SnapClient.Patch(ctx, cur, client.MergeFrom(base)); err != nil {
 			return err
 		}
