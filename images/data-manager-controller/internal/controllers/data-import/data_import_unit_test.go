@@ -192,7 +192,7 @@ func TestVolumeCaptureArtifact(t *testing.T) {
 	vcr := &unstructured.Unstructured{Object: map[string]interface{}{
 		"status": map[string]interface{}{
 			"data": map[string]interface{}{
-				"artifact": map[string]interface{}{
+				"artifactRef": map[string]interface{}{
 					"apiVersion": "snapshot.storage.k8s.io/v1",
 					"kind":       artifactKindVolumeSnapshotContent,
 					"name":       "snapcontent-x",
@@ -206,7 +206,7 @@ func TestVolumeCaptureArtifact(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "snapcontent-x", art.Name)
 	assert.Equal(t, artifactKindVolumeSnapshotContent, art.Kind)
-	// The artifact uid is carried through from VCR status.data.artifact.uid.
+	// The artifact uid is carried through from VCR status.data.artifactRef.uid.
 	assert.Equal(t, "8d7c6b5a-4e3f-4a2b-9c1d-0f1e2d3c4b5a", art.UID)
 
 	// Kind mismatch is rejected.

@@ -42,7 +42,12 @@ const (
 	ConditionReasonUnsupportedTargetKind = "UnsupportedTargetKind"
 	// ConditionReasonPVBound indicates PV is bound and cannot be detached
 	ConditionReasonPVBound = "PVBound"
-	// ConditionReasonSnapshotCreationFailed indicates CSI snapshot creation failed
+	// ConditionReasonSnapshotCreationFailed was previously set when the CSI VolumeSnapshotContent
+	// reported status.error. That is no longer treated as terminal: the external-snapshotter sidecar
+	// retries CreateSnapshot without a cap and clears status.error once ReadyToUse=true, and the error
+	// carries no gRPC code to reliably classify terminal vs. transient. A CSI error now keeps the VCR
+	// in the non-terminal TargetsPending state instead. The constant is retained for API stability
+	// (exported, vendored by other repos) but is no longer emitted by the controller.
 	ConditionReasonSnapshotCreationFailed = "SnapshotCreationFailed"
 	// ConditionReasonTargetsPending indicates one or more capture targets are not ready yet
 	ConditionReasonTargetsPending = "TargetsPending"

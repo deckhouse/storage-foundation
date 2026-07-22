@@ -452,42 +452,36 @@ var _ = Describe("VolumeCaptureRequest Controller", func() {
 				Expect(readyCondition.Status).To(Equal(metav1.ConditionTrue))
 
 				Expect(updatedVCR.Status.Data).ToNot(BeNil())
-				Expect(updatedVCR.Status.Data.Artifact.Kind).To(Equal("VolumeSnapshotContent"))
-				Expect(updatedVCR.Status.Data.Artifact.Name).To(Equal(csiVSCName))
-				Expect(updatedVCR.Status.Data.Artifact.UID).To(Equal("vsc-uid-happy"))
+				Expect(updatedVCR.Status.Data.ArtifactRef.Kind).To(Equal("VolumeSnapshotContent"))
+				Expect(updatedVCR.Status.Data.ArtifactRef.Name).To(Equal(csiVSCName))
+				Expect(updatedVCR.Status.Data.ArtifactRef.UID).To(Equal("vsc-uid-happy"))
 			})
 		})
 
-		Describe("CSI error (terminal)", func() {
-			It("should mark VCR as failed when VSC has terminal error", func() {
-				// Given
+		Describe("CSI error (non-terminal)", func() {
+			const csiErrorMsg = "provided secret is empty"
+
+			// setupTargetWithVSCError provisions a single-target VCR whose CSI VolumeSnapshotContent
+			// already exists and reports a status.error. Returns the VCR and the VSC name.
+			// The external-snapshotter sidecar retries CreateSnapshot without a cap and clears the
+			// error on success, so a CSI error must NOT be terminal for the VCR.
+			setupTargetWithVSCError := func(vcrName string) (*storagev1alpha1.VolumeCaptureRequest, string) {
 				storageClass := newStorageClassWithVSC("test-sc", "test-driver", "test-vsc-class")
 				Expect(client.Create(ctx, storageClass)).To(Succeed())
-
 				vscClass := newVolumeSnapshotClass("test-vsc-class", "test-driver")
 				Expect(client.Create(ctx, vscClass)).To(Succeed())
+				Expect(client.Create(ctx, newCSIPV("test-pv", "test-driver", "test-volume-handle"))).To(Succeed())
+				Expect(client.Create(ctx, newBoundPVC("test-pvc", "default", "test-sc", "test-pv"))).To(Succeed())
 
-				pv := newCSIPV("test-pv", "test-driver", "test-volume-handle")
-				Expect(client.Create(ctx, pv)).To(Succeed())
-
-				pvc := newBoundPVC("test-pvc", "default", "test-sc", "test-pv")
-				Expect(client.Create(ctx, pvc)).To(Succeed())
-
-				vcr := newVCR("test-vcr-error", "default", ModeSnapshot, pvcTarget("default", "test-pvc", "uid-test-pvc"))
-				Expect(client.Create(ctx, vcr)).To(Succeed())
-
-				// Create VSC with error (simulating CSI driver failure)
 				targetUID := "uid-test-pvc"
-				csiVSCName := snapshotVSCName(vcr.UID, targetUID)
-				errorMsg := "provided secret is empty"
-				vsc := newReadyVSC(csiVSCName, false, nil)
-				vsc.UID = types.UID("vsc-uid-error")
+				vcr := newVCR(vcrName, "default", ModeSnapshot, pvcTarget("default", "test-pvc", targetUID))
+				Expect(client.Create(ctx, vcr)).To(Succeed())
 
 				retainerName := objectKeeperNameForVCR(vcr.UID)
 				objectKeeper := &deckhousev1alpha1.ObjectKeeper{
 					ObjectMeta: metav1.ObjectMeta{
 						Name: retainerName,
-						UID:  types.UID("ok-uid-test"),
+						UID:  types.UID("ok-uid-" + string(vcr.UID)),
 					},
 					Spec: deckhousev1alpha1.ObjectKeeperSpec{
 						Mode: "FollowObject",
@@ -495,14 +489,16 @@ var _ = Describe("VolumeCaptureRequest Controller", func() {
 							APIVersion: APIGroupStorageDeckhouse,
 							Kind:       KindVolumeCaptureRequest,
 							Namespace:  "default",
-							Name:       "test-vcr-error",
+							Name:       vcrName,
 							UID:        string(vcr.UID),
 						},
 					},
 				}
 				Expect(client.Create(ctx, objectKeeper)).To(Succeed())
 
-				// Set ownerRef on VSC
+				csiVSCName := snapshotVSCName(vcr.UID, targetUID)
+				vsc := newReadyVSC(csiVSCName, false, nil)
+				vsc.UID = types.UID("vsc-uid-error")
 				vsc.OwnerReferences = []metav1.OwnerReference{
 					{
 						APIVersion: APIGroupDeckhouse,
@@ -514,41 +510,98 @@ var _ = Describe("VolumeCaptureRequest Controller", func() {
 				}
 				Expect(client.Create(ctx, vsc)).To(Succeed())
 
-				// Update Status via subresource (correct way to set Status)
+				// CSI driver reports an error via the sidecar (message-only, no gRPC code).
 				vsc.Status = &snapshotv1.VolumeSnapshotContentStatus{
 					Error: &snapshotv1.VolumeSnapshotError{
-						Message: &errorMsg,
+						Message: ptr.To(csiErrorMsg),
 						Time:    &metav1.Time{Time: time.Now()},
 					},
 				}
 				Expect(client.Status().Update(ctx, vsc)).To(Succeed())
+				return vcr, csiVSCName
+			}
 
-				// When: reconcile
-				Expect(reconcileUntilTerminal(vcr, 5)).To(Succeed())
+			reconcileVCR := func(vcr *storagev1alpha1.VolumeCaptureRequest) reconcile.Result {
+				result, err := ctrl.Reconcile(ctx, reconcile.Request{NamespacedName: types.NamespacedName{Name: vcr.Name, Namespace: vcr.Namespace}})
+				Expect(err).ToNot(HaveOccurred())
+				return result
+			}
 
-				// Then: VCR is terminal Failed
-				updatedVCR := &storagev1alpha1.VolumeCaptureRequest{}
-				Expect(client.Get(ctx, types.NamespacedName{Name: vcr.Name, Namespace: vcr.Namespace}, updatedVCR)).To(Succeed())
+			It("should stay non-terminal (TargetsPending) and requeue when the VSC reports a CSI error", func() {
+				vcr, _ := setupTargetWithVSCError("test-vcr-error")
 
-				readyCondition := getReadyCondition(updatedVCR.Status.Conditions)
-				Expect(readyCondition).ToNot(BeNil())
-				Expect(readyCondition.Status).To(Equal(metav1.ConditionFalse))
-				Expect(readyCondition.Reason).To(Equal(storagev1alpha1.ConditionReasonSnapshotCreationFailed))
-				Expect(readyCondition.Message).To(ContainSubstring(errorMsg))
+				// Reconcile several times: the error persists, so the VCR must remain pending (recoverable).
+				var result reconcile.Result
+				for i := 0; i < 3; i++ {
+					result = reconcileVCR(vcr)
+				}
+				// Requeued (not stopped).
+				Expect(result.RequeueAfter).To(BeNumerically(">", 0))
 
-				Expect(updatedVCR.Status.Data).ToNot(BeNil())
-				Expect(updatedVCR.Status.Data.Artifact.Kind).To(Equal("VolumeSnapshotContent"))
-				Expect(updatedVCR.Status.Data.Artifact.Name).To(Equal(csiVSCName))
-				Expect(updatedVCR.Status.Data.Artifact.UID).To(Equal("vsc-uid-error"))
+				updated := &storagev1alpha1.VolumeCaptureRequest{}
+				Expect(client.Get(ctx, types.NamespacedName{Name: vcr.Name, Namespace: vcr.Namespace}, updated)).To(Succeed())
 
-				// VSC still exists (not deleted)
-				existingVSC := &snapshotv1.VolumeSnapshotContent{}
-				Expect(client.Get(ctx, types.NamespacedName{Name: csiVSCName}, existingVSC)).To(Succeed())
+				ready := getReadyCondition(updated.Status.Conditions)
+				Expect(ready).ToNot(BeNil())
+				Expect(ready.Status).To(Equal(metav1.ConditionFalse))
+				Expect(ready.Reason).To(Equal(storagev1alpha1.ConditionReasonTargetsPending))
+				// The CSI error text is surfaced as a diagnostic in the message.
+				Expect(ready.Message).To(ContainSubstring(csiErrorMsg))
 
-				// No new VSC created
-				vscList := &snapshotv1.VolumeSnapshotContentList{}
-				Expect(client.List(ctx, vscList)).To(Succeed())
-				Expect(vscList.Items).To(HaveLen(1))
+				// Not terminal, no completion timestamp, dataRef only ever set on success.
+				Expect(isVolumeCaptureTerminal(updated.Status.Conditions)).To(BeFalse())
+				Expect(updated.Status.CompletionTimestamp).To(BeNil())
+				Expect(updated.Status.Data).To(BeNil())
+			})
+
+			It("should recover to Completed once the VSC reports ReadyToUse=true", func() {
+				vcr, csiVSCName := setupTargetWithVSCError("test-vcr-recover")
+
+				// First reconcile: error present -> non-terminal pending.
+				reconcileVCR(vcr)
+				pending := &storagev1alpha1.VolumeCaptureRequest{}
+				Expect(client.Get(ctx, types.NamespacedName{Name: vcr.Name, Namespace: vcr.Namespace}, pending)).To(Succeed())
+				Expect(isVolumeCaptureTerminal(pending.Status.Conditions)).To(BeFalse())
+
+				// Sidecar succeeds on retry: it clears status.error and sets ReadyToUse=true.
+				vsc := &snapshotv1.VolumeSnapshotContent{}
+				Expect(client.Get(ctx, types.NamespacedName{Name: csiVSCName}, vsc)).To(Succeed())
+				vsc.Status = &snapshotv1.VolumeSnapshotContentStatus{ReadyToUse: ptr.To(true)}
+				Expect(client.Status().Update(ctx, vsc)).To(Succeed())
+
+				// Next reconcile: success -> terminal Completed.
+				reconcileVCR(vcr)
+				updated := &storagev1alpha1.VolumeCaptureRequest{}
+				Expect(client.Get(ctx, types.NamespacedName{Name: vcr.Name, Namespace: vcr.Namespace}, updated)).To(Succeed())
+
+				ready := getReadyCondition(updated.Status.Conditions)
+				Expect(ready).ToNot(BeNil())
+				Expect(ready.Status).To(Equal(metav1.ConditionTrue))
+				Expect(ready.Reason).To(Equal(storagev1alpha1.ConditionReasonCompleted))
+				Expect(isVolumeCaptureTerminal(updated.Status.Conditions)).To(BeTrue())
+				Expect(updated.Status.CompletionTimestamp).ToNot(BeNil())
+				Expect(updated.Status.Data).ToNot(BeNil())
+				Expect(updated.Status.Data.ArtifactRef.Kind).To(Equal("VolumeSnapshotContent"))
+				Expect(updated.Status.Data.ArtifactRef.Name).To(Equal(csiVSCName))
+			})
+
+			It("should not be terminal nor GC-eligible while the VSC reports a CSI error", func() {
+				vcr, _ := setupTargetWithVSCError("test-vcr-gc")
+				reconcileVCR(vcr)
+
+				updated := &storagev1alpha1.VolumeCaptureRequest{}
+				Expect(client.Get(ctx, types.NamespacedName{Name: vcr.Name, Namespace: vcr.Namespace}, updated)).To(Succeed())
+				Expect(isVolumeCaptureTerminal(updated.Status.Conditions)).To(BeFalse())
+				Expect(updated.Status.CompletionTimestamp).To(BeNil())
+
+				// GC only reaps terminal, aged-out requests. A pending VCR (no completionTimestamp)
+				// must never be collected, even with a zero TTL and a far-future clock.
+				gcm := &vcrGCManager{
+					client: client,
+					ttl:    time.Nanosecond,
+					now:    func() time.Time { return time.Now().Add(24 * time.Hour) },
+				}
+				Expect(gcm.ShouldBeDeleted(updated)).To(BeFalse())
 			})
 		})
 
@@ -729,9 +782,9 @@ var _ = Describe("VolumeCaptureRequest Controller", func() {
 				updatedVCR := &storagev1alpha1.VolumeCaptureRequest{}
 				Expect(client.Get(ctx, types.NamespacedName{Name: vcr.Name, Namespace: vcr.Namespace}, updatedVCR)).To(Succeed())
 				Expect(updatedVCR.Status.Data).ToNot(BeNil())
-				Expect(updatedVCR.Status.Data.Artifact.Kind).To(Equal("PersistentVolume"))
-				Expect(updatedVCR.Status.Data.Artifact.Name).To(Equal("test-pv-detach"))
-				Expect(updatedVCR.Status.Data.Artifact.UID).To(Equal("pv-uid-detach"))
+				Expect(updatedVCR.Status.Data.ArtifactRef.Kind).To(Equal("PersistentVolume"))
+				Expect(updatedVCR.Status.Data.ArtifactRef.Name).To(Equal("test-pv-detach"))
+				Expect(updatedVCR.Status.Data.ArtifactRef.UID).To(Equal("pv-uid-detach"))
 
 				readyCondition := getReadyCondition(updatedVCR.Status.Conditions)
 				Expect(readyCondition).ToNot(BeNil())

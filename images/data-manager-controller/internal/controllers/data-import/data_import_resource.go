@@ -425,13 +425,13 @@ func (r *DataImportReconciler) ensureSnapshotImportTarget(ctx context.Context) (
 	// Terminal: once the artifact is produced the import is done. Re-affirm Completed (idempotent) and
 	// stop, so completed DataImports don't re-derive the scratch PVC on every publish/server event until
 	// TTL expiry.
-	if r.dataImport.Status.Data != nil && r.dataImport.Status.Data.Artifact != nil {
+	if r.dataImport.Status.Data != nil && r.dataImport.Status.Data.ArtifactRef != nil {
 		meta.SetStatusCondition(&r.dataImport.Status.Conditions, metav1.Condition{
 			Type:   string(common.ConditionCompleted),
 			Status: metav1.ConditionTrue,
 			Reason: string(common.ReasonCompleted),
 			Message: fmt.Sprintf("Data import completed: produced %s %s",
-				r.dataImport.Status.Data.Artifact.Kind, r.dataImport.Status.Data.Artifact.Name),
+				r.dataImport.Status.Data.ArtifactRef.Kind, r.dataImport.Status.Data.ArtifactRef.Name),
 			ObservedGeneration: r.dataImport.Generation,
 		})
 		return ctrl.Result{}, nil
@@ -721,7 +721,7 @@ func (r *DataImportReconciler) handlePVCImportStatus(ctx context.Context, pvc *c
 
 // ensureDataArtifact captures the bound scratch PVC into a durable cluster-scoped VolumeSnapshotContent
 // via a VolumeCaptureRequest, pins the artifact's reclaim policy to Retain, anchors it to the import's
-// lifetime via the import ObjectKeeper, and records it in status.data.artifact + Completed. The capture
+// lifetime via the import ObjectKeeper, and records it in status.data.artifactRef + Completed. The capture
 // mode is auto-detected from the spec StorageClass (snapshot-capable -> Snapshot); a non-snapshot-capable
 // StorageClass fails closed. It requeues while the VolumeCaptureRequest is in progress. DataImport never
 // becomes the artifact's controller owner (storage-foundation's VCR retainer is); see object_keeper.go /
@@ -773,7 +773,7 @@ func (r *DataImportReconciler) ensureDataArtifact(ctx context.Context, pvc *core
 		return ctrl.Result{}, err
 	}
 
-	r.dataImport.Status.Data = &dev1alpha1.DataExportImportData{Artifact: artifact}
+	r.dataImport.Status.Data = &dev1alpha1.DataExportImportData{ArtifactRef: artifact}
 	meta.SetStatusCondition(&r.dataImport.Status.Conditions, metav1.Condition{
 		Type:               string(common.ConditionCompleted),
 		Status:             metav1.ConditionTrue,
@@ -955,6 +955,11 @@ func (r *DataImportReconciler) ensurePublish(ctx context.Context) error {
 			TargetSecretName: common.IngressSecretName,
 			Path:             fmt.Sprintf("/%s/%s/%s", r.dataImport.Namespace, r.names.TargetKindShort, r.names.TargetName),
 			CorsAllowMethods: "PUT, POST, HEAD, OPTIONS",
+			// Uploads are PUT with a body; the block/filesystem import protocol is resumable (offset-based,
+			// X-Next-Offset), so clients chunk. Cap a single request at 64m instead of the controller default
+			// (1m, which 413s any real upload) — bounded to avoid unbounded nginx request buffering on the
+			// ingress node while still allowing arbitrarily large volumes via chunked PUTs.
+			ProxyBodySize: "64m",
 		})
 	if err != nil {
 		return err

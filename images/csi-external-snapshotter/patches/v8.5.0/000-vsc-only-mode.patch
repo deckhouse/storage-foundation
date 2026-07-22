@@ -1327,7 +1327,7 @@ index 000000000..f69589102
 +// Invariants enforced:
 +//   - Does not delete if DeletionTimestamp is nil
 +//   - Does not delete if CreateSnapshot is in progress (AnnVolumeSnapshotBeingCreated set)
-+//   - Does not delete if snapshot not yet created (Status.SnapshotHandle is nil)
++//   - Once DeletionTimestamp is set and no create is in progress, deletion proceeds
 +//   - DeletionPolicy check is performed in sidecar-controller before calling DeleteSnapshot
 +func (m *VSCOnlyMode) ShouldDeleteSnapshot(content *crdv1.VolumeSnapshotContent) bool {
 +	if content.ObjectMeta.DeletionTimestamp == nil {
@@ -1357,8 +1357,8 @@ index 000000000..f69589102
 +		// We have a snapshot to delete - proceed with deletion
 +		return true
 +	}
-+
-+	return false
++	// No SnapshotHandle: create never succeeded (e.g. source volume gone); nothing on storage, drop finalizer.
++	return true
 +}
 +
 +// ShouldSkipCreateForInProgress returns true if CreateSnapshot should be skipped

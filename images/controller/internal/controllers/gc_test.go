@@ -158,7 +158,7 @@ func TestVCRGCManager_PreDelete_BestEffort(t *testing.T) {
 	old := vcrNow.Add(-25 * time.Hour)
 	orphan := vcr("orphan", readyC(metav1.ConditionTrue, storagev1alpha1.ConditionReasonCompleted), &old, false)
 	orphan.Status.Data = &storagev1alpha1.VolumeDataBinding{
-		Artifact: storagev1alpha1.VolumeDataArtifactRef{Kind: "VolumeSnapshotContent", Name: "orphan-vsc"},
+		ArtifactRef: storagev1alpha1.VolumeDataArtifactRef{Kind: "VolumeSnapshotContent", Name: "orphan-vsc"},
 	}
 
 	// Sanity: the fixture really does make cleanup fail — otherwise the swallow assertion below is vacuous.

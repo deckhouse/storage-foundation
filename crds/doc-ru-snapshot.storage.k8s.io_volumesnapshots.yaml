@@ -114,20 +114,20 @@ spec:
                   Если не указано, время создания снимка неизвестно.
               data:
                 description: |-
-                  Самодостаточная привязка данных (source + artifact + метаданные тома), зеркалируемая
+                  Самодостаточная привязка данных (sourceRef + artifactRef + метаданные тома), зеркалируемая
                   из привязанного SnapshotContent.status.data state-snapshotter, чтобы d8 определял
                   дескриптор захваченного тома из этого namespaced VolumeSnapshot. Записывается общим
                   контроллером state-snapshotter. Расширение Deckhouse.
                 properties:
                   accessModes:
                     description: Режимы доступа исходного PVC (например, ReadWriteOnce).
-                  artifact:
+                  artifactRef:
                     description: Durable-артефакт данных (VolumeSnapshotContent).
                   fsType:
                     description: Тип файловой системы источника (только для томов Filesystem).
                   size:
                     description: Реальный выделенный размер захваченного тома (например, "10Gi").
-                  source:
+                  sourceRef:
                     description: Захваченный источник PersistentVolumeClaim (uid — идентичность тома).
                   storageClassName:
                     description: StorageClass исходного захваченного тома.
@@ -296,20 +296,20 @@ spec:
                   Если не указано, время создания снимка неизвестно.
               data:
                 description: |-
-                  Самодостаточная привязка данных (source + artifact + метаданные тома), зеркалируемая
+                  Самодостаточная привязка данных (sourceRef + artifactRef + метаданные тома), зеркалируемая
                   из привязанного SnapshotContent.status.data state-snapshotter, чтобы d8 определял
                   дескриптор захваченного тома из этого namespaced VolumeSnapshot. Записывается общим
                   контроллером state-snapshotter. Расширение Deckhouse.
                 properties:
                   accessModes:
                     description: Режимы доступа исходного PVC (например, ReadWriteOnce).
-                  artifact:
+                  artifactRef:
                     description: Durable-артефакт данных (VolumeSnapshotContent).
                   fsType:
                     description: Тип файловой системы источника (только для томов Filesystem).
                   size:
                     description: Реальный выделенный размер захваченного тома (например, "10Gi").
-                  source:
+                  sourceRef:
                     description: Захваченный источник PersistentVolumeClaim (uid — идентичность тома).
                   storageClassName:
                     description: StorageClass исходного захваченного тома.

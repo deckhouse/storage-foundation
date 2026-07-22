@@ -42,15 +42,17 @@ type snapshotTargetError struct {
 	target  storagev1alpha1.VolumeCaptureTarget
 	reason  string
 	message string
-	vscName string
-	vscUID  string
 }
 
 type snapshotTargetResult struct {
-	binding  *storagev1alpha1.VolumeDataBinding
-	ready    bool
-	pending  bool
-	terminal *snapshotTargetError
+	binding *storagev1alpha1.VolumeDataBinding
+	ready   bool
+	pending bool
+	// pendingMessage is an optional diagnostic surfaced in the non-terminal
+	// Ready=False/TargetsPending condition (e.g. a CSI error that the sidecar keeps retrying).
+	// Empty means "use the default in-progress message".
+	pendingMessage string
+	terminal       *snapshotTargetError
 }
 
 func objectKeeperNameForVCR(vcrUID types.UID) string {
@@ -71,7 +73,7 @@ func snapshotVSCName(vcrUID types.UID, targetUID string) string {
 
 func volumeSnapshotBinding(_ storagev1alpha1.VolumeCaptureTarget, vscName, vscUID string) storagev1alpha1.VolumeDataBinding {
 	return storagev1alpha1.VolumeDataBinding{
-		Artifact: storagev1alpha1.VolumeDataArtifactRef{
+		ArtifactRef: storagev1alpha1.VolumeDataArtifactRef{
 			APIVersion: "snapshot.storage.k8s.io/v1",
 			Kind:       "VolumeSnapshotContent",
 			Name:       vscName,
@@ -86,13 +88,17 @@ func volumeSnapshotBinding(_ storagev1alpha1.VolumeCaptureTarget, vscName, vscUI
 func (r *VolumeCaptureRequestController) patchVCRSnapshotPending(
 	ctx context.Context,
 	vcr *storagev1alpha1.VolumeCaptureRequest,
+	message string,
 ) error {
+	if message == "" {
+		message = "target capture in progress"
+	}
 	now := metav1.Now()
 	pendingCondition := metav1.Condition{
 		Type:               storagev1alpha1.ConditionTypeReady,
 		Status:             metav1.ConditionFalse,
 		Reason:             storagev1alpha1.ConditionReasonTargetsPending,
-		Message:            "target capture in progress",
+		Message:            message,
 		LastTransitionTime: now,
 	}
 
@@ -286,12 +292,17 @@ func (r *VolumeCaptureRequestController) processSnapshotTarget(
 		if csiVSC.Status.Error.Time != nil {
 			errorDetails = fmt.Sprintf("%s (error time: %s)", errorDetails, csiVSC.Status.Error.Time.Format(time.RFC3339))
 		}
-		return snapshotTargetResult{terminal: &snapshotTargetError{
-			target: target, reason: storagev1alpha1.ConditionReasonSnapshotCreationFailed,
-			message: fmt.Sprintf("CSI snapshot creation failed: %s", errorDetails),
-			vscName: csiVSCName,
-			vscUID:  string(csiVSC.UID),
-		}}, ctrl.Result{}, nil
+		// A CSI snapshot error is NOT terminal. The external-snapshotter sidecar retries
+		// CreateSnapshot without a cap and clears status.error once ReadyToUse=true, and the
+		// error carries no gRPC code to reliably classify terminal vs. transient failures.
+		// Surface the message for diagnostics but keep the target non-terminal (TargetsPending)
+		// and requeue, so a later success still completes the capture. dataRef stays unset
+		// (only success sets it).
+		l.Info("CSI reported a snapshot error; staying non-terminal and requeuing", "name", csiVSCName, "error", errorMsg)
+		return snapshotTargetResult{
+			pending:        true,
+			pendingMessage: fmt.Sprintf("CSI snapshot creation reported an error (will retry): %s", errorDetails),
+		}, ctrl.Result{RequeueAfter: 5 * time.Second}, nil
 	}
 
 	if csiVSC.Status == nil || csiVSC.Status.ReadyToUse == nil || !*csiVSC.Status.ReadyToUse {
@@ -304,20 +315,4 @@ func (r *VolumeCaptureRequestController) processSnapshotTarget(
 		ready:   true,
 		binding: &binding,
 	}, ctrl.Result{}, nil
-}
-
-func (r *VolumeCaptureRequestController) markFailedSnapshotForTarget(
-	ctx context.Context,
-	vcr *storagev1alpha1.VolumeCaptureRequest,
-	target storagev1alpha1.VolumeCaptureTarget,
-	vscName, vscUID, reason, message string,
-) (ctrl.Result, error) {
-	if vscName != "" {
-		binding := volumeSnapshotBinding(target, vscName, vscUID)
-		vcr.Status.Data = &binding
-	}
-	if err := r.finalizeVCR(ctx, vcr, metav1.ConditionFalse, reason, message); err != nil {
-		return ctrl.Result{}, err
-	}
-	return ctrl.Result{}, nil
 }

@@ -242,10 +242,10 @@ spec:
                   type: object
                   description: |
                     Captured-data block for this import. Carries the durable cluster-scoped data artifact
-                    under data.artifact (a VolumeSnapshotContent). Populated once the backing
+                    under data.artifactRef (a VolumeSnapshotContent). Populated once the backing
                     VolumeCaptureRequest completes.
                   properties:
-                    artifact:
+                    artifactRef:
                       type: object
                       description: |
                         Reference to the durable cluster-scoped data artifact produced by this import
