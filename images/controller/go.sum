@@ -10,6 +10,8 @@ github.com/davecgh/go-spew v1.1.2-0.20180830191138-d8f796af33cc h1:U9qPSI2PIWSS1
 github.com/davecgh/go-spew v1.1.2-0.20180830191138-d8f796af33cc/go.mod h1:J7Y8YcW2NihsgmVo/mv3lAwl/skON4iLHjSsI+c5H38=
 github.com/deckhouse/deckhouse v1.67.7-0.20251212134859-497a0dab9fc0 h1:FEUYr1ZHMeVy9FNadjAksuSbJ+M9/8iLmCCFLFzoQ00=
 github.com/deckhouse/deckhouse v1.67.7-0.20251212134859-497a0dab9fc0/go.mod h1:EuTIwDETSs+YiLnJUkq2zPST707gTgWzC5m0P5tub5E=
+github.com/deckhouse/state-snapshotter/api v0.0.0-20260722191958-8a6342e7ce94 h1:tnlLgD2R5qZgSS5YQgIiBsEunOP/WjtkiLCUCOTvCfc=
+github.com/deckhouse/state-snapshotter/api v0.0.0-20260722191958-8a6342e7ce94/go.mod h1:E0jKylgy4E57S/ZWWD6Cl1Y5iXxJfcVzIwm63WU6vyo=
 github.com/deckhouse/state-snapshotter/pkg/snapshotsdk v0.0.0-20260708003445-b0c4c2e3be2d h1:CXF1F0G8BVIi940EFGFm5w24sS9NnuaD7hJrq8kTrsE=
 github.com/deckhouse/state-snapshotter/pkg/snapshotsdk v0.0.0-20260708003445-b0c4c2e3be2d/go.mod h1:E0i9cNTSRK2kdAoy2/Dyv0mk+F/O3ffihdx19cPlm78=
 github.com/emicklei/go-restful/v3 v3.12.2 h1:DhwDP0vY3k8ZzE0RunuJy8GhNpPL6zqLkDf9B/a0/xU=
