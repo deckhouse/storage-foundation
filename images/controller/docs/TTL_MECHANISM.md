@@ -7,9 +7,11 @@ reach a terminal state they are no longer useful and are deleted automatically a
 a cron-triggered garbage-collection controller (one per kind), built on the generic collector in
 `common/gc`.
 
-**Scope**: garbage collection applies only to the request resources (VCR/VRR). The durable artifacts they
-produce (`VolumeSnapshotContent`, `PersistentVolume`) and the `IRetainer` resources have their own,
-independent retention policies (`RETENTION_SNAPSHOT_TTL`, `RETENTION_DETACH_TTL`) and are unaffected.
+**Scope**: the collector directly deletes only request resources (VCR/VRR), but deleting a VCR also
+removes its follow-ObjectKeeper and can therefore Kubernetes-GC an artifact that has no other owner.
+Artifacts retained by another bridge/retainer follow that owner's independent retention policy
+(`RETENTION_SNAPSHOT_TTL`, `RETENTION_DETACH_TTL`). In other words, request GC never directly selects
+artifacts, but it can remove the last ownership edge; see “Deletion effects” below.
 
 > Historical note: earlier versions used an informational `storage-foundation.deckhouse.io/ttl` annotation
 > plus a per-controller background TTL scanner driven by `REQUEST_TTL`. That mechanism has been removed —
