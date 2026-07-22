@@ -37,7 +37,7 @@ func setVolumeSnapshotDataRef(vcr *storagev1alpha1.VolumeCaptureRequest, target 
 
 func setPersistentVolumeDataRef(vcr *storagev1alpha1.VolumeCaptureRequest, _ storagev1alpha1.VolumeCaptureTarget, pvName, pvUID string) {
 	vcr.Status.Data = &storagev1alpha1.VolumeDataBinding{
-		Artifact: storagev1alpha1.VolumeDataArtifactRef{
+		ArtifactRef: storagev1alpha1.VolumeDataArtifactRef{
 			APIVersion: "v1",
 			Kind:       "PersistentVolume",
 			Name:       pvName,
@@ -51,5 +51,5 @@ func dataArtifactRef(status storagev1alpha1.VolumeCaptureRequestStatus) (storage
 	if status.Data == nil {
 		return storagev1alpha1.VolumeDataArtifactRef{}, false
 	}
-	return status.Data.Artifact, true
+	return status.Data.ArtifactRef, true
 }

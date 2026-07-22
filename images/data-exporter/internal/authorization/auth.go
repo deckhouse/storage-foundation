@@ -32,7 +32,12 @@ func Authorize(next http.Handler, client UserAuthorizer, operation common.Operat
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		authData, err := GetAuthDataFromRequest(r)
 		if err != nil {
-			http.Error(w, "failed to get auth data: "+err.Error(), http.StatusInternalServerError)
+			// A missing/empty/malformed credential is a client authentication failure (401), not a server
+			// error (500). In particular a request that reaches the exporter with no Authorization header and
+			// no TLS peer certificate — the normal case for the publish path, where nginx terminates TLS so a
+			// client cert never arrives at the pod — must be rejected as Unauthorized rather than surfaced as
+			// an internal error.
+			http.Error(w, "unauthorized: "+err.Error(), http.StatusUnauthorized)
 			return
 		}
 

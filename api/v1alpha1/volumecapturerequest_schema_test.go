@@ -78,7 +78,7 @@ func TestVolumeCaptureRequestStatus_Data_JSONRoundTrip(t *testing.T) {
 	vcr := VolumeCaptureRequest{
 		Status: VolumeCaptureRequestStatus{
 			Data: &VolumeDataBinding{
-				Artifact: VolumeDataArtifactRef{
+				ArtifactRef: VolumeDataArtifactRef{
 					APIVersion: "snapshot.storage.k8s.io/v1",
 					Kind:       "VolumeSnapshotContent",
 					Name:       "snapcontent-a",
@@ -101,15 +101,15 @@ func TestVolumeCaptureRequestStatus_Data_JSONRoundTrip(t *testing.T) {
 		t.Fatal("status.data must round-trip")
 	}
 	ref := out.Status.Data
-	if ref.Artifact.Name != "snapcontent-a" {
+	if ref.ArtifactRef.Name != "snapcontent-a" {
 		t.Fatalf("data mismatch: %#v", ref)
 	}
-	// Artifact UID round-trips so the durable reference is self-contained; the captured PVC identity
+	// ArtifactRef UID round-trips so the durable reference is self-contained; the captured PVC identity
 	// lives in spec.target (immutable), not in status.data.
-	if ref.Artifact.UID != "vsc-uid-a" {
-		t.Fatalf("status.data.artifact.uid = %q, want %q", ref.Artifact.UID, "vsc-uid-a")
+	if ref.ArtifactRef.UID != "vsc-uid-a" {
+		t.Fatalf("status.data.artifactRef.uid = %q, want %q", ref.ArtifactRef.UID, "vsc-uid-a")
 	}
-	if ref.Artifact.Kind == "VolumeCaptureRequest" {
+	if ref.ArtifactRef.Kind == "VolumeCaptureRequest" {
 		t.Fatal("artifact must not reference an execution request")
 	}
 
@@ -128,8 +128,8 @@ func TestVolumeCaptureRequestStatus_Data_JSONRoundTrip(t *testing.T) {
 	if !ok {
 		t.Fatalf("status.data must be a single object, got %#v", status["data"])
 	}
-	if _, ok := dataObj["artifact"].(map[string]interface{}); !ok {
-		t.Fatalf("status.data.artifact must be an object, got %#v", dataObj["artifact"])
+	if _, ok := dataObj["artifactRef"].(map[string]interface{}); !ok {
+		t.Fatalf("status.data.artifactRef must be an object, got %#v", dataObj["artifactRef"])
 	}
 	if _, ok := dataObj["target"]; ok {
 		t.Fatal("status.data.target must not appear (identity comes from spec.target)")
@@ -158,7 +158,7 @@ func TestVolumeCaptureRequestCRD_SingleTargetSchema(t *testing.T) {
 	for _, required := range []string{
 		"target:",
 		"data:",
-		"artifact:",
+		"artifactRef:",
 	} {
 		if !strings.Contains(content, required) {
 			t.Fatalf("CRD missing %q", required)
@@ -202,8 +202,8 @@ func TestVolumeCaptureRequestCRD_SingleTargetSchema(t *testing.T) {
 	if !ok {
 		t.Fatalf("status.data must have properties, got %#v", dataObj["properties"])
 	}
-	if _, ok := dataObjProps["artifact"].(map[string]interface{}); !ok {
-		t.Fatalf("status.data.artifact must be an object schema, got %#v", dataObjProps["artifact"])
+	if _, ok := dataObjProps["artifactRef"].(map[string]interface{}); !ok {
+		t.Fatalf("status.data.artifactRef must be an object schema, got %#v", dataObjProps["artifactRef"])
 	}
 	if _, ok := dataObjProps["target"]; ok {
 		t.Fatal("status.data.target must not exist in CRD (identity comes from spec.target)")

@@ -385,7 +385,7 @@ spec:
                 type: string
               data:
                 description: |-
-                  data is the self-contained data binding (source + artifact + volume metadata)
+                  data is the self-contained data binding (sourceRef + artifactRef + volume metadata)
                   mirrored from the backing state-snapshotter SnapshotContent.status.data, so d8
                   resolves the captured-volume descriptor from this namespaced VolumeSnapshot
                   alone. Written by the state-snapshotter common controller. Deckhouse extension.
@@ -395,7 +395,7 @@ spec:
                     items:
                       type: string
                     type: array
-                  artifact:
+                  artifactRef:
                     description: Durable data artifact (a VolumeSnapshotContent).
                     properties:
                       apiVersion:
@@ -417,7 +417,7 @@ spec:
                   size:
                     description: Real allocated size of the captured volume (e.g. "10Gi").
                     type: string
-                  source:
+                  sourceRef:
                     description: Captured PersistentVolumeClaim source (uid is the volume identity).
                     properties:
                       apiVersion:
@@ -445,8 +445,8 @@ spec:
                     - Filesystem
                     type: string
                 required:
-                - artifact
-                - source
+                - artifactRef
+                - sourceRef
                 type: object
               error:
                 description: |-

@@ -104,7 +104,11 @@ func MuxAddFinishedHandler(mux *http.ServeMux, opt config.URLOpt, client *reposi
 	})
 
 	shortFinished := "/api/v1/finished"
-	longFinished := GetPathPrefix(opt) + shortFinished
+	// GetPathPrefix already ends with "/", so append the suffix WITHOUT a leading slash — otherwise the long
+	// path gets a "//" (".../<name>//api/v1/finished") that http.ServeMux never matches against a cleaned
+	// single-slash request, so external (through-ingress) POST /finished 404s. Mirrors muxAddHandler's
+	// "%sapi/v1/%s" construction used for the block/files routes.
+	longFinished := GetPathPrefix(opt) + "api/v1/finished"
 	mux.Handle(longFinished, finishedHandler)
 	mux.Handle(shortFinished, finishedHandler)
 }

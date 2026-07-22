@@ -116,7 +116,7 @@ type snapshotDataArtifact struct {
 }
 
 // resolveSnapshotDataArtifact walks targetRef -> leaf.status.boundSnapshotContentName -> SnapshotContent
-// -> status.data.artifact for any registered snapshot kind via the dynamic client (no domain types
+// -> status.data.artifactRef for any registered snapshot kind via the dynamic client (no domain types
 // compiled in). A not-yet-bound leaf / not-yet-populated status.data is a transient ErrTargetNotReady (the
 // snapshot is still being captured or imported), distinct from a genuinely missing leaf
 // (ErrTargetNotFound).
@@ -175,7 +175,7 @@ func (r *DataexportReconciler) resolveSnapshotDataArtifact(ctx context.Context, 
 	// Verify the resolved content is anchored to the DataExport's own namespace via a controller-written,
 	// immutable back-reference before trusting its data artifact, so a forged leaf pointing at another
 	// tenant's SnapshotContent cannot exfiltrate its volume. The anchor is spec.snapshotRef.namespace
-	// (owning Snapshot, set at creation incl. import) with a fallback to status.data.source.namespace
+	// (owning Snapshot, set at creation incl. import) with a fallback to status.data.sourceRef.namespace
 	// (captured PVC).
 	if err := verifySnapshotContentNamespace(content, contentName, dataExport.Namespace); err != nil {
 		return nil, err
@@ -189,8 +189,8 @@ func (r *DataexportReconciler) resolveSnapshotDataArtifact(ctx context.Context, 
 		return nil, fmt.Errorf("SnapshotContent %s has no status.data (no data leg) yet: %w", contentName, ErrTargetNotReady)
 	}
 
-	artifactKind, _, _ := unstructured.NestedString(data, "artifact", "kind")
-	artifactName, _, _ := unstructured.NestedString(data, "artifact", "name")
+	artifactKind, _, _ := unstructured.NestedString(data, "artifactRef", "kind")
+	artifactName, _, _ := unstructured.NestedString(data, "artifactRef", "name")
 	if artifactName == "" {
 		return nil, fmt.Errorf("SnapshotContent %s data has no artifact name yet: %w", contentName, ErrTargetNotReady)
 	}
@@ -224,7 +224,7 @@ func (r *DataexportReconciler) resolveSnapshotDataArtifact(ctx context.Context, 
 func verifySnapshotContentNamespace(content *unstructured.Unstructured, contentName, wantNamespace string) error {
 	anchorNS, _, _ := unstructured.NestedString(content.Object, "spec", "snapshotRef", "namespace")
 	if anchorNS == "" {
-		anchorNS, _, _ = unstructured.NestedString(content.Object, "status", "data", "source", "namespace")
+		anchorNS, _, _ = unstructured.NestedString(content.Object, "status", "data", "sourceRef", "namespace")
 	}
 	if anchorNS != "" && anchorNS != wantNamespace {
 		return fmt.Errorf("SnapshotContent %s belongs to namespace %q, not %q: target does not belong to this namespace: %w",

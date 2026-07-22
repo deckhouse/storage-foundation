@@ -155,9 +155,9 @@ spec:
                   Data is the durable data artifact for the captured target (for example VolumeSnapshotContent).
                   The captured PVC identity comes from spec.target (immutable); data carries only the artifact.
                 properties:
-                  artifact:
-                    description: Artifact references the cluster-scoped durable data
-                      artifact.
+                  artifactRef:
+                    description: ArtifactRef references the cluster-scoped durable
+                      data artifact.
                     properties:
                       apiVersion:
                         minLength: 1
@@ -180,7 +180,7 @@ spec:
                     - name
                     type: object
                 required:
-                - artifact
+                - artifactRef
                 type: object
             type: object
         type: object

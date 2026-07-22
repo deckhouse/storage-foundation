@@ -45,14 +45,14 @@ index 36f60dc95..f45a6e148 100644
  
 +// VolumeSnapshotDataBinding is the self-contained data binding mirrored onto an import VolumeSnapshot's
 +// status.data by the state-snapshotter common controller. Its JSON wire shape is byte-identical to the
-+// state-snapshotter SnapshotContent.status.data (source + artifact + volume metadata), so d8 reads the
++// state-snapshotter SnapshotContent.status.data (sourceRef + artifactRef + volume metadata), so d8 reads the
 +// captured-volume descriptor from the namespaced VolumeSnapshot without the cluster-scoped SnapshotContent.
 +// Deckhouse fork extension.
 +type VolumeSnapshotDataBinding struct {
-+	// source identifies the captured PersistentVolumeClaim backing this node's data (uid is the identity).
-+	Source VolumeSnapshotDataSource `json:"source" protobuf:"bytes,1,opt,name=source"`
-+	// artifact references the cluster-scoped durable data artifact (a VolumeSnapshotContent).
-+	Artifact VolumeSnapshotDataArtifact `json:"artifact" protobuf:"bytes,2,opt,name=artifact"`
++	// sourceRef identifies the captured PersistentVolumeClaim backing this node's data (uid is the identity).
++	SourceRef VolumeSnapshotDataSource `json:"sourceRef" protobuf:"bytes,1,opt,name=sourceRef"`
++	// artifactRef references the cluster-scoped durable data artifact (a VolumeSnapshotContent).
++	ArtifactRef VolumeSnapshotDataArtifact `json:"artifactRef" protobuf:"bytes,2,opt,name=artifactRef"`
 +	// volumeMode records the source volume mode (Block or Filesystem).
 +	// +optional
 +	VolumeMode string `json:"volumeMode,omitempty" protobuf:"bytes,3,opt,name=volumeMode"`
@@ -109,7 +109,7 @@ index 36f60dc95..f45a6e148 100644
 +	// +optional
 +	BoundSnapshotContentName *string `json:"boundSnapshotContentName,omitempty" protobuf:"bytes,7,opt,name=boundSnapshotContentName"`
 +
-+	// data is the self-contained data binding (source + artifact + volume metadata) mirrored from the
++	// data is the self-contained data binding (sourceRef + artifactRef + volume metadata) mirrored from the
 +	// backing state-snapshotter SnapshotContent.status.data. Its wire shape is byte-identical to the
 +	// domain data leaves, so d8 resolves the captured-volume descriptor from this namespaced VolumeSnapshot
 +	// alone. Written by the state-snapshotter common controller (import flow). Deckhouse fork extension.
@@ -537,14 +537,14 @@ index 36f60dc95..f45a6e148 100644
  
 +// VolumeSnapshotDataBinding is the self-contained data binding mirrored onto an import VolumeSnapshot's
 +// status.data by the state-snapshotter common controller. Its JSON wire shape is byte-identical to the
-+// state-snapshotter SnapshotContent.status.data (source + artifact + volume metadata), so d8 reads the
++// state-snapshotter SnapshotContent.status.data (sourceRef + artifactRef + volume metadata), so d8 reads the
 +// captured-volume descriptor from the namespaced VolumeSnapshot without the cluster-scoped SnapshotContent.
 +// Deckhouse fork extension.
 +type VolumeSnapshotDataBinding struct {
-+	// source identifies the captured PersistentVolumeClaim backing this node's data (uid is the identity).
-+	Source VolumeSnapshotDataSource `json:"source" protobuf:"bytes,1,opt,name=source"`
-+	// artifact references the cluster-scoped durable data artifact (a VolumeSnapshotContent).
-+	Artifact VolumeSnapshotDataArtifact `json:"artifact" protobuf:"bytes,2,opt,name=artifact"`
++	// sourceRef identifies the captured PersistentVolumeClaim backing this node's data (uid is the identity).
++	SourceRef VolumeSnapshotDataSource `json:"sourceRef" protobuf:"bytes,1,opt,name=sourceRef"`
++	// artifactRef references the cluster-scoped durable data artifact (a VolumeSnapshotContent).
++	ArtifactRef VolumeSnapshotDataArtifact `json:"artifactRef" protobuf:"bytes,2,opt,name=artifactRef"`
 +	// volumeMode records the source volume mode (Block or Filesystem).
 +	// +optional
 +	VolumeMode string `json:"volumeMode,omitempty" protobuf:"bytes,3,opt,name=volumeMode"`
@@ -601,7 +601,7 @@ index 36f60dc95..f45a6e148 100644
 +	// +optional
 +	BoundSnapshotContentName *string `json:"boundSnapshotContentName,omitempty" protobuf:"bytes,7,opt,name=boundSnapshotContentName"`
 +
-+	// data is the self-contained data binding (source + artifact + volume metadata) mirrored from the
++	// data is the self-contained data binding (sourceRef + artifactRef + volume metadata) mirrored from the
 +	// backing state-snapshotter SnapshotContent.status.data. Its wire shape is byte-identical to the
 +	// domain data leaves, so d8 resolves the captured-volume descriptor from this namespaced VolumeSnapshot
 +	// alone. Written by the state-snapshotter common controller (import flow). Deckhouse fork extension.

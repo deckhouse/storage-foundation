@@ -32,7 +32,7 @@ import (
 
 func vcrDataBinding(kind, name, apiVersion string) *storagev1alpha1.VolumeDataBinding {
 	return &storagev1alpha1.VolumeDataBinding{
-		Artifact: storagev1alpha1.VolumeDataArtifactRef{
+		ArtifactRef: storagev1alpha1.VolumeDataArtifactRef{
 			APIVersion: apiVersion,
 			Kind:       kind,
 			Name:       name,

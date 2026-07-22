@@ -45,6 +45,7 @@ const (
 	AnnotationEnableCORS       = "nginx.ingress.kubernetes.io/enable-cors"
 	AnnotationCORSAllowMethods = "nginx.ingress.kubernetes.io/cors-allow-methods"
 	AnnotationCORSAllowOrigin  = "nginx.ingress.kubernetes.io/cors-allow-origin"
+	AnnotationProxyBodySize    = "nginx.ingress.kubernetes.io/proxy-body-size"
 )
 
 type IngressCfg struct {
@@ -54,6 +55,11 @@ type IngressCfg struct {
 	TargetSecretName string               // Secret name (in Ingress namespace) to create/update for TLS
 	Path             string               // Public URL path
 	CorsAllowMethods string               // CORS allowed methods (e.g., "GET, HEAD, OPTIONS")
+	// ProxyBodySize, when non-empty, sets nginx.ingress.kubernetes.io/proxy-body-size (nginx
+	// client_max_body_size) on the Ingress. Empty leaves the controller default (1m), which suits
+	// download-only ingresses (DataExport). Upload ingresses (DataImport PUT) must raise it, otherwise
+	// nginx rejects a body larger than 1m with 413 before the request reaches the exporter.
+	ProxyBodySize string
 }
 
 // Ensures Ingress resource is created or updated
@@ -182,6 +188,10 @@ func makeIngress(cfg IngressCfg, host, path string, pathType *networkingv1.PathT
 		annotations[AnnotationEnableCORS] = "true"
 		annotations[AnnotationCORSAllowMethods] = cfg.CorsAllowMethods
 		annotations[AnnotationCORSAllowOrigin] = corsOrigin
+	}
+
+	if cfg.ProxyBodySize != "" {
+		annotations[AnnotationProxyBodySize] = cfg.ProxyBodySize
 	}
 
 	return &networkingv1.Ingress{

@@ -74,8 +74,8 @@ type VolumeDataArtifactRef struct {
 // The captured PVC identity is not duplicated here: it lives in spec.target (immutable), so status.data
 // carries only the artifact.
 type VolumeDataBinding struct {
-	// Artifact references the cluster-scoped durable data artifact.
-	Artifact VolumeDataArtifactRef `json:"artifact"`
+	// ArtifactRef references the cluster-scoped durable data artifact.
+	ArtifactRef VolumeDataArtifactRef `json:"artifactRef"`
 }
 
 // +k8s:deepcopy-gen=true
