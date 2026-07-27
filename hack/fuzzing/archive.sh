@@ -40,7 +40,8 @@ fi
   echo "go: $(go version 2>/dev/null || echo 'go not found')"
   echo "commit: $(git -C "${SCRIPT_DIR}" rev-parse HEAD 2>/dev/null || echo 'unknown')"
   echo "module: ${MODULE_DIR}"
-  echo "fuzz_exit_status: $(cat "${OUT_DIR}/fuzz_status.txt" 2>/dev/null || echo 'unknown')"
+  echo "fuzz exit status per target:"
+  sed 's/^/  /' "${OUT_DIR}/fuzz_status.txt" 2>/dev/null || echo "  unknown"
 } > "${OUT_DIR}/summary.txt"
 
 echo "[archive] Wrote ${OUT_DIR}/summary.txt"

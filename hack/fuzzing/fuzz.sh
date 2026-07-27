@@ -14,18 +14,19 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# Runs the Go fuzz target under the dry-period runner.
+# Runs the Go fuzz targets under the dry-period runner, one after another: `go test -fuzz`
+# takes a pattern that must match exactly one target, so they cannot share a run.
 #
 # Coverage is deliberately not instrumented here: statement counters cost throughput on
 # a multi-hour run, and `coverage.sh` measures the same thing afterwards over the corpus.
 
 set -euo pipefail
 
-MODULE_DIR="${1:?usage: fuzz.sh <module_dir> <fuzztime> <drytime> <parallel> <test_name>}" # Go module to fuzz
-FUZZ_TIME="${2:?fuzz time}"  # Total fuzzing timeout
+MODULE_DIR="${1:?usage: fuzz.sh <module_dir> <fuzztime> <drytime> <parallel> <targets>}" # Go module to fuzz
+FUZZ_TIME="${2:?fuzz time}"  # Fuzzing timeout per target
 DRY_TIME="${3:?dry time}"    # Time without new inputs after which to stop
 PARALLEL="${4:?parallel}"    # Number of parallel fuzzing workers
-TEST_NAME="${5:?test name}"  # Fuzz target to run
+TARGETS="${5:?targets}"      # Space-separated list of fuzz targets to run
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 OUT_DIR="${SCRIPT_DIR}/out"
@@ -39,35 +40,51 @@ mkdir -p "${OUT_DIR}" "${CACHE_DIR}"
 echo "[fuzz] Building dry-period runner"
 (cd "${RUNNER_DIR}" && go build -o "${RUNNER_BIN}")
 
-echo "[fuzz] Running ${TEST_NAME} for ${FUZZ_TIME} (dry period ${DRY_TIME}, parallel=${PARALLEL})"
 echo "[fuzz] Corpus cache: ${CACHE_DIR}"
 
-# A crash found by the fuzzer must not abort the pipeline: the reproducer and the log are
-# exactly what the remaining stages are supposed to collect. Record the status instead.
-set +e
-(
-  cd "${MODULE_DIR}" || exit 1
-  "${RUNNER_BIN}" -t "${DRY_TIME}" -- go test \
-    "${TEST_DIR}" \
-    -run='^$' \
-    -fuzz="${TEST_NAME}" \
-    -fuzztime="${FUZZ_TIME}" \
-    -parallel="${PARALLEL}" \
-    -test.fuzzcachedir="${CACHE_DIR}" \
-    2>&1
-) | tee "${OUT_DIR}/fuzz.log"
-FUZZ_STATUS="${PIPESTATUS[0]}"
-set -e
+# Truncate the combined log once, then append per target.
+: > "${OUT_DIR}/fuzz.log"
+: > "${OUT_DIR}/fuzz_status.txt"
 
-echo "${FUZZ_STATUS}" > "${OUT_DIR}/fuzz_status.txt"
+FAILED_TARGETS=()
+
+for target in ${TARGETS}; do
+  echo "[fuzz] Running ${target} for ${FUZZ_TIME} (dry period ${DRY_TIME}, parallel=${PARALLEL})"
+  echo "=== ${target} ===" >> "${OUT_DIR}/fuzz.log"
+
+  # A crash found by the fuzzer must not abort the pipeline: the reproducer and the log are
+  # exactly what the remaining stages are supposed to collect, and the other targets still
+  # deserve their turn. Record the status instead.
+  set +e
+  (
+    cd "${MODULE_DIR}" || exit 1
+    "${RUNNER_BIN}" -t "${DRY_TIME}" -- go test \
+      "${TEST_DIR}" \
+      -run='^$' \
+      -fuzz="^${target}\$" \
+      -fuzztime="${FUZZ_TIME}" \
+      -parallel="${PARALLEL}" \
+      -test.fuzzcachedir="${CACHE_DIR}" \
+      2>&1
+  ) | tee -a "${OUT_DIR}/fuzz.log"
+  status="${PIPESTATUS[0]}"
+  set -e
+
+  echo "${target} ${status}" >> "${OUT_DIR}/fuzz_status.txt"
+
+  if [ "${status}" -ne 0 ]; then
+    FAILED_TARGETS+=("${target} (exit ${status})")
+  fi
+done
+
 echo "[fuzz] Log saved to ${OUT_DIR}/fuzz.log"
 
-if [ "${FUZZ_STATUS}" -ne 0 ]; then
+if [ "${#FAILED_TARGETS[@]}" -ne 0 ]; then
   echo "[fuzz] ================================================================"
-  echo "[fuzz] FUZZING FAILED (exit ${FUZZ_STATUS})"
+  echo "[fuzz] FUZZING FAILED: ${FAILED_TARGETS[*]}"
   echo "[fuzz] If the fuzzer found a failing input, Go wrote the reproducer to"
-  echo "[fuzz]   ${TEST_DIR}/testdata/fuzz/${TEST_NAME}/"
-  echo "[fuzz] and it replays with: go test ./cmd -run '${TEST_NAME}/<file>'"
+  echo "[fuzz]   ${TEST_DIR}/testdata/fuzz/<target>/"
+  echo "[fuzz] and it replays with: go test ./cmd -run '<target>/<file>'"
   echo "[fuzz] A build or setup error exits the same way — check the log above."
   echo "[fuzz] ================================================================"
 else

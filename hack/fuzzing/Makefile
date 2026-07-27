@@ -29,12 +29,17 @@ ROOT := $(abspath $(DIR)/../..)
 # Directory of the Go module to fuzz.
 MODULE_DIR := $(ROOT)/images/data-exporter
 
-# Fuzz target to run. The scripts assume the target lives in $(MODULE_DIR)/cmd, because
-# coverage has to be collected for the whole module while the test itself sits in one
-# package. Revisit the scripts if we ever add targets in other directories.
-TEST_NAME := FuzzHandler
+# Fuzz targets to run, one exporter each. The scripts assume every target lives in
+# $(MODULE_DIR)/cmd, because coverage has to be collected for the whole module while the
+# tests sit in one package. Revisit the scripts if we ever add targets elsewhere.
+#
+# Override to fuzz a single target, e.g.
+#   make -C hack/fuzzing fuzz TARGETS=FuzzExportBlockHandler
+TARGETS ?= FuzzExportFilesystemHandler FuzzExportBlockHandler
 
-# Total fuzzing timeout.
+# Fuzzing timeout PER TARGET: `go test -fuzz` takes a pattern matching exactly one target,
+# so the targets are fuzzed one after another and a full run takes
+# FUZZ_TIME x $(words $(TARGETS)).
 FUZZ_TIME ?= 48h
 
 # Stop early once this much time passes without a new interesting input.
@@ -43,31 +48,38 @@ DRY_TIME ?= 2h
 # Number of parallel fuzzing workers.
 PARALLEL ?= 4
 
-.PHONY: all fuzz promote coverage archive clean clean-corpus help
+.PHONY: all fuzz race promote coverage archive clean clean-corpus help
 
 # The stages feed each other, so never let -jN interleave them.
 .NOTPARALLEL:
 
 help:
-	@echo "Targets:"
-	@echo "  fuzz         run the fuzzer (FUZZ_TIME=$(FUZZ_TIME), DRY_TIME=$(DRY_TIME), PARALLEL=$(PARALLEL))"
-	@echo "  promote      copy the generated corpus from .fuzzcache into cmd/testdata"
-	@echo "  coverage     measure coverage over the promoted corpus (implies promote)"
-	@echo "  archive      pack corpus, log and coverage report into a tarball"
+	@echo "Targets ($(words $(TARGETS)) fuzz targets: $(TARGETS)):"
+	@echo "  fuzz         run the fuzzer, FUZZ_TIME=$(FUZZ_TIME) per target (DRY_TIME=$(DRY_TIME), PARALLEL=$(PARALLEL))"
+	@echo "  race         replay the seed corpus concurrently under the race detector"
+	@echo "  promote      copy the generated corpora from .fuzzcache into cmd/testdata"
+	@echo "  coverage     measure coverage over the promoted corpora (implies promote)"
+	@echo "  archive      pack corpora, log and coverage report into a tarball"
 	@echo "  all          fuzz -> promote -> coverage -> archive"
-	@echo "  clean        remove generated artifacts, keeping the corpus in testdata"
-	@echo "  clean-corpus additionally remove cmd/testdata/fuzz/$(TEST_NAME)"
+	@echo "  clean        remove generated artifacts, keeping the corpora in testdata"
+	@echo "  clean-corpus additionally remove the promoted corpora"
 
 all: fuzz promote coverage archive
 
 fuzz:
-	@bash "$(DIR)/fuzz.sh" "$(MODULE_DIR)" "$(FUZZ_TIME)" "$(DRY_TIME)" "$(PARALLEL)" "$(TEST_NAME)"
+	@bash "$(DIR)/fuzz.sh" "$(MODULE_DIR)" "$(FUZZ_TIME)" "$(DRY_TIME)" "$(PARALLEL)" "$(TARGETS)"
+
+# The fuzz targets serve one request per iteration, so they cannot observe a race between
+# concurrent requests. TestExportHandlersConcurrent does, and only reports races when the
+# detector is on, which CI's plain `go test ./...` does not enable.
+race:
+	@cd "$(MODULE_DIR)" && go test -race -run TestExportHandlersConcurrent -count=1 ./cmd
 
 promote:
-	@bash "$(DIR)/promote_corpus.sh" "$(MODULE_DIR)" "$(TEST_NAME)"
+	@bash "$(DIR)/promote_corpus.sh" "$(MODULE_DIR)" "$(TARGETS)"
 
 coverage: promote
-	@bash "$(DIR)/coverage.sh" "$(MODULE_DIR)" "$(TEST_NAME)"
+	@bash "$(DIR)/coverage.sh" "$(MODULE_DIR)" "$(TARGETS)"
 
 archive:
 	@bash "$(DIR)/archive.sh" "$(MODULE_DIR)"
@@ -82,7 +94,10 @@ clean:
 	rm -f "$(MODULE_DIR)/cmd/coverage.txt"
 	rm -f "$(MODULE_DIR)/cmd/coverage_total.txt"
 
-# Split out from `clean` on purpose: testdata holds the promoted corpus, which may be
-# committed and is the point of a completed run. Only wipe it deliberately.
+# Split out from `clean` on purpose: testdata holds the promoted corpora, which may be
+# committed and are the point of a completed run. Only wipe them deliberately.
 clean-corpus: clean
-	rm -rf "$(MODULE_DIR)/cmd/testdata/fuzz/$(TEST_NAME)"
+	@for target in $(TARGETS); do \
+		echo rm -rf "$(MODULE_DIR)/cmd/testdata/fuzz/$$target"; \
+		rm -rf "$(MODULE_DIR)/cmd/testdata/fuzz/$$target"; \
+	done

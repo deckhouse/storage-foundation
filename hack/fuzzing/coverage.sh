@@ -19,30 +19,39 @@
 
 set -euo pipefail
 
-MODULE_DIR="${1:?usage: coverage.sh <module_dir> <test_name>}" # Go module that was fuzzed
-TEST_NAME="${2:?test name}" # Fuzz target whose corpus to replay
+MODULE_DIR="${1:?usage: coverage.sh <module_dir> <targets>}" # Go module that was fuzzed
+TARGETS="${2:?targets}" # Space-separated list of fuzz targets whose corpora to replay
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 OUT_DIR="${SCRIPT_DIR}/out"
 TEST_DIR="${MODULE_DIR}/cmd"
-CORPUS_DIR="${TEST_DIR}/testdata/fuzz/${TEST_NAME}"
 
 mkdir -p "${OUT_DIR}"
 
-if [ -d "${CORPUS_DIR}" ]; then
-  echo "[coverage] Replaying $(find "${CORPUS_DIR}" -type f | wc -l | tr -d ' ') corpus files plus the seed corpus"
-else
-  echo "[coverage] No corpus in ${CORPUS_DIR}; measuring the seed corpus only"
-  echo "[coverage] Run 'make fuzz' followed by 'make promote' to generate one"
-fi
+# One profile over every target at once: the exporters share the module, so per-target
+# profiles would each understate what the fuzzing reaches in total.
+run_pattern=""
+for target in ${TARGETS}; do
+  corpus_dir="${TEST_DIR}/testdata/fuzz/${target}"
+  if [ -d "${corpus_dir}" ]; then
+    echo "[coverage] ${target}: replaying $(find "${corpus_dir}" -type f | wc -l | tr -d ' ') corpus files plus its seed corpus"
+  else
+    echo "[coverage] ${target}: no corpus in ${corpus_dir}; measuring its seed corpus only"
+  fi
+
+  if [ -n "${run_pattern}" ]; then
+    run_pattern="${run_pattern}|"
+  fi
+  run_pattern="${run_pattern}^${target}\$"
+done
 
 cd "${MODULE_DIR}"
 
 # -coverpkg=./... is resolved against the module root, so the profile covers the whole
-# image and not just the package holding the fuzz target.
+# image and not just the package holding the fuzz targets.
 go test \
   "${TEST_DIR}" \
-  -run "${TEST_NAME}" \
+  -run "${run_pattern}" \
   -coverpkg=./... \
   -coverprofile="${TEST_DIR}/coverage.txt" | tee "${TEST_DIR}/coverage_total.txt"
 
