@@ -29,6 +29,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	dev1alpha1 "github.com/deckhouse/storage-foundation/api/v1alpha1"
@@ -226,6 +227,28 @@ func GetPVCVolumeMode(pvc *corev1.PersistentVolumeClaim) (string, error) {
 		return "", fmt.Errorf("PVC %s/%s does not have a volume mode specified", pvc.Namespace, pvc.Name)
 	}
 	return string(*pvc.Spec.VolumeMode), nil
+}
+
+// DeleteScratchPVC removes the finalizer from and deletes the scratch PVC used to stage a PopulateData
+// import. Called once the import artifact has been safely captured (Retain + keeper-anchored), so the
+// scratch volume is no longer needed. Idempotent: tolerates the PVC already being gone.
+func DeleteScratchPVC(ctx context.Context, c client.Client, pvc *corev1.PersistentVolumeClaim) error {
+	logger := log.FromContext(ctx).WithValues("pvcNamespace", pvc.Namespace, "pvcName", pvc.Name)
+
+	base := pvc.DeepCopy()
+	if controllerutil.RemoveFinalizer(pvc, dev1alpha1.StorageManagerFinalizerName) {
+		if err := c.Patch(ctx, pvc, client.MergeFrom(base)); err != nil && !kubeerrors.IsNotFound(err) {
+			logger.Error(err, "Failed to remove finalizer from scratch PVC")
+			return err
+		}
+	}
+
+	if err := c.Delete(ctx, pvc); err != nil && !kubeerrors.IsNotFound(err) {
+		logger.Error(err, "Failed to delete scratch PVC")
+		return err
+	}
+	logger.Info("Deleted scratch PVC")
+	return nil
 }
 
 // RemovePVCFinalizer removes a finalizer from a PVC by namespace and name

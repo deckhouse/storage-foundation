@@ -773,6 +773,13 @@ func (r *DataImportReconciler) ensureDataArtifact(ctx context.Context, pvc *core
 		return ctrl.Result{}, err
 	}
 
+	// The scratch PVC is no longer needed now that the artifact is safely captured. Completed is set
+	// only once it's actually deleted — Completed is sticky-terminal, so a swallowed failure here
+	// would never get another chance and would leak the PVC forever.
+	if err := DeleteScratchPVC(ctx, r.Client, pvc); err != nil {
+		return ctrl.Result{}, fmt.Errorf("delete scratch PVC: %w", err)
+	}
+
 	r.dataImport.Status.Data = &dev1alpha1.DataExportImportData{ArtifactRef: artifact}
 	meta.SetStatusCondition(&r.dataImport.Status.Conditions, metav1.Condition{
 		Type:               string(common.ConditionCompleted),
