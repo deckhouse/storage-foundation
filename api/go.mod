@@ -1,7 +1,6 @@
 module github.com/deckhouse/storage-foundation/api
 
 go 1.26.5
-
 require (
 	github.com/deckhouse/state-snapshotter/api v0.0.0-20260708003445-b0c4c2e3be2d
 	gopkg.in/yaml.v3 v3.0.1
