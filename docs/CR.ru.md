@@ -80,9 +80,9 @@ status:
   завершения capture и доменного consistency-action. Childless-домен может сразу опубликовать
   `PhaseFinished`, когда core сообщает о завершении capture. Целевой протокол убирает late-own-MCR
   exception: собственный MCR каждого узла публикуется до `PhasePlanned`.
-- Встроенный VolumeSnapshot domain controller временно закреплён на legacy-методах SDK
-  (`MarkPlanned`, `ConfirmConsistent`, `Reject`) и до миграции на `DomainCaptureStatus` не должен
-  использоваться как актуальный интеграционный пример.
+- Встроенный VolumeSnapshot domain controller следует этому контракту: отсутствующий source PVC остаётся
+  восстанавливаемым ожиданием в `PhasePlanning`, опубликованный MCR фиксирует план в `PhasePlanned`,
+  успешный core capture переводит leaf в `PhaseFinished`, а терминальные ошибки core остаются в `Ready`.
 
 ## VolumeRestoreRequest
 

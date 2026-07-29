@@ -86,6 +86,13 @@ func (a volumeSnapshotAdapter) CoreCaptureState() snapshotsdk.CoreCaptureState {
 	return vsCoreCaptureStateFrom(a.snap.Status.CaptureState)
 }
 
+func (a volumeSnapshotAdapter) ReadyStatus() metav1.ConditionStatus {
+	if c := meta.FindStatusCondition(a.snap.Status.Conditions, storagev1alpha1.ConditionReady); c != nil {
+		return c.Status
+	}
+	return ""
+}
+
 func (a volumeSnapshotAdapter) ReadyReason() string {
 	return vsReadyReason(a.snap.Status.Conditions)
 }

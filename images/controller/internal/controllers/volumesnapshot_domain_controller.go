@@ -177,59 +177,70 @@ func (r *VolumeSnapshotDomainReconciler) Reconcile(ctx context.Context, req ctrl
 	adapter := volumeSnapshotAdapter{snap: vs}
 	sdk := r.capture()
 
-	pvc := &corev1.PersistentVolumeClaim{}
-	if getErr := r.Client.Get(ctx, types.NamespacedName{Namespace: vs.Namespace, Name: *pvcName}, pvc); getErr != nil {
-		if !apierrors.IsNotFound(getErr) {
-			return ctrl.Result{}, getErr
-		}
-		// The source PVC disappeared after adoption: surface an actionable Ready=False (it may reappear).
-		if perr := sdk.Reject(ctx, adapter, snapshotsdk.FailSpec{
-			Reason:  snapshotsdk.Reason(storagev1alpha1.ReasonArtifactMissing),
-			Message: fmt.Sprintf("source PersistentVolumeClaim %q not found", *pvcName),
-			Requeue: true,
-		}); perr != nil {
-			return ctrl.Result{}, perr
-		}
-		return ctrl.Result{RequeueAfter: volumeSnapshotDomainArtifactRequeueAfter}, nil
+	// Terminal domain phases are immutable point-in-time outcomes. In particular, do not re-resolve a live
+	// source PVC after the domain has already finished or failed.
+	if phase := adapter.GetDomainCaptureState().Phase; phase == snapshotsdk.PhaseFinished || phase == snapshotsdk.PhaseFailed {
+		return ctrl.Result{}, nil
 	}
 
-	// Publish the captured source PVC's full reference (top-level status.sourceRef) so d8-cli can
-	// rebuild the import-mode source. Not part of the readiness formula.
-	if err := sdk.PublishSnapshotSource(ctx, adapter, snapshotsdk.SnapshotSource{
-		APIVersion: corev1.SchemeGroupVersion.String(),
-		Kind:       "PersistentVolumeClaim",
-		Name:       pvc.Name,
-		Namespace:  pvc.Namespace,
-		UID:        pvc.UID,
-	}); err != nil {
-		return ctrl.Result{}, err
-	}
+	// Plan the manifest leg only until its immutable MCR name is published. Once published, the live PVC is
+	// no longer needed by this domain reconcile: the core owns capture progress and terminal Ready. This
+	// prevents a source deletion after Planned from regressing into an endless Planning requeue.
+	if snapshotsdk.ManifestCaptureNeeded(adapter) {
+		pvc := &corev1.PersistentVolumeClaim{}
+		if getErr := r.Client.Get(ctx, types.NamespacedName{Namespace: vs.Namespace, Name: *pvcName}, pvc); getErr != nil {
+			if !apierrors.IsNotFound(getErr) {
+				return ctrl.Result{}, getErr
+			}
+			// A source that has not appeared yet is recoverable. Keep the domain in Planning and schedule the
+			// retry explicitly; DomainCaptureStatus never owns scheduling and never writes Ready.
+			if perr := sdk.DomainCaptureStatus(adapter).
+				Phase(snapshotsdk.PhasePlanning).
+				Message(fmt.Sprintf("waiting for source PersistentVolumeClaim %q to exist", *pvcName)).
+				Apply(ctx); perr != nil {
+				return ctrl.Result{}, perr
+			}
+			return ctrl.Result{RequeueAfter: volumeSnapshotDomainArtifactRequeueAfter}, nil
+		}
 
-	// Manifest leg: capture the source PVC object. The data leg is the native CSI VolumeSnapshotContent
-	// (observed and latched by the core), so there is no EnsureVolumeCapture / VolumeCaptureRequest here.
-	if err := sdk.EnsureManifestCapture(ctx, adapter, snapshotsdk.ManifestCaptureSpec{Targets: []snapshotsdk.ManifestTarget{{
-		APIVersion: corev1.SchemeGroupVersion.String(),
-		Kind:       "PersistentVolumeClaim",
-		Name:       pvc.Name,
-	}}}); err != nil {
-		return ctrl.Result{}, err
+		// Publish the captured source PVC's full reference (top-level status.sourceRef) so d8-cli can
+		// rebuild the import-mode source. Not part of the readiness formula.
+		if err := sdk.PublishSnapshotSource(ctx, adapter, snapshotsdk.SnapshotSource{
+			APIVersion: corev1.SchemeGroupVersion.String(),
+			Kind:       "PersistentVolumeClaim",
+			Name:       pvc.Name,
+			Namespace:  pvc.Namespace,
+			UID:        pvc.UID,
+		}); err != nil {
+			return ctrl.Result{}, err
+		}
+
+		// Manifest leg: capture the source PVC object. The data leg is the native CSI
+		// VolumeSnapshotContent (observed and latched by the core), so there is no
+		// EnsureVolumeCapture / VolumeCaptureRequest here.
+		if err := sdk.EnsureManifestCapture(ctx, adapter, snapshotsdk.ManifestCaptureSpec{Targets: []snapshotsdk.ManifestTarget{{
+			APIVersion: corev1.SchemeGroupVersion.String(),
+			Kind:       "PersistentVolumeClaim",
+			Name:       pvc.Name,
+		}}}); err != nil {
+			return ctrl.Result{}, err
+		}
 	}
 
 	// Barrier 1 (Planned): for a data leaf, planning is complete once its MCR is created and published.
-	if err := sdk.MarkPlanned(ctx, adapter); err != nil {
+	if err := sdk.DomainCaptureStatus(adapter).Phase(snapshotsdk.PhasePlanned).Apply(ctx); err != nil {
 		return ctrl.Result{}, err
 	}
 
 	// Barrier 2 (Finished): switch on the SDK-derived capture outcome. A VolumeSnapshot is a data leaf, so
-	// it confirms consistency immediately once all declared legs (manifest + native-CSI data) are captured.
+	// it publishes Finished immediately once all declared legs (manifest + native-CSI data) are captured.
 	switch outcome := snapshotsdk.CoreCaptureOutcome(adapter); outcome.Outcome {
 	case snapshotsdk.CaptureOutcomeCaptured:
-		return ctrl.Result{}, sdk.ConfirmConsistent(ctx, adapter)
+		return ctrl.Result{}, sdk.DomainCaptureStatus(adapter).Phase(snapshotsdk.PhaseFinished).Apply(ctx)
 	case snapshotsdk.CaptureOutcomeFailed:
-		return ctrl.Result{}, sdk.Reject(ctx, adapter, snapshotsdk.FailSpec{
-			Reason:  snapshotsdk.Reason(outcome.Reason),
-			Message: outcome.Message,
-		})
+		// Ready and the terminal reason/message are core-owned. Do not duplicate a core leg failure into the
+		// domain phase; stop and leave the authoritative Ready=False outcome untouched.
+		return ctrl.Result{}, nil
 	default:
 		return ctrl.Result{RequeueAfter: volumeSnapshotDomainRequeueAfter}, nil
 	}

@@ -78,9 +78,9 @@ Contract:
   `PhaseFinished` after capture and any domain-specific consistency action. Childless domains may
   publish `PhaseFinished` immediately once the core reports capture complete. The target protocol
   removes the late-own-MCR exception by publishing every node's own MCR before `PhasePlanned`.
-- The in-tree VolumeSnapshot domain controller is temporarily pinned to the legacy SDK verbs
-  (`MarkPlanned`, `ConfirmConsistent`, `Reject`) and must not be used as current integration guidance
-  until it migrates to `DomainCaptureStatus`.
+- The in-tree VolumeSnapshot domain controller follows this contract: a missing source PVC remains
+  recoverable in `PhasePlanning`, the published MCR freezes the plan at `PhasePlanned`, successful core
+  capture advances the leaf to `PhaseFinished`, and core-owned terminal failures remain in `Ready`.
 
 ## VolumeRestoreRequest
 
