@@ -1,9 +1,9 @@
 module github.com/deckhouse/storage-foundation/api
 
-go 1.26.5
+go 1.25.12
 
 require (
-	github.com/deckhouse/state-snapshotter/api v0.0.0-20260708003445-b0c4c2e3be2d
+	github.com/deckhouse/state-snapshotter/api v0.0.0-20260729072518-f90968ad6e5f
 	gopkg.in/yaml.v3 v3.0.1
 	k8s.io/apimachinery v0.34.1
 )
