@@ -99,7 +99,7 @@ func (r *VolumeRestoreRequestController) Reconcile(ctx context.Context, req ctrl
 	// reconciled again even if spec is changed. This is by design: VRR represents a single
 	// restore operation. To create a new restore, create a new VRR.
 	if isTerminal(vrr.Status.Conditions, storagev1alpha1.ConditionTypeReady) {
-		// VRR is terminal - TTL cleanup is handled by background TTL scanner, not in reconcile loop
+		// VRR is terminal - TTL cleanup is handled by cron-driven generic GC, not in reconcile loop.
 		// This ensures reconcile loop doesn't block on TTL checks
 		l.V(1).Info("VRR is terminal, skipping reconcile")
 		return ctrl.Result{}, nil
@@ -107,10 +107,11 @@ func (r *VolumeRestoreRequestController) Reconcile(ctx context.Context, req ctrl
 
 	// Handle deletion
 	// NOTE: No finalizer needed.
-	// ObjectKeeper follows VRR lifecycle and owns all artifacts.
+	// ObjectKeeper follows VRR lifecycle, but the current controller does not publish the keeper-ref
+	// annotation consumed by the executor, so the normal restore target PVC is not owned by this keeper.
 	// When VRR is deleted:
 	//   - ObjectKeeper is automatically deleted (FollowObject)
-	//   - GC deletes PVC through ownerRef
+	//   - the normal executor-created target PVC remains
 	if !vrr.DeletionTimestamp.IsZero() {
 		l.Info("VRR is being deleted, skipping reconcile (ObjectKeeper will handle cleanup)")
 		return ctrl.Result{}, nil

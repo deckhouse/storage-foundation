@@ -43,7 +43,8 @@ type VolumeCaptureTarget struct {
 	// +kubebuilder:validation:MinLength=1
 	Name string `json:"name"`
 	// Namespace is intentionally empty in spec.target (the PVC always lives in the VCR namespace).
-	// The captured PVC identity is carried by spec.target (immutable); status.data no longer duplicates it.
+	// The captured PVC identity is carried by spec.target; status.data no longer duplicates it.
+	// The request is intended to be point-in-time, but server-side spec immutability is not yet enforced.
 	// +optional
 	Namespace string `json:"namespace,omitempty"`
 }
@@ -71,8 +72,8 @@ type VolumeDataArtifactRef struct {
 
 // +k8s:deepcopy-gen=true
 // VolumeDataBinding carries the durable data artifact produced for the VCR's captured target.
-// The captured PVC identity is not duplicated here: it lives in spec.target (immutable), so status.data
-// carries only the artifact.
+// The captured PVC identity is not duplicated here: it lives in spec.target, so status.data carries only
+// the artifact. Server-side spec immutability is not yet enforced.
 type VolumeDataBinding struct {
 	// ArtifactRef references the cluster-scoped durable data artifact.
 	ArtifactRef VolumeDataArtifactRef `json:"artifactRef"`
@@ -100,7 +101,8 @@ type VolumeCaptureRequestStatus struct {
 	Conditions []metav1.Condition `json:"conditions,omitempty"`
 
 	// Data is the durable data artifact for the captured target (for example VolumeSnapshotContent).
-	// The captured PVC identity comes from spec.target (immutable); data carries only the artifact.
+	// The captured PVC identity comes from spec.target; data carries only the artifact.
+	// Server-side spec immutability is not yet enforced.
 	// +optional
 	Data *VolumeDataBinding `json:"data,omitempty"`
 }
