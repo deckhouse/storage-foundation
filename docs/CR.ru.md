@@ -179,13 +179,12 @@ controllers. Ошибка `status.error` у VSC-источника VRR — др�
 | `GC_VCR_TTL` / `GC_VRR_TTL` | `24h` |
 | `GC_VCR_SCHEDULE` / `GC_VRR_SCHEDULE` | `0 * * * *` |
 
-Per-object TTL-аннотаций и module settings для этих значений нет. Подробности ownership артефактов
-и adoption DataImport — в `images/controller/docs/TTL_MECHANISM.md`. На успешном пути
+Per-object TTL-аннотаций и module settings для этих значений нет. На успешном пути
 state-snapshotter может удалить VCR раньше, после durable handoff; generic GC чистит терминальные
 остатки. Request без терминального `Ready` и `completionTimestamp`, включая malformed VRR выше,
 collector не удаляет.
 Текущий VRR keeper не связан с созданным executor'ом restore target PVC, поэтому GC запроса не
-удаляет этот PVC; implementation-specific детали ownership приведены в linked TTL page.
+удаляет этот PVC.
 
 ## Валидация и RBAC
 

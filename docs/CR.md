@@ -177,13 +177,12 @@ Terminal VCR/VRR objects are deleted by cron-driven generic GC using
 | `GC_VCR_TTL` / `GC_VRR_TTL` | `24h` |
 | `GC_VCR_SCHEDULE` / `GC_VRR_SCHEDULE` | `0 * * * *` |
 
-There are no per-object TTL annotations and no module settings for these values. See
-`images/controller/docs/TTL_MECHANISM.md` for artifact ownership and DataImport adoption details.
+There are no per-object TTL annotations and no module settings for these values.
 On the successful state-snapshotter path, core may delete a VCR earlier after it has persisted the
 data handoff; generic GC is the cleanup path for terminal leftovers. A request without a terminal
 `Ready` condition and `completionTimestamp`, including the malformed VRR case above, is not collected.
 The current VRR keeper is not connected to the executor-created restore target PVC, so collecting the
-VRR does not delete that PVC; see the implementation-specific ownership details in the linked TTL page.
+VRR does not delete that PVC.
 
 ## Validation and RBAC
 
