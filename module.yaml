@@ -7,7 +7,7 @@ descriptions:
   en: "Enables snapshot support, volume cloning, and secure HTTP-based export/import of persistent volume contents for compatible CSI drivers in a Kubernetes cluster."
   ru: "Включает поддержку снапшотов, клонирование томов и безопасный экспорт/импорт содержимого постоянных томов по протоколу HTTP для совместимых CSI-драйверов в кластере Kubernetes."
 requirements:
-  deckhouse: ">= 1.76"
+  deckhouse: ">= 1.76.8"
   modules:
     # storage-foundation and state-snapshotter are released together as v1.0.0; the snapshot
     # domain (SnapshotContent/VRR) lives in state-snapshotter, so pin the GA baseline explicitly.
