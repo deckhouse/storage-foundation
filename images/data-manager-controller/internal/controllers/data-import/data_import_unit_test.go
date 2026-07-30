@@ -25,6 +25,7 @@ import (
 	snapv1 "github.com/kubernetes-csi/external-snapshotter/client/v8/apis/volumesnapshot/v1"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	storagev1 "k8s.io/api/storage/v1"
 	"k8s.io/apimachinery/pkg/api/meta"
@@ -364,14 +365,17 @@ func TestEnsurePVCImportTargetRequiresTemplate(t *testing.T) {
 }
 
 // newCreatePVCReconciler builds a CreatePVC reconciler whose PVC import target is restored-pvc, with a
-// fake client carrying only corev1/storagev1 (the populate path never touches snapshot machinery).
+// fake client carrying corev1/storagev1 (the populate path never touches snapshot machinery) plus
+// batchv1 and names, needed because the TargetStatusReady branch deletes the dummy Job.
 func newCreatePVCReconciler(objs ...runtime.Object) *DataImportReconciler {
 	scheme := runtime.NewScheme()
 	_ = corev1.AddToScheme(scheme)
 	_ = storagev1.AddToScheme(scheme)
+	_ = batchv1.AddToScheme(scheme)
 	fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithRuntimeObjects(objs...).Build()
 	return &DataImportReconciler{
 		Client: fakeClient,
+		names:  common.NewNames(dev1alpha1.KindPVC, "imp-b", "ns", "imp-b"),
 		dataImport: &dev1alpha1.DataImport{
 			ObjectMeta: metav1.ObjectMeta{Name: "imp-b", Namespace: "ns"},
 			Spec: dev1alpha1.DataImportSpec{

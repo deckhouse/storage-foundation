@@ -567,6 +567,12 @@ func (r *DataImportReconciler) handleTargetStatus(ctx context.Context, pvc *core
 
 	switch status {
 	case TargetStatusReady:
+		// Delete the dummy Job once the scratch PVC is Bound. A failure here retries before the
+		// upload/capture logic below, so a stuck delete stalls this import too.
+		if err := r.reconcileDummyJobDeletion(ctx, pvc); err != nil {
+			return ctrl.Result{}, err
+		}
+
 		// PVC bound is necessary but not sufficient: the bytes must be uploaded first. The importer
 		// pod flips UploadFinished=True when the client finishes streaming into the scratch PVC; only
 		// then is it safe to capture the volume into the durable artifact.
@@ -667,6 +673,12 @@ func (r *DataImportReconciler) handlePVCImportStatus(ctx context.Context, pvc *c
 
 	switch status {
 	case TargetStatusReady:
+		// Delete the dummy Job once the target PVC is Bound. A failure here retries before the
+		// upload/completion logic below, so a stuck delete stalls this import too.
+		if err := r.reconcileDummyJobDeletion(ctx, pvc); err != nil {
+			return ctrl.Result{}, err
+		}
+
 		if cond := common.GetCondition(r.dataImport.Status.Conditions, common.ConditionUploadFinished); cond == nil || cond.Status != metav1.ConditionTrue {
 			logger.Info("Target PVC is bound, awaiting data upload")
 			meta.SetStatusCondition(&r.dataImport.Status.Conditions, metav1.Condition{
@@ -717,6 +729,39 @@ func (r *DataImportReconciler) handlePVCImportStatus(ctx context.Context, pvc *c
 	}
 
 	return ctrl.Result{}, nil
+}
+
+// reconcileDummyJobDeletion removes the dummy consumer Job once the target/scratch PVC is bound: the Job
+// only exists to trigger WaitForFirstConsumer binding, so it is garbage the moment binding happened.
+//
+// The check is the Job's own existence, deliberately NOT a status condition. An earlier version gated on
+// Ready.Reason==PVCCreated, which silently stranded the Job: in the populator flow the upload server runs
+// on a separate PvcPrime volume, so updateReadiness flips Ready.Reason to ServerReady off the pod's
+// heartbeat while this PVC is still Pending — i.e. before TargetStatusReady is ever reached — closing the
+// gate permanently. Reading the Job is a cached (informer-backed) lookup, so skipping the Delete when it
+// is already gone keeps a no-change reconcile free of write calls without adding a real API round-trip.
+func (r *DataImportReconciler) reconcileDummyJobDeletion(ctx context.Context, pvc *corev1.PersistentVolumeClaim) error {
+	jobName := types.NamespacedName{Namespace: pvc.Namespace, Name: r.names.DummyJobName}
+
+	job, err := common.GetJob(ctx, r.Client, jobName.Namespace, jobName.Name)
+	if err != nil {
+		return fmt.Errorf("failed to get dummy Job after PVC became bound: %w", err)
+	}
+	if job == nil {
+		// Never created (Immediate binding mode) or already deleted: nothing to do, no write issued.
+		return nil
+	}
+	if job.DeletionTimestamp != nil {
+		// Foreground propagation is still waiting on the dummy Pod; a repeat Delete would be accepted as
+		// a no-op but is still a mutating call on unchanged state, and wouldn't unstick the propagation.
+		return nil
+	}
+
+	if _, err := common.DeleteJob(ctx, r.Client, jobName); err != nil {
+		return fmt.Errorf("failed to delete dummy Job after PVC became bound: %w", err)
+	}
+
+	return nil
 }
 
 // ensureDataArtifact captures the bound scratch PVC into a durable cluster-scoped VolumeSnapshotContent
