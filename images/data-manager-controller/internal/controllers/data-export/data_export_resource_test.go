@@ -27,6 +27,7 @@ import (
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	networkingv1 "k8s.io/api/networking/v1"
+	storagev1 "k8s.io/api/storage/v1"
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
@@ -47,6 +48,11 @@ const (
 	dataExportName      = "test-de"
 	dataExportNamespace = "test-ns"
 	testUserPVCName     = "test-pvc"
+
+	testDataExportUID = types.UID("de-uid-1")
+	testUserPVCUID    = types.UID("user-pvc-uid-1")
+	testExportPVCUID  = types.UID("export-pvc-uid-1")
+	testPVUID         = types.UID("pv-uid-1")
 )
 
 var testNames = common.NewNames(dev1alpha1.KindPVC, testUserPVCName, dataExportNamespace, dataExportName)
@@ -57,6 +63,7 @@ func setupTestScheme() *runtime.Scheme {
 	_ = corev1.SchemeBuilder.AddToScheme(scheme)
 	_ = networkingv1.SchemeBuilder.AddToScheme(scheme)
 	_ = appsv1.SchemeBuilder.AddToScheme(scheme)
+	_ = storagev1.SchemeBuilder.AddToScheme(scheme)
 	_ = apiextensionsv1.AddToScheme(scheme)
 	return scheme
 }
@@ -422,6 +429,145 @@ func TestReconcile_ResourceAlreadyImplemented(t *testing.T) {
 	assert.Equal(t, ctrl.Result{}, result)
 }
 
+// deInRecoveryFixture builds a serving DataExport that has already recorded a lost export claim, i.e. an
+// object whose only legal next step is recovery.
+func deInRecoveryFixture(t *testing.T) (*dev1alpha1.DataExport, client.Client, *DataexportReconciler) {
+	t.Helper()
+
+	dataExport := createDataExport(dev1alpha1.DataExportSpec{
+		Ttl:       "1h",
+		TargetRef: dev1alpha1.DataExportTargetRefSpec{Kind: dev1alpha1.KindPVC, Name: "test-pvc"},
+	})
+	dataExport.Finalizers = []string{dev1alpha1.StorageManagerFinalizerName}
+	dataExport.Status.CleanupReason = string(common.CleanupReasonExportPVCPostRebindLost)
+	dataExport.Status.Recovery = &dev1alpha1.RecoveryStatus{
+		SourcePVCUID: string(testUserPVCUID),
+		ExportPVCUID: string(testExportPVCUID),
+		PVName:       "test-pv",
+		PVUID:        string(testPVUID),
+	}
+	dataExport.Status.Conditions = []metav1.Condition{{
+		Type:               string(common.ConditionReady),
+		Status:             metav1.ConditionFalse,
+		Reason:             string(common.ReasonManagedResourceLost),
+		Message:            "export PVC gone after rebind",
+		ObservedGeneration: dataExport.Generation,
+		LastTransitionTime: metav1.NewTime(time.Now()),
+	}}
+
+	// A pod still holds the export claim, so the recovery cannot get past its first barrier: the object
+	// stays in the state this test is about — owing a recovery it has not finished.
+	blocker := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Name: recoveryBlockerPodName, Namespace: testExportPVCNamespace},
+		Spec: corev1.PodSpec{Volumes: []corev1.Volume{{
+			Name: "data",
+			VolumeSource: corev1.VolumeSource{
+				PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{ClaimName: testNames.ExportPVCName},
+			},
+		}}},
+	}
+
+	fakeClient := newFakeClientWithStatus(t, setupTestScheme(), dataExport, blocker)
+	return dataExport, fakeClient, createTestReconciler(fakeClient, fakeClient, createTestConfig())
+}
+
+const recoveryBlockerPodName = "still-mounted"
+
+var deRequest = ctrl.Request{NamespacedName: types.NamespacedName{Name: dataExportName, Namespace: dataExportNamespace}}
+
+// TestReconcile_RecoveryRoutingPrecedesExpiryAndTerminal locks the branch order: an object that owes a
+// recovery must not fall through to expiry cleanup, to the terminal no-op, or back into provisioning.
+// Expiry is the dangerous one — it would run the ordinary teardown, which assumes the export claim still
+// exists, and drop the finalizer that is currently the only thing keeping the recovery reachable.
+func TestReconcile_RecoveryRoutingPrecedesExpiryAndTerminal(t *testing.T) {
+	for _, tt := range []struct {
+		name   string
+		mutate func(*dev1alpha1.DataExport)
+	}{
+		{name: "plain recovery"},
+		{
+			name:   "idle-expired while owing recovery",
+			mutate: func(de *dev1alpha1.DataExport) { de.Status.ServerState = string(common.ServerStateIdleExpired) },
+		},
+		{
+			name:   "settled terminal phase while owing recovery",
+			mutate: func(de *dev1alpha1.DataExport) { de.Status.Phase = string(common.PhaseFailed) },
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			dataExport, fakeClient, reconciler := deInRecoveryFixture(t)
+			if tt.mutate != nil {
+				tt.mutate(dataExport)
+				require.NoError(t, fakeClient.Status().Update(context.Background(), dataExport))
+			}
+
+			_, err := reconciler.Reconcile(context.Background(), deRequest)
+			require.NoError(t, err)
+
+			got := &dev1alpha1.DataExport{}
+			require.NoError(t, fakeClient.Get(context.Background(), deRequest.NamespacedName, got))
+
+			assert.Equal(t, string(common.CleanupReasonExportPVCPostRebindLost), got.Status.CleanupReason,
+				"the discriminator must survive until the recovery actually completes")
+			assert.False(t, common.Phase(got.Status.Phase).IsTerminal(),
+				"an object owing recovery must stay non-terminal, phase=%s", got.Status.Phase)
+			assert.Nil(t, got.Status.CompletionTimestamp)
+			assert.Contains(t, got.Finalizers, dev1alpha1.StorageManagerFinalizerName,
+				"expiry teardown must not have run and dropped the finalizer")
+
+			ready := common.GetCondition(got.Status.Conditions, common.ConditionReady)
+			require.NotNil(t, ready)
+			assert.Equal(t, string(common.ReasonCleanupBlocked), ready.Reason,
+				"the recovery it owes is what the object reports on, not expiry")
+			assert.Contains(t, ready.Message, "B1", "and it says what is holding the recovery up")
+		})
+	}
+}
+
+// TestReconcile_DeletionWinsOverRecovery keeps deletion at the top of the branch order and holds it to the
+// same contract as every other path: the object is released only once the teardown is actually done. A
+// deletion that dropped the finalizer while a pod still held the volume would leave nothing behind to
+// bring that volume home. Completion of each path is covered by
+// TestTeardown_EveryEntryObeysTheSameContract.
+func TestReconcile_DeletionWinsOverRecovery(t *testing.T) {
+	dataExport, fakeClient, reconciler := deInRecoveryFixture(t)
+	now := metav1.Now()
+	dataExport.DeletionTimestamp = &now
+	require.NoError(t, fakeClient.Delete(context.Background(), dataExport))
+
+	_, err := reconciler.Reconcile(context.Background(), deRequest)
+	require.NoError(t, err)
+
+	got := &dev1alpha1.DataExport{}
+	require.NoError(t, fakeClient.Get(context.Background(), deRequest.NamespacedName, got))
+	assert.Contains(t, got.Finalizers, dev1alpha1.StorageManagerFinalizerName,
+		"the object may not be released while a consumer still holds the volume")
+	ready := common.GetCondition(got.Status.Conditions, common.ConditionReady)
+	require.NotNil(t, ready)
+	assert.Equal(t, string(common.ReasonCleanupBlocked), ready.Reason)
+}
+
+// TestReconcile_TerminalWithoutRecoveryStaysInert is the regression guard for objects that owe nothing:
+// the new branch must not wake up a settled terminal DataExport.
+func TestReconcile_TerminalWithoutRecoveryStaysInert(t *testing.T) {
+	dataExport, fakeClient, reconciler := deInRecoveryFixture(t)
+	dataExport.Status.CleanupReason = ""
+	dataExport.Status.Phase = string(common.PhaseFailed)
+	stamped := metav1.NewTime(time.Now().Add(-time.Hour))
+	dataExport.Status.CompletionTimestamp = &stamped
+	require.NoError(t, fakeClient.Status().Update(context.Background(), dataExport))
+
+	_, err := reconciler.Reconcile(context.Background(), deRequest)
+	require.NoError(t, err)
+
+	got := &dev1alpha1.DataExport{}
+	require.NoError(t, fakeClient.Get(context.Background(), deRequest.NamespacedName, got))
+	assert.Equal(t, string(common.PhaseFailed), got.Status.Phase)
+	require.NotNil(t, got.Status.CompletionTimestamp)
+	assert.Equal(t, stamped.Time.Unix(), got.Status.CompletionTimestamp.Time.Unix(), "retention clock must not restart")
+	assert.Contains(t, got.Finalizers, dev1alpha1.StorageManagerFinalizerName)
+}
+
 // TestReconcile_ClientGetError tests error handling when getting resource fails
 func TestReconcile_ClientGetError(t *testing.T) {
 	// Build a scheme without registering DataExport types to force a non-NotFound error from client.Get.
@@ -554,6 +700,15 @@ func makeFullAnnotations() map[string]string {
 	}
 }
 
+func withUIDAnnotations(dataExportUID, userPVCUID types.UID) map[string]string {
+	return withAnnotations(map[string]*string{
+		dev1alpha1.AnnotationDataExportUIDKey: ptrTo(string(dataExportUID)),
+		dev1alpha1.AnnotationUserPVCUIDKey:    ptrTo(string(userPVCUID)),
+	})
+}
+
+func ptrTo[T any](v T) *T { return &v }
+
 func withAnnotations(mods map[string]*string) map[string]string {
 	result := makeFullAnnotations()
 	for k, v := range mods {
@@ -573,6 +728,10 @@ func assertPVExportMetadataRemoved(t *testing.T, pv *corev1.PersistentVolume) {
 	for key := range makeFullAnnotations() {
 		_, exists := pv.Annotations[key]
 		assert.False(t, exists, "annotation %s should be removed", key)
+	}
+	for _, key := range []string{dev1alpha1.AnnotationDataExportUIDKey, dev1alpha1.AnnotationUserPVCUIDKey} {
+		_, exists := pv.Annotations[key]
+		assert.False(t, exists, "takeover identity %s must not outlive the takeover", key)
 	}
 	_, exists := pv.Labels[dev1alpha1.LabelPVDataExporter]
 	assert.False(t, exists, "label %s should be removed", dev1alpha1.LabelPVDataExporter)
@@ -926,7 +1085,10 @@ func TestParsePVRecoveryInfo(t *testing.T) {
 		pvLabels      map[string]string
 		deNS          string
 		deName        string
+		expectDEUID   types.UID
+		expectPVCUID  types.UID
 		wantErr       bool
+		wantConflict  bool
 		errContains   string
 	}{
 		{
@@ -935,6 +1097,94 @@ func TestParsePVRecoveryInfo(t *testing.T) {
 			pvLabels:      correctLabel,
 			deNS:          dataExportNamespace,
 			deName:        dataExportName,
+		},
+		{
+			// Legacy takeover: the export was provisioned before the UID model existed. Absence of both
+			// annotations is not corruption, so the parse stays silent and the old flow keeps working.
+			name:          "Legacy PV without UID annotations - success",
+			pvAnnotations: makeFullAnnotations(),
+			pvLabels:      correctLabel,
+			deNS:          dataExportNamespace,
+			deName:        dataExportName,
+			expectDEUID:   testDataExportUID,
+			expectPVCUID:  testUserPVCUID,
+		},
+		{
+			name:          "Matching UIDs - success",
+			pvAnnotations: withUIDAnnotations(testDataExportUID, testUserPVCUID),
+			pvLabels:      correctLabel,
+			deNS:          dataExportNamespace,
+			deName:        dataExportName,
+			expectDEUID:   testDataExportUID,
+			expectPVCUID:  testUserPVCUID,
+		},
+		{
+			// The name check cannot see this: a DataExport deleted and recreated under the same name is a
+			// different object, and adopting the PV its predecessor took over would hide a live takeover.
+			name:          "PV taken over by a same-named predecessor DataExport - error",
+			pvAnnotations: withUIDAnnotations("older-data-export-uid", testUserPVCUID),
+			pvLabels:      correctLabel,
+			deNS:          dataExportNamespace,
+			deName:        dataExportName,
+			expectDEUID:   testDataExportUID,
+			expectPVCUID:  testUserPVCUID,
+			wantErr:       true,
+			wantConflict:  true,
+			errContains:   dev1alpha1.AnnotationDataExportUIDKey,
+		},
+		{
+			// The user's claim was recreated under the same name: the PV records the claim we may return
+			// the volume to, and it is no longer the one standing in front of us.
+			name:          "Source PVC recreated under the same name - error",
+			pvAnnotations: withUIDAnnotations(testDataExportUID, "older-user-pvc-uid"),
+			pvLabels:      correctLabel,
+			deNS:          dataExportNamespace,
+			deName:        dataExportName,
+			expectDEUID:   testDataExportUID,
+			expectPVCUID:  testUserPVCUID,
+			wantErr:       true,
+			wantConflict:  true,
+			errContains:   dev1alpha1.AnnotationUserPVCUIDKey,
+		},
+		{
+			// The orphan sweep works from a deleted parent and can prove no UID; it must still be able to
+			// read the PV it is cleaning up.
+			name:          "Caller without expectations skips the UID checks - success",
+			pvAnnotations: withUIDAnnotations("some-data-export-uid", "some-user-pvc-uid"),
+			pvLabels:      correctLabel,
+			deNS:          dataExportNamespace,
+			deName:        dataExportName,
+		},
+		{
+			// Half an identity is worse than none: it was written by a controller that knows the UID
+			// model, so something dropped it. That is corruption, not a pre-UID takeover, and must not
+			// silently fall through the legacy door.
+			name: "Only the DataExport UID survived - corrupted, not legacy",
+			pvAnnotations: withAnnotations(map[string]*string{
+				dev1alpha1.AnnotationDataExportUIDKey: ptrTo(string(testDataExportUID)),
+			}),
+			pvLabels:     correctLabel,
+			deNS:         dataExportNamespace,
+			deName:       dataExportName,
+			expectDEUID:  testDataExportUID,
+			expectPVCUID: testUserPVCUID,
+			wantErr:      true,
+			wantConflict: true,
+			errContains:  "incomplete takeover identity",
+		},
+		{
+			name: "Only the source PVC UID survived - corrupted, not legacy",
+			pvAnnotations: withAnnotations(map[string]*string{
+				dev1alpha1.AnnotationUserPVCUIDKey: ptrTo(string(testUserPVCUID)),
+			}),
+			pvLabels:     correctLabel,
+			deNS:         dataExportNamespace,
+			deName:       dataExportName,
+			expectDEUID:  testDataExportUID,
+			expectPVCUID: testUserPVCUID,
+			wantErr:      true,
+			wantConflict: true,
+			errContains:  "incomplete takeover identity",
 		},
 		{
 			name:          "Label present but wrong value - error",
@@ -1013,10 +1263,18 @@ func TestParsePVRecoveryInfo(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			pv := createTestPV("test-pv", tt.pvAnnotations, tt.pvLabels)
-			info, err := parsePVRecoveryInfo(pv, tt.deNS, tt.deName)
+			info, err := parsePVRecoveryInfo(pv, pvOwnerExpectation{
+				DataExportNamespace: tt.deNS,
+				DataExportName:      tt.deName,
+				DataExportUID:       tt.expectDEUID,
+				SourcePVCUID:        tt.expectPVCUID,
+			})
 
 			if tt.wantErr {
 				require.Error(t, err)
+				if tt.wantConflict {
+					require.ErrorIs(t, err, ErrPVConflict, "an identity mismatch is a takeover conflict")
+				}
 				if tt.errContains != "" {
 					assert.Contains(t, err.Error(), tt.errContains)
 				}
@@ -1064,6 +1322,7 @@ func TestPatchPVLabelAnnotationsClaimRef(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      dataExportName,
 			Namespace: dataExportNamespace,
+			UID:       testDataExportUID,
 		},
 		Spec: dev1alpha1.DataExportSpec{
 			TargetRef: dev1alpha1.DataExportTargetRefSpec{
@@ -1072,10 +1331,14 @@ func TestPatchPVLabelAnnotationsClaimRef(t *testing.T) {
 		},
 	}
 
+	userPVC := &corev1.PersistentVolumeClaim{
+		ObjectMeta: metav1.ObjectMeta{Name: testUserPVCName, Namespace: dataExportNamespace, UID: testUserPVCUID},
+	}
+
 	fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(pv).Build()
 	reconciler := createTestReconciler(fakeClient, fakeClient, createTestConfig())
 
-	err := reconciler.patchPVLabelAnnotationsClaimRef(context.Background(), pv, exportPVC, dataExport, testNames, testUserPVCName)
+	err := reconciler.patchPVLabelAnnotationsClaimRef(context.Background(), pv, exportPVC, dataExport, testNames, userPVC, true)
 	require.NoError(t, err)
 
 	// Verify PV was updated
@@ -1103,6 +1366,339 @@ func TestPatchPVLabelAnnotationsClaimRef(t *testing.T) {
 
 	// Check ReclaimPolicy changed to Retain
 	assert.Equal(t, corev1.PersistentVolumeReclaimRetain, updatedPV.Spec.PersistentVolumeReclaimPolicy)
+
+	// The takeover identity: names alone cannot tell a recreated object from the original one.
+	assert.Equal(t, string(testDataExportUID), updatedPV.Annotations[dev1alpha1.AnnotationDataExportUIDKey])
+	assert.Equal(t, string(testUserPVCUID), updatedPV.Annotations[dev1alpha1.AnnotationUserPVCUIDKey])
+}
+
+// deTakeoverFixture builds the three live objects of a PVC-target takeover: the user's claim, the
+// controller-owned export claim and the PV between them.
+func deTakeoverFixture() (*dev1alpha1.DataExport, *corev1.PersistentVolume, *corev1.PersistentVolumeClaim, *corev1.PersistentVolumeClaim) {
+	dataExport := &dev1alpha1.DataExport{
+		ObjectMeta: metav1.ObjectMeta{Name: dataExportName, Namespace: dataExportNamespace, UID: testDataExportUID},
+		Spec: dev1alpha1.DataExportSpec{
+			TargetRef: dev1alpha1.DataExportTargetRefSpec{Kind: dev1alpha1.KindPVC, Name: testUserPVCName},
+		},
+	}
+	pv := &corev1.PersistentVolume{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-pv", UID: testPVUID, ResourceVersion: "1"},
+		Spec:       corev1.PersistentVolumeSpec{PersistentVolumeReclaimPolicy: corev1.PersistentVolumeReclaimDelete},
+	}
+	userPVC := &corev1.PersistentVolumeClaim{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: testUserPVCName, Namespace: dataExportNamespace, UID: testUserPVCUID,
+			Annotations: map[string]string{},
+		},
+		Spec: corev1.PersistentVolumeClaimSpec{VolumeName: pv.Name},
+	}
+	// Before the takeover the PV is still bound to the user's claim; that binding is what proves the
+	// claim in hand is the one the volume is being taken from.
+	pv.Spec.ClaimRef = &corev1.ObjectReference{
+		Namespace: userPVC.Namespace, Name: userPVC.Name, UID: userPVC.UID,
+	}
+	exportPVC := &corev1.PersistentVolumeClaim{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: testNames.ExportPVCName, Namespace: dataExportNamespace, UID: testExportPVCUID, ResourceVersion: "1",
+		},
+		Spec: corev1.PersistentVolumeClaimSpec{VolumeName: pv.Name},
+	}
+	return dataExport, pv, userPVC, exportPVC
+}
+
+func assertRecordedTakeover(t *testing.T, de *dev1alpha1.DataExport) {
+	t.Helper()
+	require.NotNil(t, de.Status.Recovery, "the takeover identity must be persisted with the export status")
+	assert.Equal(t, string(testUserPVCUID), de.Status.Recovery.SourcePVCUID)
+	assert.Equal(t, string(testExportPVCUID), de.Status.Recovery.ExportPVCUID)
+	assert.Equal(t, "test-pv", de.Status.Recovery.PVName)
+	assert.Equal(t, string(testPVUID), de.Status.Recovery.PVUID)
+}
+
+// TestEnsureExportPVReady_RecordsTakeoverIdentity is the point of step 3: before the volume changes
+// hands, the export records which objects it took it from. Without this the controller cannot later
+// prove that a same-named claim is the one it may give the volume back to.
+func TestEnsureExportPVReady_RecordsTakeoverIdentity(t *testing.T) {
+	dataExport, pv, userPVC, exportPVC := deTakeoverFixture()
+
+	fakeClient := newFakeClientWithStatus(t, setupTestScheme(), pv, userPVC, exportPVC)
+	reconciler := createTestReconciler(fakeClient, fakeClient, createTestConfig())
+
+	require.NoError(t, reconciler.ensureExportPVReady(context.Background(), pv, exportPVC, testNames, dataExport, testUserPVCName))
+
+	assertRecordedTakeover(t, dataExport)
+
+	updatedPV := &corev1.PersistentVolume{}
+	require.NoError(t, fakeClient.Get(context.Background(), types.NamespacedName{Name: pv.Name}, updatedPV))
+	assert.Equal(t, string(testDataExportUID), updatedPV.Annotations[dev1alpha1.AnnotationDataExportUIDKey])
+	assert.Equal(t, string(testUserPVCUID), updatedPV.Annotations[dev1alpha1.AnnotationUserPVCUIDKey])
+}
+
+// TestEnsureExportPVReady_RepairsIdentityAfterRestart covers the crash window between the PV patch and
+// the status write: the PV is already fully prepared, so the patch path is skipped, and the identity
+// would stay missing in status forever if only the patch recorded it.
+func TestEnsureExportPVReady_RepairsIdentityAfterRestart(t *testing.T) {
+	dataExport, pv, userPVC, exportPVC := deTakeoverFixture()
+	pv.Annotations = withUIDAnnotations(testDataExportUID, testUserPVCUID)
+	pv.Labels = map[string]string{dev1alpha1.LabelPVDataExporter: "true"}
+	pv.Spec.PersistentVolumeReclaimPolicy = corev1.PersistentVolumeReclaimRetain
+	pv.Spec.ClaimRef = &corev1.ObjectReference{
+		Namespace: exportPVC.Namespace, Name: exportPVC.Name, UID: exportPVC.UID,
+	}
+
+	fakeClient := newFakeClientWithStatus(t, setupTestScheme(), pv, userPVC, exportPVC)
+	reconciler := createTestReconciler(fakeClient, fakeClient, createTestConfig())
+
+	require.NoError(t, reconciler.ensureExportPVReady(context.Background(), pv, exportPVC, testNames, dataExport, testUserPVCName))
+
+	assertRecordedTakeover(t, dataExport)
+}
+
+// TestEnsureExportPVReady_RefusesForeignTakeover: a PV carrying somebody else's identity belongs to a
+// takeover we know nothing about. Neither the PV nor our own status may be written in that case —
+// recording the live identity would put into status exactly the takeover the PV just rejected, and
+// status is the write-once evidence recovery will later trust.
+func TestEnsureExportPVReady_RefusesForeignTakeover(t *testing.T) {
+	for _, tt := range []struct {
+		name        string
+		annotations map[string]string
+		survives    string
+		key         string
+	}{
+		{
+			name:        "PV taken over by a same-named predecessor DataExport",
+			annotations: withUIDAnnotations("older-data-export-uid", testUserPVCUID),
+			survives:    "older-data-export-uid",
+			key:         dev1alpha1.AnnotationDataExportUIDKey,
+		},
+		{
+			name:        "PV records a source claim that was since recreated",
+			annotations: withUIDAnnotations(testDataExportUID, "older-user-pvc-uid"),
+			survives:    "older-user-pvc-uid",
+			key:         dev1alpha1.AnnotationUserPVCUIDKey,
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			dataExport, pv, userPVC, exportPVC := deTakeoverFixture()
+			pv.Annotations = tt.annotations
+			pv.Labels = map[string]string{dev1alpha1.LabelPVDataExporter: "true"}
+
+			fakeClient := newFakeClientWithStatus(t, setupTestScheme(), pv, userPVC, exportPVC)
+			reconciler := createTestReconciler(fakeClient, fakeClient, createTestConfig())
+
+			err := reconciler.ensureExportPVReady(context.Background(), pv, exportPVC, testNames, dataExport, testUserPVCName)
+			require.ErrorIs(t, err, ErrPVConflict)
+
+			assert.Nil(t, dataExport.Status.Recovery,
+				"a rejected takeover must not be recorded as if it had happened")
+
+			updatedPV := &corev1.PersistentVolume{}
+			require.NoError(t, fakeClient.Get(context.Background(), types.NamespacedName{Name: pv.Name}, updatedPV))
+			assert.Equal(t, tt.survives, updatedPV.Annotations[tt.key], "the existing identity must survive")
+		})
+	}
+}
+
+// TestReconcile_ForeignTakeoverPersistsNoIdentity closes the loop through the deferred status write: the
+// reconcile fails, and the status write that runs on the way out must not carry a takeover record for a
+// volume this export was refused.
+func TestReconcile_ForeignTakeoverPersistsNoIdentity(t *testing.T) {
+	dataExport, pv, userPVC, _ := deTakeoverFixture()
+	dataExport.Status.Conditions = []metav1.Condition{{
+		Type: string(common.ConditionReady), Status: metav1.ConditionFalse,
+		Reason: string(common.ReasonPending), LastTransitionTime: metav1.NewTime(time.Now()),
+	}}
+	pv.Annotations = withUIDAnnotations("older-data-export-uid", testUserPVCUID)
+	pv.Labels = map[string]string{dev1alpha1.LabelPVDataExporter: "true"}
+	pv.Spec.ClaimRef = &corev1.ObjectReference{
+		Namespace: userPVC.Namespace, Name: userPVC.Name, UID: userPVC.UID,
+	}
+	userPVC.Spec.AccessModes = []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce}
+	userPVC.Spec.Resources = corev1.VolumeResourceRequirements{
+		Requests: corev1.ResourceList{corev1.ResourceStorage: resource.MustParse("1Gi")},
+	}
+	volumeMode := corev1.PersistentVolumeFilesystem
+	userPVC.Spec.VolumeMode = &volumeMode
+	userPVC.Status.Phase = corev1.ClaimBound
+
+	scheme := setupTestScheme()
+	require.NoError(t, storagev1.SchemeBuilder.AddToScheme(scheme))
+
+	fakeClient := newFakeClientWithStatus(t, scheme, dataExport, pv, userPVC)
+	reconciler := createTestReconciler(fakeClient, fakeClient, createTestConfig())
+
+	_, err := reconciler.Reconcile(context.Background(), deRequest)
+	require.ErrorIs(t, err, ErrPVConflict)
+	// The name-based owner check passes here (the PV names this very DataExport), so the conflict can
+	// only have come from the UID comparison.
+	assert.Contains(t, err.Error(), dev1alpha1.AnnotationDataExportUIDKey)
+
+	got := &dev1alpha1.DataExport{}
+	require.NoError(t, fakeClient.Get(context.Background(), deRequest.NamespacedName, got))
+	assert.Nil(t, got.Status.Recovery, "no takeover record may reach the API for a refused takeover")
+	assert.False(t, common.Phase(got.Status.Phase).IsTerminal())
+}
+
+// TestEnsureExportPVReady_RefusesToRepointRecordedIdentity: once recorded, the identity is what recovery
+// will trust. Silently refreshing it to whatever is live now would make every later comparison agree
+// with itself and the loss/mismatch detection meaningless.
+func TestEnsureExportPVReady_RefusesToRepointRecordedIdentity(t *testing.T) {
+	dataExport, pv, userPVC, exportPVC := deTakeoverFixture()
+	dataExport.Status.Recovery = &dev1alpha1.RecoveryStatus{
+		SourcePVCUID: string(testUserPVCUID),
+		ExportPVCUID: "a-previous-export-claim-uid",
+		PVName:       pv.Name,
+		PVUID:        string(testPVUID),
+	}
+
+	fakeClient := newFakeClientWithStatus(t, setupTestScheme(), pv, userPVC, exportPVC)
+	reconciler := createTestReconciler(fakeClient, fakeClient, createTestConfig())
+
+	err := reconciler.ensureExportPVReady(context.Background(), pv, exportPVC, testNames, dataExport, testUserPVCName)
+	require.ErrorIs(t, err, ErrPVConflict)
+	assert.Equal(t, "a-previous-export-claim-uid", dataExport.Status.Recovery.ExportPVCUID,
+		"the recorded identity must not be overwritten by the live one")
+}
+
+// TestReconcile_PersistsTakeoverIdentity walks the whole provisioning path once: the identity is only
+// useful if it survives the reconcile, i.e. reaches the API through the deferred status write.
+func TestReconcile_PersistsTakeoverIdentity(t *testing.T) {
+	dataExport, pv, userPVC, _ := deTakeoverFixture()
+	dataExport.Status.Conditions = []metav1.Condition{{
+		Type: string(common.ConditionReady), Status: metav1.ConditionFalse,
+		Reason: string(common.ReasonPending), LastTransitionTime: metav1.NewTime(time.Now()),
+	}}
+	userPVC.Spec.AccessModes = []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce}
+	userPVC.Spec.Resources = corev1.VolumeResourceRequirements{
+		Requests: corev1.ResourceList{corev1.ResourceStorage: resource.MustParse("1Gi")},
+	}
+	volumeMode := corev1.PersistentVolumeFilesystem
+	userPVC.Spec.VolumeMode = &volumeMode
+	userPVC.Status.Phase = corev1.ClaimBound
+	pv.Spec.ClaimRef = &corev1.ObjectReference{
+		Namespace: userPVC.Namespace, Name: userPVC.Name, UID: userPVC.UID,
+	}
+
+	// The user PVC detach checks for live VolumeAttachments before taking the volume over.
+	scheme := setupTestScheme()
+	require.NoError(t, storagev1.SchemeBuilder.AddToScheme(scheme))
+
+	// A ready exporter Deployment keeps this test on the takeover path: creating one would block on a
+	// five-minute rollout wait that says nothing about the identity record.
+	exportDeploy := &appsv1.Deployment{
+		ObjectMeta: metav1.ObjectMeta{Name: testNames.DeployName, Namespace: createTestConfig().ControllerNamespace},
+		Spec:       appsv1.DeploymentSpec{Replicas: common.Int32Ptr(1)},
+		Status:     appsv1.DeploymentStatus{Replicas: 1, ReadyReplicas: 1, AvailableReplicas: 1},
+	}
+	dataExport.Status.ServerState = string(common.ServerStateReady)
+
+	fakeClient := newFakeClientWithStatus(t, scheme, dataExport, pv, userPVC, exportDeploy)
+	reconciler := createTestReconciler(fakeClient, fakeClient, createTestConfig())
+
+	_, err := reconciler.Reconcile(context.Background(), deRequest)
+	require.NoError(t, err)
+
+	got := &dev1alpha1.DataExport{}
+	require.NoError(t, fakeClient.Get(context.Background(), deRequest.NamespacedName, got))
+	require.NotNil(t, got.Status.Recovery, "the takeover identity must be persisted, not only computed")
+	assert.Equal(t, string(testUserPVCUID), got.Status.Recovery.SourcePVCUID)
+	assert.Equal(t, pv.Name, got.Status.Recovery.PVName)
+	assert.Equal(t, string(testPVUID), got.Status.Recovery.PVUID)
+	// ExportPVCUID is not asserted here: the export claim is created during this reconcile and the fake
+	// client, unlike an API server, assigns no UID on create. TestEnsureExportPVReady_RecordsTakeoverIdentity
+	// covers it against a claim that already has one.
+
+	updatedPV := &corev1.PersistentVolume{}
+	require.NoError(t, fakeClient.Get(context.Background(), types.NamespacedName{Name: pv.Name}, updatedPV))
+	assert.Equal(t, string(testDataExportUID), updatedPV.Annotations[dev1alpha1.AnnotationDataExportUIDKey])
+	assert.Equal(t, string(testUserPVCUID), updatedPV.Annotations[dev1alpha1.AnnotationUserPVCUIDKey])
+}
+
+// TestEnsureExportPVReady_LegacyTakeoverRecordsNothing is the legacy contract: an export provisioned by
+// the previous controller is already past the rebind, so the only thing linking it to a source claim is
+// a name. Recording an identity from whatever claim currently holds that name would manufacture evidence
+// recovery is meant to verify, so the export keeps running with no identity at all.
+func TestEnsureExportPVReady_LegacyTakeoverRecordsNothing(t *testing.T) {
+	for _, tt := range []struct {
+		name        string
+		mutate      func(*corev1.PersistentVolume)
+		wantPatched bool
+	}{
+		{name: "PV already in export-ready shape"},
+		{
+			// Drift repair still runs for a legacy export; it just must not invent the UID pair.
+			name: "PV drifted and gets repaired",
+			mutate: func(pv *corev1.PersistentVolume) {
+				pv.Spec.PersistentVolumeReclaimPolicy = corev1.PersistentVolumeReclaimDelete
+			},
+			wantPatched: true,
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			dataExport, pv, userPVC, exportPVC := deTakeoverFixture()
+			pv.Annotations = makeFullAnnotations() // pre-UID controller: no identity annotations at all
+			pv.Labels = map[string]string{dev1alpha1.LabelPVDataExporter: "true"}
+			pv.Spec.PersistentVolumeReclaimPolicy = corev1.PersistentVolumeReclaimRetain
+			pv.Spec.ClaimRef = &corev1.ObjectReference{
+				Namespace: exportPVC.Namespace, Name: exportPVC.Name, UID: exportPVC.UID,
+			}
+			if tt.mutate != nil {
+				tt.mutate(pv)
+			}
+
+			fakeClient := newFakeClientWithStatus(t, setupTestScheme(), pv, userPVC, exportPVC)
+			reconciler := createTestReconciler(fakeClient, fakeClient, createTestConfig())
+
+			require.NoError(t, reconciler.ensureExportPVReady(context.Background(), pv, exportPVC, testNames, dataExport, testUserPVCName))
+			assert.Nil(t, dataExport.Status.Recovery, "a legacy takeover has no provable identity to record")
+
+			updatedPV := &corev1.PersistentVolume{}
+			require.NoError(t, fakeClient.Get(context.Background(), types.NamespacedName{Name: pv.Name}, updatedPV))
+			assert.NotContains(t, updatedPV.Annotations, dev1alpha1.AnnotationDataExportUIDKey)
+			assert.NotContains(t, updatedPV.Annotations, dev1alpha1.AnnotationUserPVCUIDKey)
+			if tt.wantPatched {
+				assert.Equal(t, corev1.PersistentVolumeReclaimRetain, updatedPV.Spec.PersistentVolumeReclaimPolicy,
+					"the ordinary repair must still happen")
+			}
+		})
+	}
+}
+
+// TestEnsureExportPVReady_UnboundPVIsNotAProof closes the one way a name could still become an identity:
+// a PV that lost its claimRef, and a claim recreated under the old name that points back at it. Nothing
+// there shows the claim ever owned the volume, so the export runs on unproven rather than recording the
+// impostor's UID and presenting it as verified afterwards.
+func TestEnsureExportPVReady_UnboundPVIsNotAProof(t *testing.T) {
+	dataExport, pv, userPVC, exportPVC := deTakeoverFixture()
+	pv.Annotations = makeFullAnnotations()
+	pv.Labels = map[string]string{dev1alpha1.LabelPVDataExporter: "true"}
+	pv.Spec.PersistentVolumeReclaimPolicy = corev1.PersistentVolumeReclaimRetain
+	pv.Spec.ClaimRef = nil
+	userPVC.Spec.VolumeName = pv.Name
+
+	fakeClient := newFakeClientWithStatus(t, setupTestScheme(), pv, userPVC, exportPVC)
+	reconciler := createTestReconciler(fakeClient, fakeClient, createTestConfig())
+
+	require.NoError(t, reconciler.ensureExportPVReady(context.Background(), pv, exportPVC, testNames, dataExport, testUserPVCName))
+	assert.Nil(t, dataExport.Status.Recovery)
+
+	updatedPV := &corev1.PersistentVolume{}
+	require.NoError(t, fakeClient.Get(context.Background(), types.NamespacedName{Name: pv.Name}, updatedPV))
+	assert.NotContains(t, updatedPV.Annotations, dev1alpha1.AnnotationDataExportUIDKey)
+	assert.NotContains(t, updatedPV.Annotations, dev1alpha1.AnnotationUserPVCUIDKey)
+}
+
+// TestEnsureExportPVReady_SnapshotTargetRecordsNothing: a snapshot export provisions its own volume and
+// takes nothing away from the user, so there is nothing to give back and no identity to record.
+func TestEnsureExportPVReady_SnapshotTargetRecordsNothing(t *testing.T) {
+	dataExport, pv, _, exportPVC := deTakeoverFixture()
+	snapshotNames := common.NewNames(dev1alpha1.KindVolumeSnapshot, "snap", dataExportNamespace, dataExportName)
+
+	fakeClient := newFakeClientWithStatus(t, setupTestScheme(), pv, exportPVC)
+	reconciler := createTestReconciler(fakeClient, fakeClient, createTestConfig())
+
+	require.NoError(t, reconciler.ensureExportPVReady(context.Background(), pv, exportPVC, snapshotNames, dataExport, ""))
+	assert.Nil(t, dataExport.Status.Recovery)
 }
 
 func TestRestoreOriginalPVState(t *testing.T) {
@@ -1174,83 +1770,392 @@ func TestRestoreOriginalPVState(t *testing.T) {
 	}
 }
 
-func TestRecoverOrphanedUserPVC_PVCTarget(t *testing.T) {
-	scheme := setupTestScheme()
-	_ = corev1.SchemeBuilder.AddToScheme(scheme)
+// orphanFixture builds what the sweep actually finds: a volume still held by the export claim, marked and
+// annotated with the identity of a DataExport that no longer exists, and the user's claim waiting for it.
+func orphanFixture() (*corev1.PersistentVolume, *corev1.PersistentVolumeClaim) {
+	annotations := withUIDAnnotations(testDataExportUID, testUserPVCUID)
+	annotations[dev1alpha1.AnnotationOriginalReclaimPolicyKey] = string(corev1.PersistentVolumeReclaimDelete)
+	annotations[dev1alpha1.AnnotationUserPVCNamespaceKey] = dataExportNamespace
+	annotations[dev1alpha1.AnnotationUserPVCNameKey] = testUserPVCName
+	annotations[dev1alpha1.AnnotationStorageManagerNamespaceKey] = dataExportNamespace
+	annotations[dev1alpha1.AnnotationStorageManagerNameKey] = dataExportName
+	annotations[dev1alpha1.AnnotationPVTargetKindShortKey] = testNames.TargetKindShort
+	annotations[dev1alpha1.AnnotationPVHashSuffixKey] = testNames.HashSuffix
 
-	userPVC := &corev1.PersistentVolumeClaim{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:            "user-pvc",
-			Namespace:       "test-ns",
-			UID:             "user-pvc-uid",
-			ResourceVersion: "1",
-			Annotations: map[string]string{
-				DataExportInProgressKey: "true",
-			},
-			Finalizers: []string{dev1alpha1.StorageManagerFinalizerName},
-		},
-		Spec: corev1.PersistentVolumeClaimSpec{
-			VolumeName: "test-pv",
-		},
-		Status: corev1.PersistentVolumeClaimStatus{
-			Phase: corev1.ClaimBound,
-		},
-	}
-
-	// PV is currently bound to export PVC
 	pv := &corev1.PersistentVolume{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:            "test-pv",
-			ResourceVersion: "1",
-			Annotations:     makeFullAnnotations(),
-			Labels:          map[string]string{dev1alpha1.LabelPVDataExporter: "true"},
+			Name: "test-pv", ResourceVersion: "1", UID: testPVUID,
+			Annotations: annotations,
+			Labels:      map[string]string{dev1alpha1.LabelPVDataExporter: "true"},
 		},
 		Spec: corev1.PersistentVolumeSpec{
 			PersistentVolumeReclaimPolicy: corev1.PersistentVolumeReclaimRetain,
 			ClaimRef: &corev1.ObjectReference{
-				Name:      "export-pvc",
-				Namespace: "controller-ns",
-				UID:       "export-pvc-uid",
+				Namespace: testExportPVCNamespace, Name: testNames.ExportPVCName, UID: testExportPVCUID,
 			},
 		},
+		Status: corev1.PersistentVolumeStatus{Phase: corev1.VolumeBound},
+	}
+	userPVC := &corev1.PersistentVolumeClaim{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: testUserPVCName, Namespace: dataExportNamespace, UID: testUserPVCUID, ResourceVersion: "1",
+			Annotations: map[string]string{DataExportInProgressKey: "true"},
+			Finalizers:  []string{dev1alpha1.StorageManagerFinalizerName},
+		},
+		Spec:   corev1.PersistentVolumeClaimSpec{VolumeName: "test-pv"},
+		Status: corev1.PersistentVolumeClaimStatus{Phase: corev1.ClaimBound},
+	}
+	return pv, userPVC
+}
+
+// TestRemoveOrphanResources_FindsTheInfrastructureThatExists: with the parent gone, the only trustworthy
+// account of what was created is the suffix recorded on the volume. A VirtualDisk export is where this
+// bites: what was exported is the disk, while the claim the volume goes back to is the disk's backing PVC
+// under an entirely different name. The sweep must not identify export infrastructure through that claim.
+func TestRemoveOrphanResources_FindsTheInfrastructureThatExists(t *testing.T) {
+	const backingPVCName = "disk-a-pvc-9f2c1"
+
+	// The export was made for a VirtualDisk, so its resources are named from the DataExport's identity
+	// with the vd kind — never from the backing claim.
+	exportNames := common.NewNamesFromShort(dev1alpha1.KindVirtualDiskShort, "disk-a", dataExportNamespace, dataExportName)
+
+	pv, _ := orphanFixture()
+	pv.Annotations[dev1alpha1.AnnotationPVTargetKindShortKey] = exportNames.TargetKindShort
+	pv.Annotations[dev1alpha1.AnnotationPVHashSuffixKey] = exportNames.HashSuffix
+	pv.Annotations[dev1alpha1.AnnotationUserPVCNameKey] = backingPVCName
+	pv.Spec.ClaimRef = &corev1.ObjectReference{
+		Namespace: testExportPVCNamespace, Name: exportNames.ExportPVCName, UID: testExportPVCUID,
 	}
 
-	fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(pv, userPVC).Build()
+	backingPVC := &corev1.PersistentVolumeClaim{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: backingPVCName, Namespace: dataExportNamespace, UID: testUserPVCUID, ResourceVersion: "1",
+			Annotations: map[string]string{DataExportInProgressKey: "true"},
+			Finalizers:  []string{dev1alpha1.StorageManagerFinalizerName},
+		},
+		Spec:   corev1.PersistentVolumeClaimSpec{VolumeName: pv.Name},
+		Status: corev1.PersistentVolumeClaimStatus{Phase: corev1.ClaimBound},
+	}
+	exportPVC := &corev1.PersistentVolumeClaim{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: exportNames.ExportPVCName, Namespace: testExportPVCNamespace, UID: testExportPVCUID, ResourceVersion: "1",
+		},
+		Spec: corev1.PersistentVolumeClaimSpec{VolumeName: pv.Name},
+	}
+	exportDeploy := &appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{
+		Name: exportNames.DeployName, Namespace: testExportPVCNamespace,
+		Labels: map[string]string{dev1alpha1.LabelApplicationKey: dev1alpha1.LabelDataExportValue},
+	}}
+	// Named as if the sweep had identified the export through the backing claim instead of the record.
+	decoy := &appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{
+		Name:      common.NewNamesFromShort(dev1alpha1.KindVirtualDiskShort, "", dataExportNamespace, backingPVCName).DeployName,
+		Namespace: testExportPVCNamespace,
+		Labels:    map[string]string{dev1alpha1.LabelApplicationKey: dev1alpha1.LabelDataExportValue},
+	}}
+
+	fakeClient := newFakeClientWithStatus(t, setupTestScheme(), pv, backingPVC, exportPVC, exportDeploy, decoy)
 	reconciler := createTestReconciler(fakeClient, fakeClient, createTestConfig())
 
-	err := reconciler.recoverOrphanedUserPVC(context.Background(), pv, "test-ns", "user-pvc", dataExportName)
+	blocked, err := reconciler.removeOrphanResources(context.Background(), dataExportNamespace, dataExportName)
 	require.NoError(t, err)
+	require.Nil(t, blocked)
 
-	// Verify PV ClaimRef now points to user PVC
+	assert.True(t, apierrors.IsNotFound(fakeClient.Get(context.Background(),
+		types.NamespacedName{Namespace: testExportPVCNamespace, Name: exportNames.DeployName}, &appsv1.Deployment{})),
+		"the deployment named by the recorded identity must go")
+	assert.True(t, apierrors.IsNotFound(fakeClient.Get(context.Background(),
+		types.NamespacedName{Namespace: testExportPVCNamespace, Name: exportNames.ExportPVCName}, &corev1.PersistentVolumeClaim{})),
+		"and so must the export claim named by it")
+	require.NoError(t, fakeClient.Get(context.Background(),
+		types.NamespacedName{Namespace: testExportPVCNamespace, Name: decoy.Name}, &appsv1.Deployment{}),
+		"nothing named after the backing claim is any of the sweep's business")
+
 	updatedPV := &corev1.PersistentVolume{}
-	err = fakeClient.Get(context.Background(), types.NamespacedName{Name: "test-pv"}, updatedPV)
-	require.NoError(t, err)
+	require.NoError(t, fakeClient.Get(context.Background(), types.NamespacedName{Name: pv.Name}, updatedPV))
 	require.NotNil(t, updatedPV.Spec.ClaimRef)
-	assert.Equal(t, "user-pvc", updatedPV.Spec.ClaimRef.Name)
-	assert.Equal(t, "test-ns", updatedPV.Spec.ClaimRef.Namespace)
+	assert.Equal(t, backingPVCName, updatedPV.Spec.ClaimRef.Name, "the volume goes back to the disk's claim")
+	assertPVExportMetadataRemoved(t, updatedPV)
+}
 
-	// Verify PV annotations/labels removed and ReclaimPolicy restored
+// TestRemoveOrphanResources_ReturnsTheVolumeToItsOwner: the parent is gone, so nobody is left to report to
+// or to hold a finalizer for — but the user's volume must still come home.
+func TestRemoveOrphanResources_ReturnsTheVolumeToItsOwner(t *testing.T) {
+	pv, userPVC := orphanFixture()
+
+	fakeClient := newFakeClientWithStatus(t, setupTestScheme(), pv, userPVC)
+	reconciler := createTestReconciler(fakeClient, fakeClient, createTestConfig())
+
+	blocked, err := reconciler.removeOrphanResources(context.Background(), dataExportNamespace, dataExportName)
+	require.NoError(t, err)
+	require.Nil(t, blocked)
+
+	updatedPV := &corev1.PersistentVolume{}
+	require.NoError(t, fakeClient.Get(context.Background(), types.NamespacedName{Name: "test-pv"}, updatedPV))
+	require.NotNil(t, updatedPV.Spec.ClaimRef)
+	assert.Equal(t, testUserPVCName, updatedPV.Spec.ClaimRef.Name)
+	assert.Equal(t, dataExportNamespace, updatedPV.Spec.ClaimRef.Namespace)
 	assertPVExportMetadataRemoved(t, updatedPV)
 	assert.Equal(t, corev1.PersistentVolumeReclaimDelete, updatedPV.Spec.PersistentVolumeReclaimPolicy)
 
-	// Verify user PVC annotations/finalizers removed
 	updatedUserPVC := &corev1.PersistentVolumeClaim{}
-	err = fakeClient.Get(context.Background(), types.NamespacedName{Name: "user-pvc", Namespace: "test-ns"}, updatedUserPVC)
-	require.NoError(t, err)
-	_, hasAnnotation := updatedUserPVC.Annotations[DataExportInProgressKey]
-	assert.False(t, hasAnnotation, "export annotation should be removed from user PVC")
+	require.NoError(t, fakeClient.Get(context.Background(),
+		types.NamespacedName{Name: testUserPVCName, Namespace: dataExportNamespace}, updatedUserPVC))
+	assert.NotContains(t, updatedUserPVC.Annotations, DataExportInProgressKey)
 	assert.NotContains(t, updatedUserPVC.Finalizers, dev1alpha1.StorageManagerFinalizerName)
 }
 
-func TestRecoverOrphanedUserPVC_SnapshotBasedTarget(t *testing.T) {
-	scheme := setupTestScheme()
-	_ = corev1.SchemeBuilder.AddToScheme(scheme)
+// TestRemoveOrphanResources_BarrierStopsBeforeTheIrreversibleStep: the sweep obeys the same barriers as
+// every other path. A pod still holding the export claim means the volume stays exactly where it is.
+func TestRemoveOrphanResources_BarrierStopsBeforeTheIrreversibleStep(t *testing.T) {
+	pv, userPVC := orphanFixture()
+	blocker := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Name: recoveryBlockerPodName, Namespace: testExportPVCNamespace},
+		Spec: corev1.PodSpec{Volumes: []corev1.Volume{{
+			Name: "data",
+			VolumeSource: corev1.VolumeSource{
+				PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{ClaimName: testNames.ExportPVCName},
+			},
+		}}},
+	}
+
+	fakeClient := newFakeClientWithStatus(t, setupTestScheme(), pv, userPVC, blocker)
+	reconciler := createTestReconciler(fakeClient, fakeClient, createTestConfig())
+
+	blocked, err := reconciler.removeOrphanResources(context.Background(), dataExportNamespace, dataExportName)
+	require.NoError(t, err, "a barrier is a state to wait on, not a failure")
+	require.NotNil(t, blocked)
+	assert.Equal(t, "B1", blocked.Name)
+
+	updatedPV := &corev1.PersistentVolume{}
+	require.NoError(t, fakeClient.Get(context.Background(), types.NamespacedName{Name: "test-pv"}, updatedPV))
+	assert.Equal(t, testNames.ExportPVCName, updatedPV.Spec.ClaimRef.Name)
+	assert.Contains(t, updatedPV.Labels, dev1alpha1.LabelPVDataExporter,
+		"the marks stay, so the next pass finds the volume again")
+}
+
+// runRecoveryOn drives the teardown for a takeover known only from the volume's own annotations, which is
+// what every pre-record export and every orphan sweep has to work from. An empty expected export UID says
+// the caller cannot prove which export owns the takeover — the orphan sweep's position.
+func runRecoveryOn(reconciler *DataexportReconciler, pvName string, expectExportUID types.UID) (bool, *recoveryBarrier, error) {
+	return reconciler.reconcileLiveExportRecovery(context.Background(), testNames, takeoverRef{
+		PVName:        pvName,
+		SourceClaim:   types.NamespacedName{Namespace: dataExportNamespace, Name: testUserPVCName},
+		DataExportUID: expectExportUID,
+	})
+}
+
+func requireRecoveryReturnsVolume(t *testing.T, reconciler *DataexportReconciler, pvName string, expectExportUID types.UID) {
+	t.Helper()
+	_, blocked, err := runRecoveryOn(reconciler, pvName, expectExportUID)
+	require.NoError(t, err)
+	require.Nil(t, blocked)
+}
+
+// TestRecovery_RebindHonoursRecordedIdentity covers the one mutation that cannot be undone: giving
+// the volume back. The claim is looked up by name, so when the PV recorded which claim it was taken from,
+// that record decides. A same-named claim with a different UID is a different volume owner, and handing
+// it a stranger's data is worse than leaving cleanup unfinished for an administrator.
+func TestRecovery_RebindHonoursRecordedIdentity(t *testing.T) {
+	const pvName = "test-pv"
+
+	newUserPVC := func(uid types.UID) *corev1.PersistentVolumeClaim {
+		return &corev1.PersistentVolumeClaim{
+			ObjectMeta: metav1.ObjectMeta{
+				Name: testUserPVCName, Namespace: dataExportNamespace, UID: uid, ResourceVersion: "1",
+				Annotations: map[string]string{DataExportInProgressKey: "true"},
+				Finalizers:  []string{dev1alpha1.StorageManagerFinalizerName},
+			},
+			Spec:   corev1.PersistentVolumeClaimSpec{VolumeName: pvName},
+			Status: corev1.PersistentVolumeClaimStatus{Phase: corev1.ClaimBound},
+		}
+	}
+	// The PV is still held by the export claim, so recovery has to rebind it.
+	newPV := func(annotations map[string]string) *corev1.PersistentVolume {
+		return &corev1.PersistentVolume{
+			ObjectMeta: metav1.ObjectMeta{
+				Name: pvName, ResourceVersion: "1", UID: testPVUID,
+				Annotations: annotations,
+				Labels:      map[string]string{dev1alpha1.LabelPVDataExporter: "true"},
+			},
+			Spec: corev1.PersistentVolumeSpec{
+				PersistentVolumeReclaimPolicy: corev1.PersistentVolumeReclaimRetain,
+				ClaimRef: &corev1.ObjectReference{
+					Name: testNames.ExportPVCName, Namespace: "test-namespace", UID: testExportPVCUID,
+				},
+			},
+			Status: corev1.PersistentVolumeStatus{Phase: corev1.VolumeBound},
+		}
+	}
+
+	t.Run("recorded identity matches the live claim - rebinds", func(t *testing.T) {
+		pv := newPV(withUIDAnnotations(testDataExportUID, testUserPVCUID))
+		userPVC := newUserPVC(testUserPVCUID)
+
+		fakeClient := newFakeClientWithStatus(t, setupTestScheme(), pv, userPVC)
+		reconciler := createTestReconciler(fakeClient, fakeClient, createTestConfig())
+
+		requireRecoveryReturnsVolume(t, reconciler, pv.Name, testDataExportUID)
+
+		updatedPV := &corev1.PersistentVolume{}
+		require.NoError(t, fakeClient.Get(context.Background(), types.NamespacedName{Name: pvName}, updatedPV))
+		require.NotNil(t, updatedPV.Spec.ClaimRef)
+		assert.Equal(t, testUserPVCName, updatedPV.Spec.ClaimRef.Name)
+		assertPVExportMetadataRemoved(t, updatedPV)
+	})
+
+	t.Run("source claim was recreated - refuses to rebind", func(t *testing.T) {
+		pv := newPV(withUIDAnnotations(testDataExportUID, "the-original-claim-uid"))
+		userPVC := newUserPVC("a-recreated-claim-uid")
+
+		fakeClient := newFakeClientWithStatus(t, setupTestScheme(), pv, userPVC)
+		reconciler := createTestReconciler(fakeClient, fakeClient, createTestConfig())
+
+		_, blocked, err := runRecoveryOn(reconciler, pv.Name, testDataExportUID)
+		require.NoError(t, err)
+		require.NotNil(t, blocked, "a claim under the same name is a different owner, and the volume waits")
+		assert.Equal(t, "B4", blocked.Name)
+
+		updatedPV := &corev1.PersistentVolume{}
+		require.NoError(t, fakeClient.Get(context.Background(), types.NamespacedName{Name: pvName}, updatedPV))
+		assert.Equal(t, testNames.ExportPVCName, updatedPV.Spec.ClaimRef.Name, "the volume must not change hands")
+		assert.Contains(t, updatedPV.Labels, dev1alpha1.LabelPVDataExporter, "cleanup stays unfinished and retriable")
+
+		updatedUserPVC := &corev1.PersistentVolumeClaim{}
+		require.NoError(t, fakeClient.Get(context.Background(),
+			types.NamespacedName{Name: testUserPVCName, Namespace: dataExportNamespace}, updatedUserPVC))
+		assert.Contains(t, updatedUserPVC.Finalizers, dev1alpha1.StorageManagerFinalizerName,
+			"the stranger's claim is left exactly as found")
+	})
+
+	t.Run("identity names another export - refuses to rebind", func(t *testing.T) {
+		pv := newPV(withUIDAnnotations("some-other-export-uid", testUserPVCUID))
+		userPVC := newUserPVC(testUserPVCUID)
+
+		fakeClient := newFakeClientWithStatus(t, setupTestScheme(), pv, userPVC)
+		reconciler := createTestReconciler(fakeClient, fakeClient, createTestConfig())
+
+		_, _, err := runRecoveryOn(reconciler, pv.Name, testDataExportUID)
+		require.ErrorIs(t, err, ErrPVConflict,
+			"a matching claim UID does not authorise an export to undo somebody else's takeover")
+
+		updatedPV := &corev1.PersistentVolume{}
+		require.NoError(t, fakeClient.Get(context.Background(), types.NamespacedName{Name: pvName}, updatedPV))
+		assert.Equal(t, testNames.ExportPVCName, updatedPV.Spec.ClaimRef.Name)
+	})
+
+	t.Run("orphan sweep cannot judge the export UID and does not pretend to", func(t *testing.T) {
+		// The parent is deleted, so nothing can be compared against; the sweep matches PVs by
+		// namespace/name and marker instead, and the source claim UID stays enforced.
+		pv := newPV(withUIDAnnotations("an-unverifiable-export-uid", testUserPVCUID))
+		userPVC := newUserPVC(testUserPVCUID)
+
+		fakeClient := newFakeClientWithStatus(t, setupTestScheme(), pv, userPVC)
+		reconciler := createTestReconciler(fakeClient, fakeClient, createTestConfig())
+
+		requireRecoveryReturnsVolume(t, reconciler, pv.Name, "")
+
+		updatedPV := &corev1.PersistentVolume{}
+		require.NoError(t, fakeClient.Get(context.Background(), types.NamespacedName{Name: pvName}, updatedPV))
+		assert.Equal(t, testUserPVCName, updatedPV.Spec.ClaimRef.Name)
+	})
+
+	t.Run("half an identity survived - refuses to rebind", func(t *testing.T) {
+		annotations := makeFullAnnotations()
+		annotations[dev1alpha1.AnnotationDataExportUIDKey] = string(testDataExportUID)
+		pv := newPV(annotations)
+		userPVC := newUserPVC(testUserPVCUID)
+
+		fakeClient := newFakeClientWithStatus(t, setupTestScheme(), pv, userPVC)
+		reconciler := createTestReconciler(fakeClient, fakeClient, createTestConfig())
+
+		_, _, err := runRecoveryOn(reconciler, pv.Name, testDataExportUID)
+		require.ErrorIs(t, err, ErrPVConflict,
+			"a partially written identity is corruption, not a pre-UID takeover, and must not fall back to the name")
+
+		updatedPV := &corev1.PersistentVolume{}
+		require.NoError(t, fakeClient.Get(context.Background(), types.NamespacedName{Name: pvName}, updatedPV))
+		assert.Equal(t, testNames.ExportPVCName, updatedPV.Spec.ClaimRef.Name)
+	})
+
+	t.Run("legacy takeover without a recorded identity - keeps rebinding by name", func(t *testing.T) {
+		pv := newPV(makeFullAnnotations())
+		userPVC := newUserPVC("whatever-uid")
+
+		fakeClient := newFakeClientWithStatus(t, setupTestScheme(), pv, userPVC)
+		reconciler := createTestReconciler(fakeClient, fakeClient, createTestConfig())
+
+		requireRecoveryReturnsVolume(t, reconciler, pv.Name, testDataExportUID)
+
+		updatedPV := &corev1.PersistentVolume{}
+		require.NoError(t, fakeClient.Get(context.Background(), types.NamespacedName{Name: pvName}, updatedPV))
+		assert.Equal(t, testUserPVCName, updatedPV.Spec.ClaimRef.Name,
+			"a pre-UID export has no stronger evidence than the name, and stranding it would be worse")
+	})
+}
+
+// TestRemoveOrphanResources_StopsBeforeRebindingToARecreatedClaim exercises the same rule from the sweep
+// side, where the parent is already gone. The infrastructure is still torn down; only the irreversible
+// step is withheld, and the PV stays retained and labelled so the attempt is repeated.
+func TestRemoveOrphanResources_StopsBeforeRebindingToARecreatedClaim(t *testing.T) {
+	const pvName = "test-pv"
+
+	annotations := withUIDAnnotations(testDataExportUID, "the-original-claim-uid")
+	annotations[dev1alpha1.AnnotationUserPVCNamespaceKey] = dataExportNamespace
+	annotations[dev1alpha1.AnnotationUserPVCNameKey] = testUserPVCName
+	annotations[dev1alpha1.AnnotationStorageManagerNamespaceKey] = dataExportNamespace
+	annotations[dev1alpha1.AnnotationStorageManagerNameKey] = dataExportName
+
+	pv := &corev1.PersistentVolume{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: pvName, ResourceVersion: "1", UID: testPVUID,
+			Annotations: annotations,
+			Labels:      map[string]string{dev1alpha1.LabelPVDataExporter: "true"},
+		},
+		Spec: corev1.PersistentVolumeSpec{
+			PersistentVolumeReclaimPolicy: corev1.PersistentVolumeReclaimRetain,
+			ClaimRef: &corev1.ObjectReference{
+				Name: testNames.ExportPVCName, Namespace: "test-namespace", UID: testExportPVCUID,
+			},
+		},
+	}
+	recreatedClaim := &corev1.PersistentVolumeClaim{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: testUserPVCName, Namespace: dataExportNamespace, UID: "a-recreated-claim-uid", ResourceVersion: "1",
+			Finalizers: []string{dev1alpha1.StorageManagerFinalizerName},
+		},
+		Spec:   corev1.PersistentVolumeClaimSpec{VolumeName: pvName},
+		Status: corev1.PersistentVolumeClaimStatus{Phase: corev1.ClaimBound},
+	}
+
+	fakeClient := newFakeClientWithStatus(t, setupTestScheme(), pv, recreatedClaim)
+	reconciler := createTestReconciler(fakeClient, fakeClient, createTestConfig())
+
+	blocked, err := reconciler.removeOrphanResources(context.Background(), dataExportNamespace, dataExportName)
+	require.NoError(t, err)
+	require.NotNil(t, blocked)
+	assert.Equal(t, "B4", blocked.Name)
+
+	updatedPV := &corev1.PersistentVolume{}
+	require.NoError(t, fakeClient.Get(context.Background(), types.NamespacedName{Name: pvName}, updatedPV))
+	assert.Equal(t, testNames.ExportPVCName, updatedPV.Spec.ClaimRef.Name)
+	assert.Equal(t, corev1.PersistentVolumeReclaimRetain, updatedPV.Spec.PersistentVolumeReclaimPolicy,
+		"the volume must stay protected while cleanup is unfinished")
+	assert.Contains(t, updatedPV.Labels, dev1alpha1.LabelPVDataExporter)
+}
+
+// TestRemoveOrphanResources_SnapshotBasedTargetOnlyCleansTheVolume: a snapshot export takes nothing from
+// anybody, so there is no binding to restore — only the marks and the reclaim policy we changed.
+func TestRemoveOrphanResources_SnapshotBasedTargetOnlyCleansTheVolume(t *testing.T) {
+	// A snapshot export detaches nobody, so it records no claim name; everything else is as the takeover
+	// left it.
+	annotations := makeFullAnnotations()
+	delete(annotations, dev1alpha1.AnnotationUserPVCNameKey)
 
 	pv := &corev1.PersistentVolume{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:            "test-pv",
 			ResourceVersion: "1",
-			Annotations:     makeFullAnnotations(),
+			Annotations:     annotations,
 			Labels:          map[string]string{dev1alpha1.LabelPVDataExporter: "true"},
 		},
 		Spec: corev1.PersistentVolumeSpec{
@@ -1258,213 +2163,80 @@ func TestRecoverOrphanedUserPVC_SnapshotBasedTarget(t *testing.T) {
 		},
 	}
 
-	fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(pv).Build()
+	fakeClient := newFakeClientWithStatus(t, setupTestScheme(), pv)
 	reconciler := createTestReconciler(fakeClient, fakeClient, createTestConfig())
 
-	// Empty namespace and name = snapshot-based export
-	err := reconciler.recoverOrphanedUserPVC(context.Background(), pv, "", "", dataExportName)
+	blocked, err := reconciler.removeOrphanResources(context.Background(), dataExportNamespace, dataExportName)
 	require.NoError(t, err)
+	require.Nil(t, blocked)
 
 	updatedPV := &corev1.PersistentVolume{}
-	err = fakeClient.Get(context.Background(), types.NamespacedName{Name: "test-pv"}, updatedPV)
-	require.NoError(t, err)
-
-	// Annotations and labels should be removed, ReclaimPolicy restored
+	require.NoError(t, fakeClient.Get(context.Background(), types.NamespacedName{Name: "test-pv"}, updatedPV))
 	assertPVExportMetadataRemoved(t, updatedPV)
 	assert.Equal(t, corev1.PersistentVolumeReclaimDelete, updatedPV.Spec.PersistentVolumeReclaimPolicy)
 }
 
-func TestDeleteOrphanedDeployment(t *testing.T) {
-	scheme := setupTestScheme()
-
-	// Generate valid hash from known namespace/name pair
-	names := common.NewNames(dev1alpha1.KindPVC, "test-pvc", "test-ns", "test-de")
-	validHash := names.HashSuffix
-	deployName := common.DeployNameForHash(dev1alpha1.KindPVCShort, validHash)
+// TestStopExportConsumers_OnlyDeletesOurDeployment: the Deployment name is generated, so an object under
+// it is only ours if it says so. Deleting somebody else's workload because it collided with our naming is
+// not a cleanup, and it is the sweep — running without a parent to check against — that is most exposed.
+func TestStopExportConsumers_OnlyDeletesOurDeployment(t *testing.T) {
+	deployWithLabels := func(labels map[string]string) *appsv1.Deployment {
+		return &appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{
+			Name: testNames.DeployName, Namespace: testExportPVCNamespace, Labels: labels,
+		}}
+	}
 
 	tests := []struct {
-		name            string
-		targetKindShort string
-		hashSuffix      string
-		existingDeploy  *appsv1.Deployment
-		wantErr         bool
-		errContains     string
-		wantDeleted     bool
+		name        string
+		existing    *appsv1.Deployment
+		wantErr     string
+		wantDeleted bool
 	}{
 		{
-			name:            "Deployment exists with correct label - deleted",
-			targetKindShort: dev1alpha1.KindPVCShort,
-			hashSuffix:      validHash,
-			existingDeploy: &appsv1.Deployment{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      deployName,
-					Namespace: "test-namespace",
-					Labels: map[string]string{
-						dev1alpha1.LabelApplicationKey: dev1alpha1.LabelDataExportValue,
-					},
-				},
-			},
+			name:        "ours - deleted",
+			existing:    deployWithLabels(map[string]string{dev1alpha1.LabelApplicationKey: dev1alpha1.LabelDataExportValue}),
 			wantDeleted: true,
 		},
 		{
-			name:            "Deployment does not exist - no error",
-			targetKindShort: dev1alpha1.KindPVCShort,
-			hashSuffix:      validHash,
-			existingDeploy:  nil,
+			name: "nothing there - nothing to stop",
 		},
 		{
-			name:            "Deployment without app label - error",
-			targetKindShort: dev1alpha1.KindPVCShort,
-			hashSuffix:      validHash,
-			existingDeploy: &appsv1.Deployment{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      deployName,
-					Namespace: "test-namespace",
-				},
-			},
-			wantErr:     true,
-			errContains: "not managed by data-exporter",
+			name:     "no app label - refused",
+			existing: deployWithLabels(nil),
+			wantErr:  "not managed by data-exporter",
 		},
 		{
-			name:            "Deployment with wrong app label - error",
-			targetKindShort: dev1alpha1.KindPVCShort,
-			hashSuffix:      validHash,
-			existingDeploy: &appsv1.Deployment{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      deployName,
-					Namespace: "test-namespace",
-					Labels: map[string]string{
-						dev1alpha1.LabelApplicationKey: "something-else",
-					},
-				},
-			},
-			wantErr:     true,
-			errContains: "not managed by data-exporter",
+			name:     "somebody else's app label - refused",
+			existing: deployWithLabels(map[string]string{dev1alpha1.LabelApplicationKey: "something-else"}),
+			wantErr:  "not managed by data-exporter",
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			builder := fake.NewClientBuilder().WithScheme(scheme)
-			if tt.existingDeploy != nil {
-				builder = builder.WithObjects(tt.existingDeploy)
+			builder := fake.NewClientBuilder().WithScheme(setupTestScheme())
+			if tt.existing != nil {
+				builder = builder.WithObjects(tt.existing)
 			}
 			fakeClient := builder.Build()
 			reconciler := createTestReconciler(fakeClient, fakeClient, createTestConfig())
 
-			err := reconciler.deleteOrphanedDeployment(context.Background(), tt.targetKindShort, tt.hashSuffix)
+			blocked, err := reconciler.stopExportConsumers(context.Background(), testNames, takeoverRef{})
 
-			if tt.wantErr {
-				require.Error(t, err)
-				if tt.errContains != "" {
-					assert.Contains(t, err.Error(), tt.errContains)
-				}
+			if tt.wantErr != "" {
+				require.ErrorContains(t, err, tt.wantErr)
+				require.NoError(t, fakeClient.Get(context.Background(),
+					types.NamespacedName{Name: testNames.DeployName, Namespace: testExportPVCNamespace}, &appsv1.Deployment{}),
+					"a workload we do not own is left exactly as found")
 				return
 			}
 
 			require.NoError(t, err)
-
+			assert.Nil(t, blocked)
 			if tt.wantDeleted {
-				err = fakeClient.Get(context.Background(), types.NamespacedName{Name: deployName, Namespace: "test-namespace"}, &appsv1.Deployment{})
+				err = fakeClient.Get(context.Background(),
+					types.NamespacedName{Name: testNames.DeployName, Namespace: testExportPVCNamespace}, &appsv1.Deployment{})
 				assert.True(t, client.IgnoreNotFound(err) == nil, "deployment should be deleted")
-			}
-		})
-	}
-}
-
-func TestDeleteOrphanedExportPVCs(t *testing.T) {
-	scheme := setupTestScheme()
-
-	// Generate valid hash from known namespace/name pair
-	names := common.NewNames(dev1alpha1.KindPVC, "test-pvc", "test-ns", "test-de")
-	validHash := names.HashSuffix
-	pvcName := common.ExportPVCNameForHash(dev1alpha1.KindPVCShort, validHash)
-
-	tests := []struct {
-		name            string
-		targetKindShort string
-		hashSuffix      string
-		existingPVC     *corev1.PersistentVolumeClaim
-		wantErr         bool
-		errContains     string
-		wantDeleted     bool
-	}{
-		{
-			name:            "PVC exists with correct label - deleted",
-			targetKindShort: dev1alpha1.KindPVCShort,
-			hashSuffix:      validHash,
-			existingPVC: &corev1.PersistentVolumeClaim{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      pvcName,
-					Namespace: "test-namespace",
-					Labels: map[string]string{
-						dev1alpha1.LabelApplicationKey: dev1alpha1.LabelDataExportValue,
-					},
-				},
-			},
-			wantDeleted: true,
-		},
-		{
-			name:            "PVC does not exist - no error",
-			targetKindShort: dev1alpha1.KindPVCShort,
-			hashSuffix:      validHash,
-			existingPVC:     nil,
-		},
-		{
-			name:            "PVC without app label - error",
-			targetKindShort: dev1alpha1.KindPVCShort,
-			hashSuffix:      validHash,
-			existingPVC: &corev1.PersistentVolumeClaim{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      pvcName,
-					Namespace: "test-namespace",
-				},
-			},
-			wantErr:     true,
-			errContains: "not managed by data-exporter",
-		},
-		{
-			name:            "PVC with wrong app label - error",
-			targetKindShort: dev1alpha1.KindPVCShort,
-			hashSuffix:      validHash,
-			existingPVC: &corev1.PersistentVolumeClaim{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      pvcName,
-					Namespace: "test-namespace",
-					Labels: map[string]string{
-						dev1alpha1.LabelApplicationKey: "something-else",
-					},
-				},
-			},
-			wantErr:     true,
-			errContains: "not managed by data-exporter",
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			builder := fake.NewClientBuilder().WithScheme(scheme)
-			if tt.existingPVC != nil {
-				builder = builder.WithObjects(tt.existingPVC)
-			}
-			fakeClient := builder.Build()
-			reconciler := createTestReconciler(fakeClient, fakeClient, createTestConfig())
-
-			err := reconciler.deleteOrphanedExportPVCs(context.Background(), tt.targetKindShort, tt.hashSuffix)
-
-			if tt.wantErr {
-				require.Error(t, err)
-				if tt.errContains != "" {
-					assert.Contains(t, err.Error(), tt.errContains)
-				}
-				return
-			}
-
-			require.NoError(t, err)
-
-			if tt.wantDeleted {
-				err = fakeClient.Get(context.Background(), types.NamespacedName{Name: pvcName, Namespace: "test-namespace"}, &corev1.PersistentVolumeClaim{})
-				assert.True(t, client.IgnoreNotFound(err) == nil, "export PVC should be deleted")
 			}
 		})
 	}

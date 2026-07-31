@@ -23,12 +23,16 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	corev1 "k8s.io/api/core/v1"
+	kubeerrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/apimachinery/pkg/types"
 	dynamicfake "k8s.io/client-go/dynamic/fake"
+	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	dev1alpha1 "github.com/deckhouse/storage-foundation/api/v1alpha1"
 	"github.com/deckhouse/storage-foundation/common"
@@ -179,7 +183,7 @@ func newResolverReconciler(objs ...runtime.Object) *DataexportReconciler {
 
 func newSnapshotDataExport(group, kind, name string) *dev1alpha1.DataExport {
 	return &dev1alpha1.DataExport{
-		ObjectMeta: metav1.ObjectMeta{Name: "de1", Namespace: "test-ns"},
+		ObjectMeta: metav1.ObjectMeta{Name: "de1", Namespace: "test-ns", UID: "uid-of-de1"},
 		Spec: dev1alpha1.DataExportSpec{
 			TargetRef: dev1alpha1.DataExportTargetRefSpec{Group: group, Kind: kind, Name: name},
 		},
@@ -319,8 +323,101 @@ func TestEnsureVolumeRestoreRequest_CreatesAndIsIdempotent(t *testing.T) {
 	assert.Equal(t, testControllerNamespace, metaNS)
 	assert.Equal(t, "Block", volumeMode)
 
+	// The claim is created by the external-provisioner, so the request is the only place this export can
+	// ask for the marker that later proves the claim is its own.
+	templateAnnotations, _, _ := unstructured.NestedStringMap(vrr.Object, "spec", "pvcTemplate", "metadata", "annotations")
+	assert.Equal(t, string(de.UID), templateAnnotations[dev1alpha1.AnnotationDataExportUIDKey])
+
 	// Second call must be a no-op (Get-before-Create), not an error.
 	require.NoError(t, r.ensureVolumeRestoreRequest(context.Background(), de, names, art))
+}
+
+// TestTeardown_SnapshotExportClearsItsOwnClaimAndRestoreRequest: a snapshot export borrows no user
+// volume, so its teardown is the claim it provisioned and the request that provisioned it. Nothing here
+// may depend on a takeover that never happened.
+func TestTeardown_SnapshotExportClearsItsOwnClaimAndRestoreRequest(t *testing.T) {
+	de := newSnapshotDataExport("snapshot.storage.k8s.io", "VolumeSnapshot", "leaf1")
+	names := common.NewNamesFromShort(dev1alpha1.KindSnapshotShort, "leaf1", de.Namespace, de.Name)
+
+	exportPVC := &corev1.PersistentVolumeClaim{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: names.ExportPVCName, Namespace: testControllerNamespace, UID: "restored-claim-uid",
+		},
+	}
+	fakeClient := fake.NewClientBuilder().WithScheme(setupTestScheme()).WithObjects(exportPVC).Build()
+
+	r := newResolverReconciler()
+	r.Client, r.Reader = fakeClient, fakeClient
+
+	art := &snapshotDataArtifact{ArtifactKind: artifactKindVolumeSnapshotContent, ArtifactName: "vsc1", VolumeMode: "Filesystem"}
+	require.NoError(t, r.ensureVolumeRestoreRequest(context.Background(), de, names, art))
+
+	done, blocked, err := r.clearDataExportProviding(context.Background(), de, names)
+	require.NoError(t, err)
+	require.Nil(t, blocked)
+	assert.True(t, done)
+
+	err = fakeClient.Get(context.Background(),
+		types.NamespacedName{Namespace: testControllerNamespace, Name: names.ExportPVCName}, &corev1.PersistentVolumeClaim{})
+	assert.True(t, kubeerrors.IsNotFound(err), "the claim the restore produced must go with it")
+
+	_, err = r.Dynamic.Resource(volumeRestoreRequestGVR).
+		Namespace(testControllerNamespace).
+		Get(context.Background(), volumeRestoreRequestName(names), metav1.GetOptions{})
+	assert.True(t, kubeerrors.IsNotFound(err), "and so must the request itself")
+}
+
+// TestOrphanSweep_SnapshotExportIsFoundThroughItsRecordedIdentity: a snapshot export records no claim
+// name, because it borrowed nothing. The sweep must still find the claim and the request it provisioned,
+// which it can only do through the suffix left on the volume.
+func TestOrphanSweep_SnapshotExportIsFoundThroughItsRecordedIdentity(t *testing.T) {
+	de := newSnapshotDataExport("snapshot.storage.k8s.io", "VolumeSnapshot", "leaf1")
+	names := common.NewNamesFromShort(dev1alpha1.KindSnapshotShort, "leaf1", de.Namespace, de.Name)
+
+	pv := &corev1.PersistentVolume{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "snap-pv", ResourceVersion: "1",
+			Labels: map[string]string{dev1alpha1.LabelPVDataExporter: "true"},
+			Annotations: map[string]string{
+				dev1alpha1.AnnotationUserPVCNamespaceKey:        de.Namespace,
+				dev1alpha1.AnnotationStorageManagerNamespaceKey: de.Namespace,
+				dev1alpha1.AnnotationStorageManagerNameKey:      de.Name,
+				dev1alpha1.AnnotationPVTargetKindShortKey:       names.TargetKindShort,
+				dev1alpha1.AnnotationPVHashSuffixKey:            names.HashSuffix,
+				dev1alpha1.AnnotationOriginalReclaimPolicyKey:   string(corev1.PersistentVolumeReclaimDelete),
+			},
+		},
+		Spec: corev1.PersistentVolumeSpec{PersistentVolumeReclaimPolicy: corev1.PersistentVolumeReclaimRetain},
+	}
+	exportPVC := &corev1.PersistentVolumeClaim{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: names.ExportPVCName, Namespace: testControllerNamespace, UID: "restored-claim-uid",
+		},
+	}
+	fakeClient := fake.NewClientBuilder().WithScheme(setupTestScheme()).WithObjects(pv, exportPVC).Build()
+
+	r := newResolverReconciler()
+	r.Client, r.Reader = fakeClient, fakeClient
+
+	art := &snapshotDataArtifact{ArtifactKind: artifactKindVolumeSnapshotContent, ArtifactName: "vsc1", VolumeMode: "Filesystem"}
+	require.NoError(t, r.ensureVolumeRestoreRequest(context.Background(), de, names, art))
+
+	blocked, err := r.removeOrphanResources(context.Background(), de.Namespace, de.Name)
+	require.NoError(t, err)
+	require.Nil(t, blocked)
+
+	err = fakeClient.Get(context.Background(),
+		types.NamespacedName{Namespace: testControllerNamespace, Name: names.ExportPVCName}, &corev1.PersistentVolumeClaim{})
+	assert.True(t, kubeerrors.IsNotFound(err), "the claim the restore produced must go with it")
+
+	_, err = r.Dynamic.Resource(volumeRestoreRequestGVR).
+		Namespace(testControllerNamespace).
+		Get(context.Background(), volumeRestoreRequestName(names), metav1.GetOptions{})
+	assert.True(t, kubeerrors.IsNotFound(err), "and so must the request itself")
+
+	updatedPV := &corev1.PersistentVolume{}
+	require.NoError(t, fakeClient.Get(context.Background(), types.NamespacedName{Name: pv.Name}, updatedPV))
+	assert.Equal(t, corev1.PersistentVolumeReclaimDelete, updatedPV.Spec.PersistentVolumeReclaimPolicy)
 }
 
 func TestDeleteVolumeRestoreRequest_Idempotent(t *testing.T) {

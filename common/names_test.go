@@ -32,6 +32,23 @@ const (
 	anotherDataExportNamespace   = "user-ns-2"
 )
 
+// TestGeneratedNames_DependOnlyOnTheOwnerIdentity pins the property the orphan sweep rests on. The sweep
+// rebuilds the names of resources it did not create, from a record left on a volume, and the only
+// identity that record can be trusted to carry is the owner's. If a generated name ever started depending
+// on what was exported, a VirtualDisk export would be the first casualty: the claim the volume goes back
+// to is the disk's backing PVC, under a name nothing else knows.
+func TestGeneratedNames_DependOnlyOnTheOwnerIdentity(t *testing.T) {
+	fromDisk := NewNamesFromShort(dev1alpha1.KindVirtualDiskShort, "disk-a", reconcileDataExportNamespace, reconcileDataExportName)
+	fromBackingClaim := NewNamesFromShort(dev1alpha1.KindVirtualDiskShort, "disk-a-pvc-9f2c1", reconcileDataExportNamespace, reconcileDataExportName)
+
+	fromDisk.TargetName, fromBackingClaim.TargetName = "", ""
+	assert.Equal(t, fromDisk, fromBackingClaim,
+		"what was exported must not reach any generated name; only the owner's namespace and name may")
+
+	// And the sweep's constructor reproduces exactly those names from the recorded suffix alone.
+	assert.Equal(t, fromDisk, NewNamesFromPersistedIdentity(fromDisk.TargetKindShort, fromDisk.HashSuffix))
+}
+
 func TestValidateHashAndTarget(t *testing.T) {
 	generatedNames := NewNames(dev1alpha1.KindPVC, userPVCName, reconcileDataExportNamespace, reconcileDataExportName)
 	generatedNames2 := NewNames(dev1alpha1.KindPVC, userPVCName, anotherDataExportNamespace, anotherDataExportName)

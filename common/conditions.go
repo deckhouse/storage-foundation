@@ -103,6 +103,51 @@ const (
 	ReasonPVConflict       ConditionReason = "PVConflict"
 	ReasonDeploymentFailed ConditionReason = "DeploymentFailed"
 	ReasonCleanupFailed    ConditionReason = "CleanupFailed"
+
+	// Managed-resource drift reasons. The condition reason stays coarse (which class of drift), while
+	// the message carries the specifics (role, kind, name, expected/actual UID) and status.cleanupReason
+	// carries the machine-readable discriminator that selects the recovery path.
+	//
+	// ReasonManagedResourceLost — a resource the controller created and still depends on is gone.
+	ReasonManagedResourceLost ConditionReason = "ManagedResourceLost"
+	// ReasonManagedResourceIdentityMismatch — a resource with the expected name exists, but its UID is
+	// not the one we created; it must not be adopted, mutated or deleted.
+	ReasonManagedResourceIdentityMismatch ConditionReason = "ManagedResourceIdentityMismatch"
+	// ReasonCleanupBlocked — recovery is running but a safety barrier has not been passed yet (a Pod
+	// still consumes the volume, a VolumeAttachment survives, the binding has not converged). The
+	// message names the blocking object. Barriers are never skipped on a timeout.
+	ReasonCleanupBlocked ConditionReason = "CleanupBlocked"
+)
+
+// IsManagedResourceFailureReason reports whether a Ready reason denotes a managed-resource failure that
+// ends the operation. Both drift reasons qualify: a lost child and a replaced child are equally
+// unrecoverable for the current run, and the mismatch path must be able to reach a terminal phase after
+// its recovery too. CleanupBlocked deliberately does not qualify — it is the transient "a barrier has not
+// been passed yet" state, and treating it as terminal would abandon a recovery that is still progressing.
+func IsManagedResourceFailureReason(reason ConditionReason) bool {
+	switch reason {
+	case ReasonManagedResourceLost, ReasonManagedResourceIdentityMismatch:
+		return true
+	default:
+		return false
+	}
+}
+
+// CleanupReason is the internal discriminator persisted in status.cleanupReason. A non-empty value
+// means the object must run failure-driven recovery before it may become terminal, and selects which
+// recovery path runs. Unlike a condition reason it is not primarily a user-facing string: it is the
+// crash-safe checkpoint that survives a controller restart mid-recovery.
+type CleanupReason string
+
+const (
+	// CleanupReasonExportPVCPostRebindLost — the export claim disappeared after the PV had already been
+	// rebound to it, so the PV now points at a claim UID that no longer exists. Recreating a same-named
+	// claim would not restore that binding; the volume must be returned to the user and the export failed.
+	CleanupReasonExportPVCPostRebindLost CleanupReason = "ExportPVCPostRebindLost"
+	// CleanupReasonExportPVCIdentityMismatch — a claim with the expected name exists but carries a
+	// foreign UID. Recovery runs (the volume is still ours to return), but the foreign claim is left
+	// untouched.
+	CleanupReasonExportPVCIdentityMismatch CleanupReason = "ExportPVCIdentityMismatch"
 )
 
 // StripConditionsNotIn removes every status condition whose type is not in the allowed set and reports

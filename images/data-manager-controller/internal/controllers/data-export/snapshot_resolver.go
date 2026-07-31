@@ -295,6 +295,19 @@ func (r *DataexportReconciler) ensureVolumeRestoreRequest(ctx context.Context, d
 		"pvcTemplate": map[string]interface{}{
 			"metadata": map[string]interface{}{
 				"name": generatedNames.ExportPVCName,
+				// The provenance marker travels with the request, because this export never touches the
+				// claim's creation itself: the executor creates it, and the request is the only place the
+				// export can put something on it that a later pass may trust. Asking for it here and
+				// stamping it afterwards are not the same act — the second would only make a claim found
+				// by name look proven.
+				"annotations": map[string]interface{}{
+					dev1alpha1.AnnotationDataExportUIDKey:           string(dataExport.UID),
+					dev1alpha1.AnnotationStorageManagerNamespaceKey: dataExport.Namespace,
+					dev1alpha1.AnnotationStorageManagerNameKey:      dataExport.Name,
+				},
+				"labels": map[string]interface{}{
+					dev1alpha1.LabelApplicationKey: dev1alpha1.LabelDataExportValue,
+				},
 			},
 			"spec": pvcSpec,
 		},

@@ -106,6 +106,31 @@ func TestIsReapable(t *testing.T) {
 	}
 }
 
+// TestIsReapable_RecoveryPhaseContract documents what the GC side of the recovery contract relies on:
+// reaping keys purely on phase + age, so the discriminator alone protects nothing here. What keeps an
+// export owing recovery alive is the non-terminal phase, and that guard lives in (and is enforced by the
+// tests of) computeDataExportPhase.
+func TestIsReapable_RecoveryPhaseContract(t *testing.T) {
+	old := gcNow.Add(-25 * time.Hour)
+
+	inRecovery := &dev1alpha1.DataExport{Status: statusOf(common.PhasePending, &old)}
+	inRecovery.Status.CleanupReason = string(common.CleanupReasonExportPVCPostRebindLost)
+	assert.False(t, isReapable(inRecovery, &inRecovery.Status, gcTTL, gcNow),
+		"an export owing recovery must survive the GC")
+
+	// The failure mode this guards against: were the phase machine to settle mid-recovery, the very same
+	// object would become reapable while its PV is still bound to the export claim.
+	settledMidRecovery := &dev1alpha1.DataExport{Status: statusOf(common.PhaseFailed, &old)}
+	settledMidRecovery.Status.CleanupReason = string(common.CleanupReasonExportPVCPostRebindLost)
+	assert.True(t, isReapable(settledMidRecovery, &settledMidRecovery.Status, gcTTL, gcNow),
+		"the GC ignores the discriminator — only the non-terminal phase protects a recovery")
+
+	// After recovery the controller clears the discriminator and settles the phase in one write; only
+	// then does the object become an ordinary aged terminal object.
+	recovered := &dev1alpha1.DataExport{Status: statusOf(common.PhaseFailed, &old)}
+	assert.True(t, isReapable(recovered, &recovered.Status, gcTTL, gcNow))
+}
+
 func statusOf(phase common.Phase, completion *time.Time) dev1alpha1.DataExportImportStatus {
 	s := dev1alpha1.DataExportImportStatus{Phase: string(phase)}
 	if completion != nil {

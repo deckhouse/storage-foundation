@@ -58,6 +58,47 @@ type DataExportImportStatus struct {
 	// populate SnapshotContent.status.data.artifactRef. Empty for DataExport.
 	// +optional
 	Data *DataExportImportData `json:"data,omitempty"`
+
+	// CleanupReason is a non-empty internal discriminator meaning: a managed resource was lost or
+	// replaced, and this object MUST run failure-driven recovery before it may become terminal. The
+	// controller sets it on the pass that detects the loss (that pass performs no mutations) and clears
+	// it in the same status write that stamps the terminal phase, so a persisted phase=Failed always
+	// means the mandatory recovery already finished. The catalog of allowed values lives in the common
+	// module (common.CleanupReason*). Only DataExport writes it today.
+	// +optional
+	CleanupReason string `json:"cleanupReason,omitempty"`
+
+	// Recovery pins the identity of the objects this transfer temporarily took over, so the controller
+	// can undo the takeover after a restart or after the taken-over child is deleted. Written once
+	// during provisioning, before the first mutation of a user-owned object. Empty while nothing is
+	// taken over.
+	// +optional
+	Recovery *RecoveryStatus `json:"recovery,omitempty"`
+}
+
+// RecoveryStatus is the durable identity a controller needs to undo a temporary takeover of a user
+// volume. Matching on namespace/name alone is not sufficient: a recreated object reuses the name but
+// gets a fresh UID, so every takeover check compares UIDs. Unset fields mean "nothing taken over yet".
+// +k8s:deepcopy-gen=true
+type RecoveryStatus struct {
+	// SourcePVCUID is the UID of the user's PersistentVolumeClaim that the transfer took the volume
+	// from. Recovery refuses to rebind a PV to a same-named claim whose UID differs.
+	// +optional
+	SourcePVCUID string `json:"sourcePVCUID,omitempty"`
+
+	// ExportPVCUID is the UID of the controller-owned claim the PV was temporarily bound to. It
+	// distinguishes "our claim is gone" from "a foreign claim now holds our name".
+	// +optional
+	ExportPVCUID string `json:"exportPVCUID,omitempty"`
+
+	// PVName is the name of the taken-over PersistentVolume.
+	// +optional
+	PVName string `json:"pvName,omitempty"`
+
+	// PVUID is the UID of the taken-over PersistentVolume. It is kept here rather than on the PV
+	// itself, where it would be read from the very object whose identity it is meant to prove.
+	// +optional
+	PVUID string `json:"pvUID,omitempty"`
 }
 
 // DataExportImportData is the self-contained captured-data block on a DataImport status. It nests the

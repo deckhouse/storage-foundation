@@ -141,9 +141,14 @@ status:
   `VolumeSnapshotContent` он использует template storage class, volume mode и access modes (default
   `ReadWriteOnce`), а также root `fsType` для Filesystem-томов. Для источника `PersistentVolume`
   авторитетен source PV: volume mode, access modes, filesystem type и capacity берутся из него, а
-  соответствующие template-поля не определяют фактическую форму restore. Ни один путь не копирует
-  template labels/annotations и не считает `pvcTemplate.spec.resources.requests.storage`
-  авторитетным.
+  соответствующие template-поля не определяют фактическую форму restore. Ни один путь не считает
+  `pvcTemplate.spec.resources.requests.storage` авторитетным.
+- Labels и annotations из `pvcTemplate.metadata` **переносятся** на создаваемый PVC на обоих путях.
+  Это единственный способ для заказчика впоследствии опознать запрошенный им PVC: имя выбирает он сам,
+  а ссылки на VRR executor на объект не ставит. Перенос выполняется только при создании — уже
+  существующий одноимённый PVC не изменяется (`AlreadyExists` остаётся идемпотентным успехом), поэтому
+  чужой объект никогда не «дооформляется» под запрошенный. Заказчик, которому нужна доказанная
+  принадлежность, обязан считать PVC без маркера не своим.
 - Поддерживаемые source kinds — `VolumeSnapshotContent` и `PersistentVolume`. Текущие controller и
   executor выбирают источник по `kind` и `name`; `sourceRef.apiVersion`, `namespace` и `uid` не
   проверяются относительно live source. Hardening source identity и admission отслеживается в

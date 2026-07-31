@@ -202,7 +202,7 @@ new file mode 100644
 index 000000000..4a6c39c28
 --- /dev/null
 +++ b/pkg/controller/vrr_handler.go
-@@ -0,0 +1,862 @@
+@@ -0,0 +1,884 @@
 +/*
 +Copyright 2025 Flant JSC
 +
@@ -849,15 +849,24 @@ index 000000000..4a6c39c28
 +// CONTRACT:
 +//   - PVC MUST have VolumeName set explicitly (no scheduler binding).
 +//   - PVC MUST NOT have dataSource or dataSourceRef (restore without VolumeSnapshot API).
++//   - PVC MUST carry the labels and annotations of pvcTemplate.metadata. They are part of the
++//     request, not decoration: the requester cannot prove later that this PVC is the one it asked
++//     for unless something it set itself travels onto the object. Nothing else about the created
++//     PVC identifies its origin (the name is the requester's own to choose, and the executor sets
++//     no reference back to the VRR), so a requester left without this can only match by name.
 +//   - PVC MAY have an OwnerReference to the ObjectKeeper (from a VRR annotation set by
 +//     the storage-foundation controller).
-+//   - AlreadyExists is treated as idempotent success.
++//   - AlreadyExists is treated as idempotent success. The pre-existing PVC is NOT reconciled towards
++//     the template: an object the executor did not create does not become the requested one by being
++//     stamped with the requested metadata.
 +func (e *VRRExecutor) createPVCFromVRR(ctx context.Context, vrr *storagev1alpha1.VolumeRestoreRequest, pv *v1.PersistentVolume) error {
 +	storageClassName := vrrStorageClassName(vrr)
 +	pvc := &v1.PersistentVolumeClaim{
 +		ObjectMeta: metav1.ObjectMeta{
-+			Name:      vrrTargetPVCName(vrr),
-+			Namespace: vrrTargetNamespace(vrr),
++			Name:        vrrTargetPVCName(vrr),
++			Namespace:   vrrTargetNamespace(vrr),
++			Labels:      copyVRRTemplateMap(vrr.Spec.PvcTemplate.Labels),
++			Annotations: copyVRRTemplateMap(vrr.Spec.PvcTemplate.Annotations),
 +		},
 +		Spec: v1.PersistentVolumeClaimSpec{
 +			StorageClassName: &storageClassName,
@@ -894,6 +903,19 @@ index 000000000..4a6c39c28
 +	klog.V(2).Infof("createPVCFromVRR: created PVC %s/%s for VRR %s/%s", vrrTargetNamespace(vrr), vrrTargetPVCName(vrr), vrr.Namespace, vrr.Name)
 +	e.eventRecorder.Eventf(vrr, v1.EventTypeNormal, "VRRPVCCreated", "Successfully created PVC %s/%s", vrrTargetNamespace(vrr), vrrTargetPVCName(vrr))
 +	return nil
++}
++
++// copyVRRTemplateMap copies template metadata onto a new object. The VRR comes from an informer
++// cache, so its maps must never be aliased into anything the executor builds.
++func copyVRRTemplateMap(src map[string]string) map[string]string {
++	if len(src) == 0 {
++		return nil
++	}
++	dst := make(map[string]string, len(src))
++	for k, v := range src {
++		dst[k] = v
++	}
++	return dst
 +}
 +
 +// parseObjectKeeperRef parses an ObjectKeeper owner reference from an annotation.
@@ -1070,7 +1092,7 @@ new file mode 100644
 index 000000000..794ddee41
 --- /dev/null
 +++ b/pkg/controller/vrr_handler_test.go
-@@ -0,0 +1,1084 @@
+@@ -0,0 +1,1140 @@
 +/*
 +Copyright 2025 Flant JSC
 +
@@ -1589,6 +1611,62 @@ index 000000000..794ddee41
 +	}
 +	if len(pvc.OwnerReferences) != 1 || pvc.OwnerReferences[0].Name != "test-ok" {
 +		t.Errorf("Expected single ObjectKeeper owner reference 'test-ok', got %v", pvc.OwnerReferences)
++	}
++}
++
++// The created PVC carries the template's metadata, and the template's map is not shared with it: the
++// VRR the executor reads belongs to an informer cache.
++func TestCreatePVCFromVRR_CarriesTemplateMetadata(t *testing.T) {
++	kubeClient := fakeclientset.NewSimpleClientset()
++	e := newTestExecutor(&mockControllerClient{}, nil, kubeClient, nil, nil)
++
++	vrr := createTestVRR("test-vrr", "test-ns", "VolumeSnapshotContent", "test-vsc")
++	vrr.Spec.PvcTemplate.Annotations = map[string]string{"storage-foundation.deckhouse.io/data-export-uid": "owner-uid"}
++	vrr.Spec.PvcTemplate.Labels = map[string]string{"app": "data-exporter"}
++
++	if err := e.createPVCFromVRR(context.Background(), vrr, simplePV("test-pv")); err != nil {
++		t.Fatalf("createPVCFromVRR failed: %v", err)
++	}
++
++	pvc, err := kubeClient.CoreV1().PersistentVolumeClaims(vrrTestTargetNamespace).Get(context.Background(), vrrTestTargetPVCName, metav1.GetOptions{})
++	if err != nil {
++		t.Fatalf("Failed to get PVC: %v", err)
++	}
++	if pvc.Annotations["storage-foundation.deckhouse.io/data-export-uid"] != "owner-uid" {
++		t.Errorf("template annotations were not carried onto the PVC: %v", pvc.Annotations)
++	}
++	if pvc.Labels["app"] != "data-exporter" {
++		t.Errorf("template labels were not carried onto the PVC: %v", pvc.Labels)
++	}
++
++	pvc.Annotations["written-by-a-consumer"] = "true"
++	if _, aliased := vrr.Spec.PvcTemplate.Annotations["written-by-a-consumer"]; aliased {
++		t.Error("the created PVC shares its annotation map with the cached VRR")
++	}
++}
++
++// A PVC that was already there is left alone: creation is where origin is established, so stamping an
++// existing object with the requested metadata would only make a foreign PVC look like the requested one.
++func TestCreatePVCFromVRR_DoesNotStampAnExistingPVC(t *testing.T) {
++	existingPVC := &v1.PersistentVolumeClaim{
++		ObjectMeta: metav1.ObjectMeta{Name: vrrTestTargetPVCName, Namespace: vrrTestTargetNamespace},
++	}
++	kubeClient := fakeclientset.NewSimpleClientset(existingPVC)
++	e := newTestExecutor(&mockControllerClient{}, nil, kubeClient, nil, nil)
++
++	vrr := createTestVRR("test-vrr", "test-ns", "VolumeSnapshotContent", "test-vsc")
++	vrr.Spec.PvcTemplate.Annotations = map[string]string{"storage-foundation.deckhouse.io/data-export-uid": "owner-uid"}
++
++	if err := e.createPVCFromVRR(context.Background(), vrr, simplePV("test-pv")); err != nil {
++		t.Fatalf("createPVCFromVRR should be idempotent when PVC already exists: %v", err)
++	}
++
++	pvc, err := kubeClient.CoreV1().PersistentVolumeClaims(vrrTestTargetNamespace).Get(context.Background(), vrrTestTargetPVCName, metav1.GetOptions{})
++	if err != nil {
++		t.Fatalf("Failed to get PVC: %v", err)
++	}
++	if _, stamped := pvc.Annotations["storage-foundation.deckhouse.io/data-export-uid"]; stamped {
++		t.Error("an existing PVC was stamped with the template's marker")
 +	}
 +}
 +

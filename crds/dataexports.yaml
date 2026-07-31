@@ -133,6 +133,42 @@ spec:
                   description: |
                     Time the DataExport reached a terminal phase (Expired or Failed). Set once by the
                     controller; the garbage collector measures retention age from this timestamp.
+                cleanupReason:
+                  type: string
+                  enum: ["ExportPVCPostRebindLost", "ExportPVCIdentityMismatch"]
+                  description: |
+                    Internal discriminator, written by the controller: a managed resource was lost or
+                    replaced, and failure-driven recovery must run before the object may become terminal.
+                    The controller sets it on the pass that detects the loss (that pass performs no
+                    mutations) and clears it in the same status write that stamps `phase: Failed`, so a
+                    persisted terminal phase always means the mandatory recovery already finished.
+                recovery:
+                  type: object
+                  description: |
+                    Identity of the objects this DataExport temporarily took over, so the controller can
+                    undo the takeover after a restart or after the taken-over claim is deleted. Written
+                    during provisioning, before the first mutation of a user-owned object. Matching by
+                    name is not enough: a recreated object reuses the name but gets a fresh UID.
+                  properties:
+                    sourcePVCUID:
+                      type: string
+                      description: |
+                        UID of the user PersistentVolumeClaim the volume was taken from. Recovery refuses
+                        to rebind the PV to a same-named claim whose UID differs.
+                    exportPVCUID:
+                      type: string
+                      description: |
+                        UID of the controller-owned export claim the PV was temporarily bound to. It
+                        distinguishes "our claim is gone" from "a foreign claim now holds our name".
+                    pvName:
+                      type: string
+                      description: |
+                        Name of the taken-over PersistentVolume.
+                    pvUID:
+                      type: string
+                      description: |
+                        UID of the taken-over PersistentVolume, kept here rather than on the PV itself,
+                        where it would be read from the very object whose identity it proves.
                 serverState:
                   type: string
                   enum: ["Ready", "IdleExpired"]
@@ -179,7 +215,10 @@ spec:
                             "DeploymentFailed",
                             "CleanupFailed",
                             "PublishFailed",
-                            "Expired"
+                            "Expired",
+                            "ManagedResourceLost",
+                            "ManagedResourceIdentityMismatch",
+                            "CleanupBlocked"
                           ]
                       message:
                         type: string
