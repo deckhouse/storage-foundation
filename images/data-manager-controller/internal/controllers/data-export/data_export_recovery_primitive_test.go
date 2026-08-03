@@ -10,6 +10,7 @@ import (
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	storagev1 "k8s.io/api/storage/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
@@ -351,8 +352,24 @@ func TestBarrierBindingRestored(t *testing.T) {
 // takeover identity is recorded, and the volume is still bound to the claim that no longer exists.
 func recoveringExport() (*dev1alpha1.DataExport, *corev1.PersistentVolume, *corev1.PersistentVolumeClaim) {
 	dataExport, pv, _, userPVC := recoveryFixture()
-	// The volume is still Bound — to the claim that no longer exists — while the user's claim has been
-	// Lost ever since the takeover repointed the volume away from it.
+	markRecovering(dataExport, pv, userPVC)
+	return dataExport, pv, userPVC
+}
+
+// recoveringExportKeepingItsClaim is the same state one step earlier: the loss is recorded, but the export
+// claim has not finished going away. Only a finalizer produces that with the fake client, which deletes
+// instantly otherwise — and without it no test reaches the barrier that waits for the claim to be gone.
+func recoveringExportKeepingItsClaim() (*dev1alpha1.DataExport, *corev1.PersistentVolume, *corev1.PersistentVolumeClaim, *corev1.PersistentVolumeClaim) {
+	dataExport, pv, exportPVC, userPVC := recoveryFixture()
+	markRecovering(dataExport, pv, userPVC)
+	exportPVC.Finalizers = append(exportPVC.Finalizers, "kubernetes.io/pvc-protection")
+	return dataExport, pv, exportPVC, userPVC
+}
+
+// markRecovering puts the world into the state that follows a detected loss: the discriminator is set, the
+// volume is still Bound to the claim taken over, and the user's claim has been Lost ever since the
+// takeover repointed the volume away from it.
+func markRecovering(dataExport *dev1alpha1.DataExport, pv *corev1.PersistentVolume, userPVC *corev1.PersistentVolumeClaim) {
 	pv.Status.Phase = corev1.VolumeBound
 	userPVC.Status.Phase = corev1.ClaimLost
 	dataExport.Status.Phase = string(common.PhasePending)
@@ -362,7 +379,6 @@ func recoveringExport() (*dev1alpha1.DataExport, *corev1.PersistentVolume, *core
 		Reason: string(common.ReasonManagedResourceLost), LastTransitionTime: metav1.NewTime(time.Now()),
 		Message: "export claim is gone",
 	}}
-	return dataExport, pv, userPVC
 }
 
 // confirmBinding stands in for the PV controller, which is what actually completes the binding once the
@@ -469,6 +485,133 @@ func TestRecovery_BarrierHoldsTheVolumeAndKeepsTheDiscriminator(t *testing.T) {
 		types.NamespacedName{Namespace: dataExportNamespace, Name: testUserPVCName}, gotClaim))
 	assert.Contains(t, gotClaim.Finalizers, dev1alpha1.StorageManagerFinalizerName,
 		"the source claim stays protected until its volume is actually back")
+}
+
+// TestRecovery_AttachedVolumeHoldsTheRecovery pins B2 where it is wired in rather than as a predicate on
+// its own. The pod being gone is not the same as the volume being detached: in between, the node still has
+// the device, and handing the volume back in that window gives it to an owner the old node may still write
+// to. The barrier predicate has its own test; without this one, deleting the call would leave CI green.
+func TestRecovery_AttachedVolumeHoldsTheRecovery(t *testing.T) {
+	dataExport, pv, userPVC := recoveringExport()
+	// Nothing holds the claim any more — B1 is satisfied, so only B2 can be what stops this.
+	attachment := volumeAttachment("va-not-detached-yet", pv.Name, true)
+
+	fakeClient := fake.NewClientBuilder().
+		WithScheme(recoverySchemeWithStorage(t)).
+		WithObjects(dataExport, pv, userPVC, attachment).
+		WithStatusSubresource(&dev1alpha1.DataExport{}).
+		Build()
+	reconciler := createTestReconciler(fakeClient, fakeClient, createTestConfig())
+
+	result, err := reconciler.Reconcile(context.Background(), deRequest)
+	require.NoError(t, err, "an undetached volume is a state to wait on, not a failure")
+	assert.NotZero(t, result.RequeueAfter)
+
+	got := &dev1alpha1.DataExport{}
+	require.NoError(t, fakeClient.Get(context.Background(), deRequest.NamespacedName, got))
+	ready := assertReadyReason(t, got, common.ReasonCleanupBlocked)
+	assert.Contains(t, ready.Message, "B2")
+	assert.Contains(t, ready.Message, attachment.Name, "the blocking object must be named")
+	assert.Equal(t, string(common.CleanupReasonExportPVCPostRebindLost), got.Status.CleanupReason,
+		"the recovery is still owed while the volume is attached")
+
+	gotPV := &corev1.PersistentVolume{}
+	require.NoError(t, fakeClient.Get(context.Background(), types.NamespacedName{Name: pv.Name}, gotPV))
+	require.NotNil(t, gotPV.Spec.ClaimRef)
+	assert.Equal(t, testNames.ExportPVCName, gotPV.Spec.ClaimRef.Name,
+		"the volume changed hands while a node still had it attached")
+	assert.Equal(t, corev1.PersistentVolumeReclaimRetain, gotPV.Spec.PersistentVolumeReclaimPolicy)
+
+	gotClaim := &corev1.PersistentVolumeClaim{}
+	require.NoError(t, fakeClient.Get(context.Background(),
+		types.NamespacedName{Namespace: dataExportNamespace, Name: testUserPVCName}, gotClaim))
+	assert.NotEqual(t, corev1.ClaimBound, gotClaim.Status.Phase)
+}
+
+// TestRecovery_WaitsUntilTheExportClaimIsActuallyGone pins the other half of B3: deleting the claim is a
+// request, not the event. While the claim is still there the volume is still legitimately bound to it, so
+// repointing the binding then would take the volume away from an object that has not released it.
+func TestRecovery_WaitsUntilTheExportClaimIsActuallyGone(t *testing.T) {
+	dataExport, pv, exportPVC, userPVC := recoveringExportKeepingItsClaim()
+
+	fakeClient := fake.NewClientBuilder().
+		WithScheme(recoverySchemeWithStorage(t)).
+		WithObjects(dataExport, pv, exportPVC, userPVC).
+		WithStatusSubresource(&dev1alpha1.DataExport{}).
+		Build()
+	reconciler := createTestReconciler(fakeClient, fakeClient, createTestConfig())
+
+	result, err := reconciler.Reconcile(context.Background(), deRequest)
+	require.NoError(t, err)
+	assert.NotZero(t, result.RequeueAfter)
+
+	got := &dev1alpha1.DataExport{}
+	require.NoError(t, fakeClient.Get(context.Background(), deRequest.NamespacedName, got))
+	ready := assertReadyReason(t, got, common.ReasonCleanupBlocked)
+	assert.Contains(t, ready.Message, "B3")
+	assert.Contains(t, ready.Message, testNames.ExportPVCName, "the blocking object must be named")
+
+	// The claim was asked to go and is on its way out: that part is allowed to happen.
+	stillThere := &corev1.PersistentVolumeClaim{}
+	require.NoError(t, fakeClient.Get(context.Background(),
+		types.NamespacedName{Namespace: testExportPVCNamespace, Name: testNames.ExportPVCName}, stillThere))
+	assert.NotNil(t, stillThere.DeletionTimestamp, "the claim holding the volume was never asked to go")
+
+	gotPV := &corev1.PersistentVolume{}
+	require.NoError(t, fakeClient.Get(context.Background(), types.NamespacedName{Name: pv.Name}, gotPV))
+	require.NotNil(t, gotPV.Spec.ClaimRef)
+	assert.Equal(t, testNames.ExportPVCName, gotPV.Spec.ClaimRef.Name,
+		"the volume was taken from a claim that still exists")
+	assert.Equal(t, corev1.PersistentVolumeReclaimRetain, gotPV.Spec.PersistentVolumeReclaimPolicy)
+}
+
+// TestEnsureExportPVCGone_LeavesAClaimThatNamesAnotherExport is the teardown half of the provenance rule.
+// The reasons a claim under the generated name counts as ours are inferred — from a binding, or from our
+// own naming — and a snapshot export, which borrows no volume, has only the naming. The marker is the one
+// piece of evidence a stranger cannot produce by accident, so a claim naming somebody else is not deleted
+// even where every other reason says it is ours. A missing marker still passes: that is what a claim from
+// the previous external-provisioner has.
+func TestEnsureExportPVCGone_LeavesAClaimThatNamesAnotherExport(t *testing.T) {
+	snapshotNames := common.NewNamesFromShort(dev1alpha1.KindSnapshotShort, "leaf1", dataExportNamespace, dataExportName)
+
+	for _, tt := range []struct {
+		name    string
+		marker  string
+		deleted bool
+	}{
+		{name: "our own marker", marker: string(testDataExportUID), deleted: true},
+		{name: "no marker, as the previous executor left it", marker: "", deleted: true},
+		{name: "the marker of another export", marker: "de-uid-of-somebody-else", deleted: false},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			claim := &corev1.PersistentVolumeClaim{ObjectMeta: metav1.ObjectMeta{
+				Name: snapshotNames.ExportPVCName, Namespace: testExportPVCNamespace,
+				UID: testExportPVCUID, ResourceVersion: "1",
+			}}
+			if tt.marker != "" {
+				claim.Annotations = map[string]string{dev1alpha1.AnnotationDataExportUIDKey: tt.marker}
+			}
+			fakeClient := fake.NewClientBuilder().
+				WithScheme(recoverySchemeWithStorage(t)).
+				WithObjects(claim).
+				Build()
+			reconciler := createTestReconciler(fakeClient, fakeClient, createTestConfig())
+
+			blocked, err := reconciler.ensureExportPVCGone(context.Background(), snapshotNames,
+				takeoverRef{DataExportUID: testDataExportUID})
+			require.NoError(t, err)
+			assert.Nil(t, blocked, "a claim that is not ours is not a barrier either: there is nothing to wait for")
+
+			err = fakeClient.Get(context.Background(),
+				types.NamespacedName{Namespace: testExportPVCNamespace, Name: snapshotNames.ExportPVCName},
+				&corev1.PersistentVolumeClaim{})
+			if tt.deleted {
+				assert.True(t, apierrors.IsNotFound(err), "the export's own claim was left behind")
+				return
+			}
+			assert.NoError(t, err, "a claim belonging to another export was deleted")
+		})
+	}
 }
 
 // TestRecovery_BlockedWithoutDiscriminatorNeverEntersRecovery is the boundary between the two blocked

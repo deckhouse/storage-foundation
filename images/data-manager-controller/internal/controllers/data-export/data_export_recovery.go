@@ -222,26 +222,31 @@ func claimBelongsToExport(
 	exportPVC *corev1.PersistentVolumeClaim,
 	pv *corev1.PersistentVolume,
 ) bool {
-	// Snapshot exports are exempt on purpose, and NOT because the evidence is missing: a snapshot claim
-	// is created by the external-provisioner from a VolumeRestoreRequest, and since the executor learned
-	// to copy pvcTemplate.metadata onto the claim it created, new snapshot claims do carry the marker.
-	//
-	// The check stays off for one more rollout: claims made by the previous executor have no marker, and
-	// enforcing here would strand every in-flight snapshot export on CleanupBlocked with no way back.
-	// Turning it on and letting teardown delete only a proven claim is a single later change — the two
-	// must ship together, or the teardown would start refusing to clean up the very claims this exemption
-	// still lets the export use. See the resource-leak-protection design plan, "Происхождение export
-	// claim" and §11, and step 7a of the P0 implementation plan.
+	// The marker written at creation. A claim that names an owner answers the question by itself, and it
+	// answers it for every kind of export: naming somebody else is the one thing no rollout concern can
+	// excuse.
 	//
 	// Do not "simplify" this by stamping the marker ourselves onto a claim found by name: that proves
 	// nothing about where the claim came from, it only makes the adoption look proven.
-	if names.TargetKindShort == dev1alpha1.KindSnapshotShort {
-		return true
-	}
-
-	// The marker written at creation.
 	if owner := exportPVC.Annotations[dev1alpha1.AnnotationDataExportUIDKey]; owner != "" {
 		return owner == string(dataExport.UID)
+	}
+
+	// A snapshot claim with no marker at all is tolerated for one rollout wave, and NOT because the
+	// evidence is unobtainable: such a claim is created by the external-provisioner from a
+	// VolumeRestoreRequest, and since the executor learned to copy pvcTemplate.metadata onto the claim it
+	// creates, new snapshot claims do carry the marker. Claims made by the previous executor do not, and
+	// rejecting them here would strand every in-flight snapshot export on CleanupBlocked with no way
+	// back.
+	//
+	// Requiring the marker instead — and letting teardown delete only a proven claim — is a single later
+	// change; the two must ship together, or teardown would start refusing to clean up the very claims
+	// this tolerance still lets the export use. The precondition is every driver module shipping the
+	// patched external-provisioner, not merely the next release of this one. See the
+	// resource-leak-protection design plan, "Происхождение export claim" and §11, and step 7a of the P0
+	// implementation plan.
+	if names.TargetKindShort == dev1alpha1.KindSnapshotShort {
+		return true
 	}
 
 	// The volume vouches for it: this export took that volume over, and the volume is bound to this
@@ -259,6 +264,19 @@ func claimBelongsToExport(
 	return pv.Spec.ClaimRef.UID == exportPVC.UID &&
 		pv.Annotations[dev1alpha1.AnnotationStorageManagerNamespaceKey] == dataExport.Namespace &&
 		pv.Annotations[dev1alpha1.AnnotationStorageManagerNameKey] == dataExport.Name
+}
+
+// claimMarkerNamesAnotherExport reports whether the claim states, in the marker written when it was
+// created, that it belongs to an export other than the one asking. It is a refusal, not a proof: an
+// absent marker says nothing (a claim from before the marker existed has none), and only a marker naming
+// somebody else is conclusive. An empty dataExportUID means the caller has no parent to compare against —
+// the orphan sweep, which runs after the parent is gone.
+func claimMarkerNamesAnotherExport(dataExportUID types.UID, exportPVC *corev1.PersistentVolumeClaim) bool {
+	if dataExportUID == "" || exportPVC == nil {
+		return false
+	}
+	owner := exportPVC.Annotations[dev1alpha1.AnnotationDataExportUIDKey]
+	return owner != "" && owner != string(dataExportUID)
 }
 
 func describeClaimRef(claimRef *corev1.ObjectReference) string {

@@ -330,6 +330,16 @@ func TestSnapshotClaimIsExemptUntilTheExecutorRolloutCompletes(t *testing.T) {
 	assert.Equal(t, takeoverHealthy, got.kind,
 		"snapshot exports must stay usable without a marker until the updated external-provisioner is rolled out everywhere; enable this together with teardown, not on its own")
 
+	// What the exemption may never excuse: a claim that names a different export. The tolerance exists for
+	// claims made before the marker existed, and those carry no marker at all — a foreign one is a
+	// statement, not a gap, and there is no rollout wave in which acting on it becomes safe.
+	foreign := unmarked.DeepCopy()
+	foreign.Annotations = map[string]string{dev1alpha1.AnnotationDataExportUIDKey: "de-uid-of-somebody-else"}
+	got = classifyTakeoverState(dataExport, snapshotNames, foreign, nil, testExportPVCNamespace)
+	assert.Equal(t, takeoverExportPVCUnproven, got.kind,
+		"a snapshot claim naming another export was accepted as this export's own")
+	assert.Contains(t, got.message, "de-uid-of-somebody-else", "the mismatched owner must be named")
+
 	// The exemption is scoped to the path that does not create its own claim. The same unmarked claim
 	// under an export that creates its claim itself proves nothing and may not be used.
 	pvcNames := common.NewNamesFromShort(dev1alpha1.KindPVCShort, testUserPVCName, dataExportNamespace, dataExportName)

@@ -427,9 +427,21 @@ func (r *DataexportReconciler) ensureExportPVCGone(
 	ours := (holderUID != "" && exportPVC.UID == holderUID) ||
 		(takeover.ExportPVCUID != "" && string(exportPVC.UID) == takeover.ExportPVCUID) ||
 		borrowedNothing
+	// A claim that names another export in its creation marker overrides all of that. The reasons above
+	// infer ownership from a binding or from our own naming; this is the claim's own statement about who
+	// made it, and it is the only evidence here that a stranger cannot produce by accident. The orphan
+	// sweep runs without a parent to compare against and keeps the weaker guarantee.
+	if claimMarkerNamesAnotherExport(takeover.DataExportUID, exportPVC) {
+		ours = false
+	}
 	if !ours {
-		log.Printf("Recovery: claim %s/%s under our name holds nothing of ours (UID %s); leaving it untouched",
-			exportPVC.Namespace, exportPVC.Name, exportPVC.UID)
+		if owner := exportPVC.Annotations[dev1alpha1.AnnotationDataExportUIDKey]; owner != "" {
+			log.Printf("Recovery: claim %s/%s under our name was created by DataExport UID %s; leaving it untouched",
+				exportPVC.Namespace, exportPVC.Name, owner)
+		} else {
+			log.Printf("Recovery: claim %s/%s under our name holds nothing of ours (UID %s); leaving it untouched",
+				exportPVC.Namespace, exportPVC.Name, exportPVC.UID)
+		}
 		return nil, nil
 	}
 
