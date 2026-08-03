@@ -59,7 +59,8 @@ export claim's name but does not belong to this export. Such a foreign object is
 deleted — remove it yourself, and the export finishes on its own.
 
 When upgrading the module, CRDs must be applied before the new controller image. A new controller writing
-`status.cleanupReason` against an old schema would have the field silently dropped by the API server, and
-the return of the volume would never resume.
+`status.cleanupReason` or `status.recovery` against an old schema has the field silently dropped by the API
+server: with no recorded identity the export cannot prove which claim the volume belongs to, so it stops on
+`CleanupBlocked` and the return of the volume never resumes.
 
 For usage examples (the `d8` utility, raw manifests, and the HTTP API reference), see the [usage documentation](usage.html).

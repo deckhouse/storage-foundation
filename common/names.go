@@ -93,18 +93,6 @@ func getShortKind(kind string) string {
 	}
 }
 
-// DeployNameForHash and ExportPVCNameForHash are centralized name generators.
-// They must match the naming pattern in NewNames to ensure orphan resource cleanup works correctly.
-// If the naming pattern changes, update both NewNames and these functions together.
-
-func DeployNameForHash(targetKindShort, hashSuffix string) string {
-	return fmt.Sprintf("deploy-for-%s-%s", targetKindShort, hashSuffix)
-}
-
-func ExportPVCNameForHash(targetKindShort, hashSuffix string) string {
-	return fmt.Sprintf("pvc-for-%s-%s", targetKindShort, hashSuffix)
-}
-
 func ValidateHashAndTarget(targetKindShort, hashSuffix, namespace, name string) error {
 	if !isValidTargetKind(targetKindShort) {
 		return fmt.Errorf("invalid targetKindShort: %q", targetKindShort)
