@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"log"
 
-	virtv1alpha2 "github.com/deckhouse/virtualization/api/core/v1alpha2"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	storagev1 "k8s.io/api/storage/v1"
@@ -17,6 +16,7 @@ import (
 	dev1alpha1 "github.com/deckhouse/storage-foundation/api/v1alpha1"
 	. "github.com/deckhouse/storage-foundation/common"
 	"github.com/deckhouse/storage-foundation/common/publish"
+	virtv1alpha2 "github.com/deckhouse/virtualization/api/core/v1alpha2"
 )
 
 // recoveryBarrier is a safety precondition that has not been met yet. It is returned as data rather than

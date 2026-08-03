@@ -34,12 +34,22 @@ section_end() {
     fi
 }
 
-linter_version="v1.64.5"
-section_start "install_linter" "Installing golangci-lint@$linter_version"
-curl -sSfL https://raw.githubusercontent.com/golangci/golangci-lint/master/install.sh | sh -s -- -b . $linter_version
-section_end "install_linter"
-
 basedir=$(pwd)
+
+# Version and install method are those of CI (deckhouse/modules-actions/go_linter). A mismatch here
+# does not give a different report, it gives no report at all: the configuration file is rejected
+# outright by the other major version of golangci-lint.
+linter_version="v2.9.0"
+
+# The linter type-checks the sources it lints, so it must be built with a toolchain no older than the
+# newest go directive among the modules — otherwise it panics on files it cannot parse. The `go` pin
+# in .golangci.yaml does not help: it only silences the version check that would have reported this
+# before the panic. Taking the version from the modules keeps the two in step without a second place
+# to bump.
+required_go=$(grep -h '^go ' $(find images -type f -name go.mod) | awk '{print $2}' | sort -V | tail -1)
+section_start "install_linter" "Installing golangci-lint@$linter_version (built with go$required_go)"
+GOTOOLCHAIN="go${required_go}" GOBIN="$basedir" go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@$linter_version || exit 1
+section_end "install_linter"
 failed='false'
 
 run_linters() {
@@ -73,7 +83,9 @@ run_linters() {
 $(git diff)
 EOF"
         section_end "print_patch" 
-        git checkout -f
+        # The edits are left in the working copy: --fix ran before this check, so a reset here cannot
+        # tell an auto-fix from work in progress and would discard both. Review the diff above and
+        # commit or revert it.
         failed='true'
     else
         echo -e "\e[32mLinter doesn't have changes requested for $run_for\e[0m"

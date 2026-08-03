@@ -50,7 +50,7 @@ func (m *mutationLog) interceptors() interceptor.Funcs {
 			}
 			return cl.Update(ctx, obj, opts...)
 		},
-		SubResourceUpdate: func(ctx context.Context, cl client.Client, sub string, obj client.Object, opts ...client.SubResourceUpdateOption) error {
+		SubResourceUpdate: func(ctx context.Context, cl client.Client, _ string, obj client.Object, opts ...client.SubResourceUpdateOption) error {
 			if de, ours := obj.(*dev1alpha1.DataExport); ours {
 				m.statusWrites = append(m.statusWrites, *de.Status.DeepCopy())
 			} else {

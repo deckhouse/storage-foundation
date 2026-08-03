@@ -1,60 +1,69 @@
+version: "2"
 run:
-  timeout: 10m
-  allow-parallel-runners: true
-  # golangci-lint v2.9.0 (installed by deckhouse/modules-actions/go_linter) is built with
-  # go1.25 and refuses to lint modules whose go directive is higher. Pin the target language
-  # version so it does not read 1.26.5 from go.mod and fail with "the Go language version
-  # (go1.25) used to build golangci-lint is lower than the targeted Go version".
   go: "1.25"
-
-issues:
-  exclude:
-    - ST1005.*
-    - "should not use dot imports"
-    - "don't use an underscore in package name"
-    - "exported: .*"
-    # Cosmetic staticcheck "quickfix" suggestions (embedded-field / tagged-switch);
-    # not correctness issues, kept consistent with the other suppressed nits above.
-    - "QF1008.*"
-    - "QF1003.*"
-    # Deprecation notices (controller-runtime Result.Requeue, k8s.io/utils/pointer);
-    # migrating them is separate follow-up work, not part of this tooling sync.
-    - "SA1019.*"
-    # gocritic style preference (if-else vs switch).
-    - "ifElseChain: .*"
-    # unparam noise: test/helper functions that take a fixed argument, and
-    # return values kept for API symmetry.
-    - ".* always receives .*"
-    - "result .* is never used"
-    # revive stylistic preference on the internal/utils package name.
-    - "var-naming: avoid meaningless package names"
-
-linters-settings:
-  gci:
-    sections:
-      - standard
-      - default
-      - prefix(github.com/deckhouse)
-
-  errcheck:
-    ignore: fmt:.*,[rR]ead|[wW]rite|[cC]lose,io:Copy
-
+  allow-parallel-runners: true
 linters:
-  disable-all: true
+  default: none
   enable:
+    - copyloopvar
     - dogsled
     - errcheck
-    - gci
     - gocritic
-    - gofmt
-    - gosimple
     - govet
     - ineffassign
     - misspell
     - revive
     - staticcheck
-    - typecheck
     - unconvert
     - unparam
     - whitespace
-    - copyloopvar
+  exclusions:
+    generated: lax
+    presets:
+      - comments
+      - common-false-positives
+      - legacy
+      - std-error-handling
+    rules:
+      - path: (.+)\.go$
+        text: ST1005.*
+      - path: (.+)\.go$
+        text: should not use dot imports
+      - path: (.+)\.go$
+        text: don't use an underscore in package name
+      - path: (.+)\.go$
+        text: 'exported: .*'
+      - path: (.+)\.go$
+        text: QF1008.*
+      - path: (.+)\.go$
+        text: QF1003.*
+      - path: (.+)\.go$
+        text: SA1019.*
+      - path: (.+)\.go$
+        text: 'ifElseChain: .*'
+      - path: (.+)\.go$
+        text: .* always receives .*
+      - path: (.+)\.go$
+        text: result .* is never used
+      - path: (.+)\.go$
+        text: 'var-naming: avoid meaningless package names'
+    paths:
+      - third_party$
+      - builtin$
+      - examples$
+formatters:
+  enable:
+    - gci
+    - gofmt
+  settings:
+    gci:
+      sections:
+        - standard
+        - default
+        - prefix(github.com/deckhouse)
+  exclusions:
+    generated: lax
+    paths:
+      - third_party$
+      - builtin$
+      - examples$
