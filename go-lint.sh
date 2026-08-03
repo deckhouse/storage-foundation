@@ -34,12 +34,37 @@ section_end() {
     fi
 }
 
-linter_version="v1.64.5"
-section_start "install_linter" "Installing golangci-lint@$linter_version"
-curl -sSfL https://raw.githubusercontent.com/golangci/golangci-lint/master/install.sh | sh -s -- -b . $linter_version
-section_end "install_linter"
-
 basedir=$(pwd)
+
+# Version and install method are those of CI (deckhouse/modules-actions/go_linter). A mismatch here
+# does not give a different report, it gives no report at all: the configuration file is rejected
+# outright by the other major version of golangci-lint.
+linter_version="v2.9.0"
+
+# The linter type-checks the sources it lints, so it must be built with a toolchain no older than the
+# newest go directive among the modules — otherwise it panics on files it cannot parse. The `go` pin
+# in .golangci.yaml does not help: it only silences the version check that would have reported this
+# before the panic. Taking the version from the modules keeps the two in step without a second place
+# to bump.
+default_toolchain="go$(grep -h '^go ' $(find images -type f -name go.mod) | awk '{print $2}' | sort -V | tail -1)"
+linter_toolchain="${GOLANGCI_LINT_GOTOOLCHAIN:-$default_toolchain}"
+
+# Keyed by both versions, so a bump of either builds a new binary instead of reusing a stale one.
+# Outside the repository on purpose: the previous location was the working tree, one .gitignore entry
+# away from being committed, and the run had to end by deleting it.
+linter_cache_root="${GOLANGCI_LINT_CACHE_DIR:-${XDG_CACHE_HOME:-$HOME/.cache}/storage-foundation/golangci-lint}"
+linter_bin_dir="$linter_cache_root/$linter_toolchain/$linter_version"
+linter_bin="$linter_bin_dir/golangci-lint"
+
+section_start "install_linter" "Installing golangci-lint@$linter_version with $linter_toolchain"
+if [ ! -x "$linter_bin" ]; then
+    mkdir -p "$linter_bin_dir"
+    if ! GOBIN="$linter_bin_dir" GOTOOLCHAIN="$linter_toolchain" go install "github.com/golangci/golangci-lint/v2/cmd/golangci-lint@$linter_version"; then
+        section_end "install_linter"
+        exit 1
+    fi
+fi
+section_end "install_linter"
 failed='false'
 
 run_linters() {
@@ -51,7 +76,7 @@ run_linters() {
         # check all editions
         for edition in $GO_BUILD_TAGS ;do
             section_start "run_lint" "Running linter in $dir (edition: $edition) for $run_for"
-            ../../golangci-lint run ${extra_args} --fix --color=always --allow-parallel-runners --build-tags $edition
+            "$linter_bin" run ${extra_args} --fix --color=always --allow-parallel-runners --build-tags $edition
             local linter_status=$?
             section_end "run_lint"
             if [ $linter_status -ne 0 ]; then
@@ -73,7 +98,9 @@ run_linters() {
 $(git diff)
 EOF"
         section_end "print_patch" 
-        git checkout -f
+        # The edits are left in the working copy: --fix ran before this check, so a reset here cannot
+        # tell an auto-fix from work in progress and would discard both. Review the diff above and
+        # commit or revert it.
         failed='true'
     else
         echo -e "\e[32mLinter doesn't have changes requested for $run_for\e[0m"
@@ -85,8 +112,6 @@ if [ -n "${CI_MERGE_REQUEST_DIFF_BASE_SHA}" ]; then
 fi
 
 run_linters "all files"
-
-rm golangci-lint
 
 if [ $failed == 'true' ]; then
     exit 1

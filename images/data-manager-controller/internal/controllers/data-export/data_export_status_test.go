@@ -118,6 +118,117 @@ func TestComputeDataExportPhase(t *testing.T) {
 	}
 }
 
+func deInRecovery(reason common.CleanupReason, ready *metav1.Condition) *dev1alpha1.DataExport {
+	de := deWith(common.ServerStateReady, ready)
+	de.Status.CleanupReason = string(reason)
+	return de
+}
+
+// TestComputeDataExportPhase_RecoveryGate pins the load-bearing invariant of the managed-resource
+// contract: while status.cleanupReason is set the object still owes a recovery, so it must not reach a
+// terminal phase. Terminal means reapable by the garbage collector, and reaping a DataExport mid-recovery
+// abandons a PV that is still bound to a claim the user does not own.
+func TestComputeDataExportPhase_RecoveryGate(t *testing.T) {
+	tests := []struct {
+		name      string
+		de        *dev1alpha1.DataExport
+		reconcile error
+		want      common.Phase
+	}{
+		{
+			name: "recovery owed → Pending, not Failed",
+			de:   deInRecovery(common.CleanupReasonExportPVCPostRebindLost, readyCond(metav1.ConditionFalse, common.ReasonManagedResourceLost)),
+			want: common.PhasePending,
+		},
+		{
+			name:      "recovery owed + terminal reconcile error → Pending",
+			de:        deInRecovery(common.CleanupReasonExportPVCPostRebindLost, readyCond(metav1.ConditionFalse, common.ReasonManagedResourceLost)),
+			reconcile: fmt.Errorf("%w: boom", ErrTerminal),
+			want:      common.PhasePending,
+		},
+		{
+			name: "recovery owed + blocked barrier → Pending",
+			de:   deInRecovery(common.CleanupReasonExportPVCPostRebindLost, readyCond(metav1.ConditionFalse, common.ReasonCleanupBlocked)),
+			want: common.PhasePending,
+		},
+		{
+			name: "recovery owed while idle-expired → Pending, expiry does not win",
+			de: func() *dev1alpha1.DataExport {
+				de := deInRecovery(common.CleanupReasonExportPVCPostRebindLost, readyCond(metav1.ConditionFalse, common.ReasonManagedResourceLost))
+				de.Status.ServerState = string(common.ServerStateIdleExpired)
+				return de
+			}(),
+			want: common.PhasePending,
+		},
+		{
+			// Unreachable by construction (the controller writes the discriminator and the phase in one
+			// update), but a hand-edited or partially-migrated object must not stay reapable while it
+			// still owes work: the recovery branch re-stamps the terminal phase once it is done.
+			name: "recovery owed on a settled terminal phase → un-sticks to Pending",
+			de: func() *dev1alpha1.DataExport {
+				de := deInRecovery(common.CleanupReasonExportPVCPostRebindLost, readyCond(metav1.ConditionFalse, common.ReasonManagedResourceLost))
+				de.Status.Phase = string(common.PhaseFailed)
+				return de
+			}(),
+			want: common.PhasePending,
+		},
+		{
+			// Deletion still wins: the deletion branch runs the very same recovery primitive.
+			name: "deletion during recovery → Terminating",
+			de: func() *dev1alpha1.DataExport {
+				de := deInRecovery(common.CleanupReasonExportPVCPostRebindLost, readyCond(metav1.ConditionFalse, common.ReasonManagedResourceLost))
+				ts := metav1.NewTime(deFixedNow.Add(-time.Minute))
+				de.DeletionTimestamp = &ts
+				de.Finalizers = []string{dev1alpha1.StorageManagerFinalizerName}
+				return de
+			}(),
+			want: common.PhaseTerminating,
+		},
+		{
+			name: "recovery finished (discriminator cleared) → Failed",
+			de:   deInRecovery("", readyCond(metav1.ConditionFalse, common.ReasonManagedResourceLost)),
+			want: common.PhaseFailed,
+		},
+		{
+			name: "identity mismatch recovery finished → Failed",
+			de:   deInRecovery("", readyCond(metav1.ConditionFalse, common.ReasonManagedResourceIdentityMismatch)),
+			want: common.PhaseFailed,
+		},
+		{
+			// CleanupBlocked is not an outcome: without the discriminator it means the operator cleared
+			// the field by hand mid-barrier, and inventing a terminal phase there would hide the stall.
+			name: "blocked barrier without discriminator → Pending, not Failed",
+			de:   deInRecovery("", readyCond(metav1.ConditionFalse, common.ReasonCleanupBlocked)),
+			want: common.PhasePending,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, computeDataExportPhase(tt.de, tt.reconcile))
+		})
+	}
+}
+
+func TestFinalizeDataExportStatus_NoCompletionTimestampWhileRecoveryOwed(t *testing.T) {
+	r := newDEStatusReconciler(deFixedNow)
+	de := deInRecovery(common.CleanupReasonExportPVCPostRebindLost, readyCond(metav1.ConditionFalse, common.ReasonManagedResourceLost))
+
+	r.finalizeDataExportStatus(de, nil)
+
+	assert.Equal(t, string(common.PhasePending), de.Status.Phase)
+	assert.Nil(t, de.Status.CompletionTimestamp,
+		"retention must be measured from the end of recovery, not from the moment the loss was noticed")
+
+	// Recovery finished: the same object now reaches the terminal phase and stamps the timestamp once.
+	de.Status.CleanupReason = ""
+	r.finalizeDataExportStatus(de, nil)
+
+	assert.Equal(t, string(common.PhaseFailed), de.Status.Phase)
+	require.NotNil(t, de.Status.CompletionTimestamp)
+	assert.Equal(t, deFixedNow.Time, de.Status.CompletionTimestamp.Time)
+}
+
 func TestComputeDataExportPhase_StickyTerminal(t *testing.T) {
 	de := deWith(common.ServerStateReady, readyCond(metav1.ConditionTrue, common.ReasonServerReady))
 	de.Status.Phase = string(common.PhaseExpired) // already terminal
@@ -224,13 +335,12 @@ func TestUpdateDataExport_PreservesConcurrentPodFields(t *testing.T) {
 	assert.Equal(t, metav1.ConditionTrue, ready.Status)
 }
 
-// TestRecoverUserPVC_AlreadyRestoredIsIdempotent is the drift-repair idempotency guard (finding: a healthy
-// already-restored PV must not be flagged inconsistent on a re-run). If the controller crashed after
-// restoreOriginalPVState stripped the export marker/annotations but before the finalizer removal persisted,
-// the next reconcile re-enters recoverUserPVC. Without the guard it would find no original-reclaimPolicy
-// annotation, flag the healthy PV inconsistent and wedge cleanup forever (CR stuck Terminating). The guard
-// must instead treat the missing export marker as "already restored" and just finish the PVC cleanup.
-func TestRecoverUserPVC_AlreadyRestoredIsIdempotent(t *testing.T) {
+// TestRecovery_AlreadyRestoredIsIdempotent is the crash-window guard. The export marker is the last thing
+// a completed restore removes, so a controller that died between stripping it and persisting the
+// finalizer removal comes back to a healthy volume it has already returned. Re-running the restore on it
+// would find no original reclaim policy to put back, condemn the volume as inconsistent and wedge cleanup
+// forever. The missing marker must instead read as "already given back".
+func TestRecovery_AlreadyRestoredIsIdempotent(t *testing.T) {
 	scheme := setupTestScheme()
 	require.NoError(t, corev1.SchemeBuilder.AddToScheme(scheme))
 
@@ -256,8 +366,14 @@ func TestRecoverUserPVC_AlreadyRestoredIsIdempotent(t *testing.T) {
 	fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(pv, userPVC).Build()
 	r := createTestReconciler(fakeClient, fakeClient, createTestConfig())
 
-	err := r.recoverUserPVC(context.Background(), "test-ns", "user-pvc", dataExportName, pv)
+	done, blocked, err := r.reconcileLiveExportRecovery(context.Background(), testNames, takeoverRef{
+		PVName:        pv.Name,
+		SourceClaim:   types.NamespacedName{Namespace: "test-ns", Name: "user-pvc"},
+		DataExportUID: testDataExportUID,
+	})
 	require.NoError(t, err, "recovering an already-restored PV must be a no-op success, not an error")
+	assert.Nil(t, blocked)
+	assert.True(t, done)
 
 	// The healthy PV must NOT be flagged inconsistent.
 	gotPV := &corev1.PersistentVolume{}

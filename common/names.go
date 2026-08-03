@@ -53,10 +53,20 @@ func NewNames(targetKind, targetName, namespace, name string) Names {
 // (pvc/vd/snap/...). DataExport (C6) resolves the short from the GroupKind targetRef directly via
 // classifyTargetRef, so it calls this instead of NewNames; DataImport still goes through NewNames with a kind.
 func NewNamesFromShort(targetKindShort, targetName, namespace, name string) Names {
-	hashSuffix := generateHashSuffix(namespace, name)
+	names := NewNamesFromPersistedIdentity(targetKindShort, generateHashSuffix(namespace, name))
+	names.TargetName = targetName
+	return names
+}
 
+// NewNamesFromPersistedIdentity rebuilds the generated names from the suffix that was recorded when the
+// resources were created, instead of deriving one again. It exists for the orphan sweep, which runs after
+// the owner is gone: recomputing would mean re-deriving the identity of resources from what is left of
+// the world and hoping the answer matches what was actually created. The recorded suffix is that answer.
+//
+// TargetName is deliberately not set: it names what was exported, which no generated name depends on, and
+// the sweep has no trustworthy source for it.
+func NewNamesFromPersistedIdentity(targetKindShort, hashSuffix string) Names {
 	return Names{
-		TargetName:          targetName,
 		TargetKindShort:     targetKindShort,
 		HashSuffix:          hashSuffix,
 		DeployName:          fmt.Sprintf("deploy-for-%s-%s", targetKindShort, hashSuffix),
@@ -81,18 +91,6 @@ func getShortKind(kind string) string {
 	default:
 		return kind
 	}
-}
-
-// DeployNameForHash and ExportPVCNameForHash are centralized name generators.
-// They must match the naming pattern in NewNames to ensure orphan resource cleanup works correctly.
-// If the naming pattern changes, update both NewNames and these functions together.
-
-func DeployNameForHash(targetKindShort, hashSuffix string) string {
-	return fmt.Sprintf("deploy-for-%s-%s", targetKindShort, hashSuffix)
-}
-
-func ExportPVCNameForHash(targetKindShort, hashSuffix string) string {
-	return fmt.Sprintf("pvc-for-%s-%s", targetKindShort, hashSuffix)
 }
 
 func ValidateHashAndTarget(targetKindShort, hashSuffix, namespace, name string) error {

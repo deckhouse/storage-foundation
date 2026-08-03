@@ -139,8 +139,14 @@ Contract:
   uses the template's storage class, volume mode and access modes (default `ReadWriteOnce`), plus root
   `fsType` for Filesystem volumes. For a `PersistentVolume` source, the source PV is authoritative
   for volume mode, access modes, filesystem type and capacity; corresponding template values are not
-  the effective restore shape. Neither path copies template labels/annotations or treats
-  `pvcTemplate.spec.resources.requests.storage` as authoritative.
+  the effective restore shape. Neither path treats `pvcTemplate.spec.resources.requests.storage` as
+  authoritative.
+- `pvcTemplate.metadata` labels and annotations ARE copied onto the created PVC, on both source paths.
+  They are the only way a requester can recognize the PVC it asked for afterwards: the name is the
+  requester's own to choose, and the executor puts no reference to the VRR on the object. They are
+  applied at creation only — an already existing PVC of that name is left untouched (`AlreadyExists`
+  stays idempotent success), so a foreign object is never stamped into looking like the requested one.
+  A requester that must prove provenance therefore has to treat an unmarked PVC as not its own.
 - Supported source kinds are `VolumeSnapshotContent` and `PersistentVolume`. The current controller
   and executor select a source by `kind` and `name`; `sourceRef.apiVersion`, `namespace`, and `uid` are
   not enforced against the live source. Backlog item #28 tracks source identity and admission

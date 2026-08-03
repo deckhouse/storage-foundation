@@ -54,6 +54,17 @@ const (
 	// Used together with AnnotationUserPVCNamespaceKey to restore PV binding after export.
 	AnnotationUserPVCNameKey = "storage-foundation.deckhouse.io/original-pvc-name"
 
+	// AnnotationUserPVCUIDKey is a PV annotation that stores the original user PVC UID. Namespace/name
+	// alone cannot prove identity: a claim recreated under the same name gets a fresh UID, and rebinding
+	// the PV to it would silently hand the volume to a different object than the one it was taken from.
+	AnnotationUserPVCUIDKey = "storage-foundation.deckhouse.io/original-pvc-uid"
+	// AnnotationDataExportUIDKey is a PV annotation that stores the UID of the DataExport that took the
+	// PV over. It lets the orphan path tell "my own leftover" from "a same-named later DataExport",
+	// which must never adopt or restore another run's volume. The key names the DataExport explicitly:
+	// a generic "storage-manager" key would invite reuse for the controller identity or for another
+	// transfer kind, and the two cannot share one value.
+	AnnotationDataExportUIDKey = "storage-foundation.deckhouse.io/data-export-uid"
+
 	// AnnotationPVTargetKindShortKey is a PV annotation that stores the target kind short name (pvc/vd/vs/vdsnapshot).
 	// Used to reconstruct deployment and exportPVC names during orphan cleanup when DataExport is already deleted.
 	AnnotationPVTargetKindShortKey = "storage-foundation.deckhouse.io/target-ref"

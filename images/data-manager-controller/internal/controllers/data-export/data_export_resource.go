@@ -78,11 +78,24 @@ func (r *DataexportReconciler) now() metav1.Time {
 type pvRecoveryInfo struct {
 	UserPVCNamespace      string
 	UserPVCName           string
+	UserPVCUID            string
 	DataExportNamespace   string
 	DataExportName        string
+	DataExportUID         string
 	TargetKindShort       string
 	HashSuffix            string
 	OriginalReclaimPolicy corev1.PersistentVolumeReclaimPolicy
+}
+
+// pvOwnerExpectation is what a caller can prove about the takeover the PV records. Namespace/name are
+// always known; the UIDs are not — the orphan sweep starts from a parent that no longer exists, and a
+// legacy takeover predates the UID annotations entirely. An empty expectation therefore means "no
+// opinion" and skips the corresponding check rather than failing.
+type pvOwnerExpectation struct {
+	DataExportNamespace string
+	DataExportName      string
+	DataExportUID       types.UID
+	SourcePVCUID        types.UID
 }
 
 const (
@@ -107,6 +120,13 @@ var (
 	// turns it into a terminal phase=Failed and stops requeueing. Transient errors (API/get failures) are
 	// NOT wrapped and keep the object retryable (a permanently-pending export is legal, never GC'd).
 	ErrTerminal = errors.New("terminal")
+
+	// errTakeoverNotHealthy ends a reconcile whose verdict is already on the object: the state was
+	// classified and recorded, and the pass has nothing left to do. It never leaves Reconcile — it only
+	// buys a requeue, because a blocked export waits on something the controller does not watch (a
+	// stranger's claim being removed, a volume reappearing), and without one it would sit at its barrier
+	// until the resync.
+	errTakeoverNotHealthy = errors.New("takeover state is not healthy")
 )
 
 func (r *DataexportReconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ctrl.Result, err error) {
@@ -118,7 +138,14 @@ func (r *DataexportReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 		if kubeerrors.IsNotFound(err) {
 			// DataExport resource not found, it may have been deleted after the event was received.
 			log.Printf("DataExport resource %s/%s not found, checking for orphaned resources\n", req.Namespace, req.Name)
-			return ctrl.Result{}, r.removeOrphanResources(ctx, req.Namespace, req.Name)
+			blocked, err := r.removeOrphanResources(ctx, req.Namespace, req.Name)
+			if blocked != nil {
+				// There is no object left to report on, so the barrier lives in the log and in the fact
+				// that the volume keeps its export marks until the way is clear.
+				log.Printf("Orphan cleanup for %s/%s held by %s", req.Namespace, req.Name, blocked)
+				return ctrl.Result{RequeueAfter: dataExportRequeueInterval}, nil
+			}
+			return ctrl.Result{}, err
 		}
 		return ctrl.Result{}, fmt.Errorf("failed to get DataExport resource from cache: %w", err)
 	}
@@ -180,15 +207,38 @@ func (r *DataexportReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 			return ctrl.Result{}, nil
 		}
 		delNames := NewNamesFromShort(delTargetKindShort, dataExport.Spec.TargetRef.Name, dataExport.Namespace, dataExport.Name)
-		if err := r.clearDataExportProviding(ctx, dataExport, delNames); err != nil {
+		done, blocked, err := r.clearDataExportProviding(ctx, dataExport, delNames)
+		switch {
+		case err != nil:
 			if errors.Is(err, ErrInvalidOriginalReclaimPolicy) {
 				// PV was labeled as inconsistent (missing or corrupted original reclaimPolicy).
 				// Stop reconcile without error or requeue — finalizer stays, admin must investigate.
 				return ctrl.Result{}, nil
 			}
 			return ctrl.Result{}, fmt.Errorf("%w: failed to restore configuration before DE: %w", ErrCleanupFailed, err)
+		case blocked != nil:
+			// Deletion is the only path allowed to drop the finalizer, and it may not do so while the
+			// teardown is unfinished: that finalizer is what keeps the volume's way home reachable.
+			log.Printf("DataExport %s/%s: deletion held by %s", req.Namespace, req.Name, blocked)
+			setCleanupBlocked(dataExport, blocked)
+			return ctrl.Result{RequeueAfter: dataExportRequeueInterval}, nil
+		case !done:
+			return ctrl.Result{RequeueAfter: dataExportRequeueInterval}, nil
 		}
+		RemoveFinalizer(ctx, r.Client, dataExport, dev1alpha1.StorageManagerFinalizerName)
 		return ctrl.Result{}, nil
+	}
+
+	// Case 1b: a managed resource this export depends on was lost or replaced, and the object owes a
+	// recovery before it may settle. This runs ahead of expiry, the terminal no-op and provisioning:
+	// expiry teardown assumes the export claim still exists and would drop the finalizer that keeps the
+	// recovery reachable, and provisioning would try to take the volume over a second time. It runs
+	// before spec validation too — the discriminator is only ever set after provisioning succeeded, so a
+	// spec that turned invalid afterwards must not strand a half-restored volume.
+	if dataExport.Status.CleanupReason != "" {
+		log.Printf("Case 1b: DataExport resource %s/%s owes managed-resource recovery (%s)",
+			req.Namespace, req.Name, dataExport.Status.CleanupReason)
+		return r.reconcileManagedResourceRecovery(ctx, dataExport)
 	}
 
 	err = r.validateDataExportSpec(ctx, dataExport)
@@ -249,20 +299,26 @@ func (r *DataexportReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 				ObservedGeneration: dataExport.Generation,
 			})
 		}
-		// Run the PV/PVC restore + teardown ONCE: clearDataExportProviding removes our finalizer when it
-		// finishes, so gate on the finalizer still being present. Expired is a long-lived state (the CR is
-		// kept for the GC), and clearDataExportProviding -> recoverUserPVC is NOT idempotent — re-running it
-		// on an already-restored PV would mark the healthy PV inconsistent.
+		// Expired is a long-lived state (the CR is kept for the GC), so the teardown is gated on our
+		// finalizer still being there: dropping it is what records that the restore is done.
 		if ContainsString(dataExport.Finalizers, dev1alpha1.StorageManagerFinalizerName) {
-			err = r.clearDataExportProviding(ctx, dataExport, generatedNames)
-			if err != nil {
+			done, blocked, err := r.clearDataExportProviding(ctx, dataExport, generatedNames)
+			switch {
+			case err != nil:
 				if errors.Is(err, ErrInvalidOriginalReclaimPolicy) {
 					// PV was labeled as inconsistent (missing or corrupted original reclaimPolicy).
 					// Stop reconcile without error or requeue — finalizer stays, admin must investigate.
 					return ctrl.Result{}, nil
 				}
 				return ctrl.Result{}, fmt.Errorf("%w: failed to restore configuration before DE: %w", ErrCleanupFailed, err)
+			case blocked != nil:
+				log.Printf("DataExport %s/%s: expiry teardown held by %s", req.Namespace, req.Name, blocked)
+				setCleanupBlocked(dataExport, blocked)
+				return ctrl.Result{RequeueAfter: dataExportRequeueInterval}, nil
+			case !done:
+				return ctrl.Result{RequeueAfter: dataExportRequeueInterval}, nil
 			}
+			RemoveFinalizer(ctx, r.Client, dataExport, dev1alpha1.StorageManagerFinalizerName)
 		}
 		return ctrl.Result{}, nil
 	}
@@ -298,6 +354,9 @@ func (r *DataexportReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 		log.Printf("Case 4: DataExport resource needs to initial or continue implementation")
 		err = r.implementDataExportProviding(ctx, dataExport, generatedNames)
 		if err != nil {
+			if errors.Is(err, errTakeoverNotHealthy) {
+				return ctrl.Result{RequeueAfter: dataExportRequeueInterval}, nil
+			}
 			if errors.Is(err, ErrPVCValidationFailed) {
 				meta.SetStatusCondition(&dataExport.Status.Conditions, metav1.Condition{
 					Type:               string(ConditionReady),
@@ -314,12 +373,92 @@ func (r *DataexportReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 	// Case 5: DataExport resource already implemented
 	default:
 		if err := r.reconcilePodReadyResources(ctx, dataExport, generatedNames); err != nil {
+			if errors.Is(err, errTakeoverNotHealthy) {
+				return ctrl.Result{RequeueAfter: dataExportRequeueInterval}, nil
+			}
 			return ctrl.Result{}, err
 		}
 		log.Printf("Case 5: DataExport resource providing already implemented")
 	}
 
 	return ctrl.Result{}, nil
+}
+
+// reconcileManagedResourceRecovery drives an object whose status.cleanupReason is set: it restores the
+// user's volume, tears the export infrastructure down and only then lets the object settle as Failed
+// (clearing the discriminator in the same status write that stamps the phase).
+//
+// Entry is keyed on the discriminator alone, never on the Ready reason. A blocked cleanup that carries no
+// discriminator means the controller could not prove a safe target at all; it must stay out of here
+// rather than have the barriers decide whether to proceed with an unproven one.
+func (r *DataexportReconciler) reconcileManagedResourceRecovery(ctx context.Context, dataExport *dev1alpha1.DataExport) (ctrl.Result, error) {
+	_, targetKindShort, err := classifyTargetRef(dataExport.Spec.TargetRef.Group, dataExport.Spec.TargetRef.Kind)
+	if err != nil {
+		// The spec turned invalid after the takeover. The recorded identity, not the spec, says what has
+		// to be given back, so this must not strand the volume — but naming needs the kind, so fall back
+		// to the kind the takeover was made with.
+		targetKindShort = dev1alpha1.KindPVCShort
+	}
+	names := NewNamesFromShort(targetKindShort, dataExport.Spec.TargetRef.Name, dataExport.Namespace, dataExport.Name)
+
+	done, blocked, err := r.clearDataExportProviding(ctx, dataExport, names)
+	if err != nil {
+		return ctrl.Result{}, fmt.Errorf("%w: managed-resource recovery: %w", ErrCleanupFailed, err)
+	}
+	if blocked != nil {
+		log.Printf("DataExport %s/%s: recovery blocked by %s", dataExport.Namespace, dataExport.Name, blocked)
+		setCleanupBlocked(dataExport, blocked)
+		return ctrl.Result{RequeueAfter: dataExportRequeueInterval}, nil
+	}
+	if !done {
+		return ctrl.Result{RequeueAfter: dataExportRequeueInterval}, nil
+	}
+
+	// The recovery finished. Restating the failure that caused it and clearing the discriminator happen in
+	// the same in-memory mutation, so the object never appears with one and not the other: an empty
+	// discriminator next to a managed-resource failure reason is exactly what tells the phase computation
+	// that the mandatory restore is behind us.
+	log.Printf("DataExport %s/%s: managed-resource recovery finished (%s)",
+		dataExport.Namespace, dataExport.Name, dataExport.Status.CleanupReason)
+	meta.SetStatusCondition(&dataExport.Status.Conditions, metav1.Condition{
+		Type:               string(ConditionReady),
+		Status:             metav1.ConditionFalse,
+		Reason:             string(recoveryOutcomeReason(CleanupReason(dataExport.Status.CleanupReason))),
+		Message:            recoveryOutcomeMessage(CleanupReason(dataExport.Status.CleanupReason)),
+		ObservedGeneration: dataExport.Generation,
+	})
+	dataExport.Status.CleanupReason = ""
+	dataExport.Status.Recovery = nil
+	return ctrl.Result{}, nil
+}
+
+// setCleanupBlocked reports an unmet barrier on the object. Every path that runs the teardown says it the
+// same way, because from the outside they are the same situation: the controller knows what it owes and
+// cannot safely do it yet.
+func setCleanupBlocked(dataExport *dev1alpha1.DataExport, blocked *recoveryBarrier) {
+	meta.SetStatusCondition(&dataExport.Status.Conditions, metav1.Condition{
+		Type:               string(ConditionReady),
+		Status:             metav1.ConditionFalse,
+		Reason:             string(ReasonCleanupBlocked),
+		Message:            blocked.String(),
+		ObservedGeneration: dataExport.Generation,
+	})
+}
+
+// recoveryOutcomeReason maps the discriminator back to the failure it was set for, so the settled object
+// keeps saying what went wrong rather than ending on the barrier chatter of the last blocked pass.
+func recoveryOutcomeReason(cleanupReason CleanupReason) ConditionReason {
+	if cleanupReason == CleanupReasonExportPVCIdentityMismatch {
+		return ReasonManagedResourceIdentityMismatch
+	}
+	return ReasonManagedResourceLost
+}
+
+func recoveryOutcomeMessage(cleanupReason CleanupReason) string {
+	if cleanupReason == CleanupReasonExportPVCIdentityMismatch {
+		return "the export claim was replaced; the volume has been returned to its owner and the export was torn down"
+	}
+	return "the export claim was lost; the volume has been returned to its owner and the export was torn down"
 }
 
 // mutateReadyByErr maps known reconcile errors to Ready condition reasons.
@@ -381,11 +520,20 @@ func isDataExportExpired(de *dev1alpha1.DataExport) bool {
 // computeDataExportPhase derives the coarse-grained phase (a DataExport has no Completed phase). A
 // terminal phase is STICKY, and terminal transitions are EXPLICIT: Failed only from an ErrTerminal
 // reconcile error (never from an ambiguous condition reason like ValidationFailed that is also used for
-// retryable failures), Expired from the idle signal. Precedence: deletion > sticky-terminal > expired >
-// failed > ready > pending.
+// retryable failures) or from a finished managed-resource recovery, Expired from the idle signal.
+// Precedence: deletion > owed recovery > sticky-terminal > expired > failed > ready > pending.
 func computeDataExportPhase(de *dev1alpha1.DataExport, reconcileErr error) Phase {
 	if de.DeletionTimestamp != nil {
 		return PhaseTerminating
+	}
+	// An object that still owes a managed-resource recovery must not be terminal, because terminal means
+	// reapable: the garbage collector would delete the DataExport while the PV is still bound to a claim
+	// the user does not own, and the only cheap entry point into the recovery context would go with it.
+	// This outranks stickiness on purpose — a settled terminal phase found next to a non-empty
+	// discriminator is not a legal state, and un-sticking is the safe direction (the recovery branch
+	// re-stamps the terminal phase when it finishes).
+	if de.Status.CleanupReason != "" {
+		return PhasePending
 	}
 	if Phase(de.Status.Phase).IsTerminal() {
 		return Phase(de.Status.Phase)
@@ -394,6 +542,13 @@ func computeDataExportPhase(de *dev1alpha1.DataExport, reconcileErr error) Phase
 		return PhaseExpired
 	}
 	if errors.Is(reconcileErr, ErrTerminal) {
+		return PhaseFailed
+	}
+	// Recovery finished: an empty discriminator next to a managed-resource failure reason is the
+	// persisted proof that the mandatory restore already ran, so the operation may now settle as Failed.
+	// This needs no ErrTerminal, because the last recovery pass returns success.
+	if ready := meta.FindStatusCondition(de.Status.Conditions, string(ConditionReady)); ready != nil &&
+		ready.Status == metav1.ConditionFalse && IsManagedResourceFailureReason(ConditionReason(ready.Reason)) {
 		return PhaseFailed
 	}
 	if meta.IsStatusConditionTrue(de.Status.Conditions, string(ConditionReady)) {
@@ -491,6 +646,18 @@ func (r *DataexportReconciler) implementDataExportProviding(ctx context.Context,
 		return err
 	}
 
+	// A missing export claim is only re-creatable while the volume has not changed hands yet; afterwards
+	// re-creating it is impossible and provisioning would take the volume over a second time.
+	state, err := r.resolveTakeoverState(ctx, dataExport, generatedNames, exportPVC)
+	if err != nil {
+		return err
+	}
+	if state.kind != takeoverHealthy {
+		log.Printf("DataExport %s/%s: %s", dataExport.Namespace, dataExport.Name, state.message)
+		applyManagedResourceFailure(dataExport, state)
+		return errTakeoverNotHealthy
+	}
+
 	if exportPVC == nil {
 		log.Printf("Export PVC %s not found for DataExport resource %s, creating new one", generatedNames.ExportPVCName, dataExport.Name)
 
@@ -498,7 +665,7 @@ func (r *DataexportReconciler) implementDataExportProviding(ctx context.Context,
 		case dev1alpha1.KindPVCShort:
 			log.Printf("Export target kind: %s", generatedNames.TargetKindShort)
 			userPVCName = dataExport.Spec.TargetRef.Name
-			exportPVC, pv, err = r.getExportPVCFromUserPVC(ctx, dataExport.Namespace, userPVCName, generatedNames.ExportPVCName, dataExport.Name)
+			exportPVC, pv, err = r.getExportPVCFromUserPVC(ctx, dataExport.Namespace, userPVCName, generatedNames.ExportPVCName, dataExport)
 			if err != nil {
 				return fmt.Errorf("failed to process user PVC export: %w", err)
 			}
@@ -582,11 +749,28 @@ func (r *DataexportReconciler) reconcilePodReadyResources(ctx context.Context, d
 	// the missing Deployment. The phase goes Ready->Pending, never to a terminal outcome: downtime does not
 	// burn the idle TTL, because the recreated exporter pod restarts its idle timer from scratch.
 	//
-	// Scope: only the Deployment is repaired here. The export PVC is intentionally NOT drift-checked — once
-	// the user PV has been rebound onto the export PVC, that PVC cannot be recreated (its bound PV pins the
-	// deleted PVC UID via claimRef), so treating its loss as drift would wedge the object in a permanent
-	// ValidationFailed requeue loop. The CA Secret is (re)created by the exporter pod on start, so its loss
-	// is repaired by the pod once the Deployment exists.
+	// Scope: only the Deployment is repaired here. The export PVC is NOT repairable — once the user PV has
+	// been rebound onto it, that claim cannot be recreated (the binding pins the deleted claim's UID), so
+	// its loss is a failure to recover from rather than drift to fix, and it is classified below before
+	// anything else runs. The CA Secret is (re)created by the exporter pod on start, so its loss is
+	// repaired by the pod once the Deployment exists.
+	//
+	// The claim is checked first: with the volume bound to a claim that no longer exists, the export
+	// serves nothing, and recreating its Deployment would only rebuild a pod around a dead claim.
+	exportPVC, err := r.getExportPVC(ctx, generatedNames.ExportPVCName)
+	if err != nil {
+		return err
+	}
+	state, err := r.resolveTakeoverState(ctx, dataExport, generatedNames, exportPVC)
+	if err != nil {
+		return err
+	}
+	if state.kind != takeoverHealthy {
+		log.Printf("DataExport %s/%s: %s", dataExport.Namespace, dataExport.Name, state.message)
+		applyManagedResourceFailure(dataExport, state)
+		return errTakeoverNotHealthy
+	}
+
 	deploy, err := r.getServerDeployment(ctx, generatedNames.DeployName)
 	if err != nil {
 		return err
@@ -776,14 +960,39 @@ func (r *DataexportReconciler) ensureExportPVReady(ctx context.Context, pv *core
 		}
 	}
 
-	if err := r.ensureUserPVCExportingAnnotationAndFinalizer(ctx, dataExport.Namespace, userPVCName); err != nil {
+	userPVC, err := r.ensureUserPVCExportingAnnotationAndFinalizer(ctx, dataExport.Namespace, userPVCName)
+	if err != nil {
 		return err
 	}
 
 	// Check if PV already has all required annotations with correct values.
 	// The parsed result is not needed - only validation matters
-	_, err := parsePVRecoveryInfo(pv, dataExport.Namespace, dataExport.Name)
+	_, err = parsePVRecoveryInfo(pv, pvOwnerExpectation{
+		DataExportNamespace: dataExport.Namespace,
+		DataExportName:      dataExport.Name,
+		DataExportUID:       dataExport.UID,
+		SourcePVCUID:        userPVC.UID,
+	})
+	// An identity conflict is not drift to be patched over: re-annotating the PV would erase the record
+	// of the takeover that is actually in force. Report it and leave both the PV and our status alone —
+	// recording the live identity here would put into status exactly the takeover the PV just rejected.
+	if errors.Is(err, ErrPVConflict) {
+		return err
+	}
 	infoIsValid := err == nil
+
+	// Record who the volume is being taken from before anything is taken. This runs on every pass, not
+	// only on the one that patches the PV, so a controller that died between the patch and the status
+	// write repairs the record instead of losing it. A legacy takeover cannot be recorded at all — see
+	// takeoverIdentityIsProvable.
+	identityProvable := takeoverIdentityIsProvable(pv, userPVC)
+	if identityProvable {
+		if err := recordTakeoverIdentity(dataExport, pv, exportPVC, userPVC); err != nil {
+			return err
+		}
+	} else {
+		log.Printf("PV %s carries a pre-UID takeover; running without a recorded identity", pv.Name)
+	}
 
 	// PV spec must also be in export-ready state:
 	// ReclaimPolicy=Retain protects data, ClaimRef binds PV to exportPVC.
@@ -797,7 +1006,7 @@ func (r *DataexportReconciler) ensureExportPVReady(ctx context.Context, pv *core
 		return nil
 	}
 
-	if err := r.patchPVLabelAnnotationsClaimRef(ctx, pv, exportPVC, dataExport, generatedNames, userPVCName); err != nil {
+	if err := r.patchPVLabelAnnotationsClaimRef(ctx, pv, exportPVC, dataExport, generatedNames, userPVC, identityProvable); err != nil {
 		log.Printf("failed to patch PV %s: %v", pv.Name, err)
 		return err
 	}
@@ -805,9 +1014,111 @@ func (r *DataexportReconciler) ensureExportPVReady(ctx context.Context, pv *core
 	return nil
 }
 
-func (r *DataexportReconciler) detachPVC(ctx context.Context, userPVC *corev1.PersistentVolumeClaim, pv *corev1.PersistentVolume, exportPVCName, dataExportName string) (*corev1.PersistentVolumeClaim, error) {
+// rebindIdentityExpectation says what the caller of a rebind can prove about the takeover it is undoing.
+// An empty DataExportUID means it cannot prove one: the orphan sweep starts from a parent that is already
+// gone, so the recorded export UID is read but not judged. Making that a parameter keeps the limits of
+// each path visible at its call site instead of resting on what some earlier call happened to check.
+type rebindIdentityExpectation struct {
+	DataExportUID types.UID
+}
+
+// checkRebindIdentity decides whether the volume may be handed back to the claim found by name:
+//
+//	identity recorded and matching what the caller can prove -> rebind
+//	recorded source claim UID differs from the live claim    -> refuse; that is a different owner
+//	recorded export UID differs from a provable expectation  -> refuse; that is a different export
+//	exactly one annotation recorded                          -> refuse; half an identity is corruption
+//	neither recorded                                         -> rebind on the legacy namespace/name contract
+//
+// The last case is a deliberate backward-compatibility concession, not the general recovery contract. A
+// takeover from before the identity model has no UID to offer and its parent may already be gone, so
+// refusing would turn the upgrade into a new class of stranded volumes with no automatic way out.
+// Missing evidence is therefore tolerated only for objects the current code can no longer create;
+// evidence that contradicts what the caller can prove always blocks the rebind.
+func checkRebindIdentity(pv *corev1.PersistentVolume, userPVC *corev1.PersistentVolumeClaim, expect rebindIdentityExpectation) error {
+	recordedClaimUID := pv.Annotations[dev1alpha1.AnnotationUserPVCUIDKey]
+	recordedExportUID := pv.Annotations[dev1alpha1.AnnotationDataExportUIDKey]
+
+	switch {
+	case (recordedClaimUID == "") != (recordedExportUID == ""):
+		return fmt.Errorf("PV %s has an incomplete takeover identity (%s=%q, %s=%q) and cannot be rebound to %s/%s: %w",
+			pv.Name,
+			dev1alpha1.AnnotationDataExportUIDKey, recordedExportUID,
+			dev1alpha1.AnnotationUserPVCUIDKey, recordedClaimUID,
+			userPVC.Namespace, userPVC.Name, ErrPVConflict)
+
+	case recordedClaimUID != "" && recordedClaimUID != string(userPVC.UID):
+		return fmt.Errorf("PV %s was taken from claim %s/%s with UID %s, but the live claim has UID %s: %w",
+			pv.Name, userPVC.Namespace, userPVC.Name, recordedClaimUID, userPVC.UID, ErrPVConflict)
+
+	// Only a recorded value can contradict the expectation; an absent one means legacy, handled below.
+	case recordedExportUID != "" && expect.DataExportUID != "" && recordedExportUID != string(expect.DataExportUID):
+		return fmt.Errorf("PV %s was taken over by DataExport %s, but the export undoing the takeover is %s: %w",
+			pv.Name, recordedExportUID, expect.DataExportUID, ErrPVConflict)
+
+	case recordedClaimUID == "":
+		log.Printf("LegacyIdentityFallback: PV %s records no takeover identity; rebinding to claim %s/%s (UID %s) on the pre-UID namespace/name contract",
+			pv.Name, userPVC.Namespace, userPVC.Name, userPVC.UID)
+	}
+
+	return nil
+}
+
+// takeoverIdentityIsProvable answers whether the controller can show that the claim it is holding is the
+// one the volume belongs to. There are exactly two proofs:
+//
+//   - the PV already records the identity, which parsePVRecoveryInfo has just matched against the live
+//     objects (a mismatch, or half a pair, never gets this far);
+//   - the PV is still bound to that exact claim, so this pass is the takeover itself.
+//
+// A claim that merely names the volume is not a proof: a PV can lose its claimRef and be named again by
+// a recreated claim, and treating that as ownership would turn an unproven legacy state into a recorded
+// one. An unbound PV therefore counts as unprovable, which is why the identity is written before the
+// takeover repoints claimRef, never after.
+//
+// Everything else is a takeover from before the UID model: the PV is already held by the export claim and
+// nothing but a name connects it to the claim in hand. Recording an identity there would manufacture the
+// very evidence recovery is supposed to verify, so such an export runs on with none. Takeovers the
+// current code performs therefore always carry a proven identity, while pre-UID ones stay explicitly
+// eligible for the bounded legacy fallback in checkRebindIdentity.
+func takeoverIdentityIsProvable(pv *corev1.PersistentVolume, userPVC *corev1.PersistentVolumeClaim) bool {
+	if pv.Annotations[dev1alpha1.AnnotationUserPVCUIDKey] != "" {
+		return true
+	}
+	claimRef := pv.Spec.ClaimRef
+	return claimRef != nil && claimRef.UID != "" && claimRef.UID == userPVC.UID
+}
+
+// recordTakeoverIdentity pins, in the export's own status, which objects this export borrowed the volume
+// from. Namespace/name are not enough to give it back: a recreated PVC reuses the name under a fresh UID,
+// and rebinding a PV to the wrong claim of the right name hands a user someone else's data.
+//
+// The record is write-once. Refreshing it from whatever is live now would make every later comparison
+// agree with itself, which is precisely the check that has to fail when a claim was replaced. A
+// disagreement is therefore reported as a conflict; resolving it is the recovery path's job.
+func recordTakeoverIdentity(dataExport *dev1alpha1.DataExport, pv *corev1.PersistentVolume, exportPVC, userPVC *corev1.PersistentVolumeClaim) error {
+	recorded := dev1alpha1.RecoveryStatus{
+		SourcePVCUID: string(userPVC.UID),
+		ExportPVCUID: string(exportPVC.UID),
+		PVName:       pv.Name,
+		PVUID:        string(pv.UID),
+	}
+
+	if existing := dataExport.Status.Recovery; existing != nil {
+		if *existing != recorded {
+			return fmt.Errorf("DataExport %s/%s recorded a different takeover (%+v, live %+v): %w",
+				dataExport.Namespace, dataExport.Name, *existing, recorded, ErrPVConflict)
+		}
+		return nil
+	}
+
+	dataExport.Status.Recovery = &recorded
+	return nil
+}
+
+func (r *DataexportReconciler) detachPVC(ctx context.Context, userPVC *corev1.PersistentVolumeClaim, pv *corev1.PersistentVolume, exportPVCName string, dataExport *dev1alpha1.DataExport) (*corev1.PersistentVolumeClaim, error) {
 	// Check for conflicts before modifying PV
-	if err := validatePVNotOwnedByAnotherDataExport(pv, userPVC.Namespace, dataExportName); err != nil {
+	if err := validatePVNotOwnedByAnotherDataExport(pv, userPVC.Namespace, dataExport.Name); err != nil {
 		return nil, err
 	}
 
@@ -819,6 +1130,15 @@ func (r *DataexportReconciler) detachPVC(ctx context.Context, userPVC *corev1.Pe
 			Namespace: r.Config.ControllerNamespace,
 			Labels: map[string]string{
 				dev1alpha1.LabelApplicationKey: dev1alpha1.LabelDataExportValue,
+			},
+			// Creation is the only moment this claim's origin is known first-hand, and the marker is what
+			// a later pass has instead: the name is derived from the export and therefore says nothing
+			// about who occupies it. The parent UID is what makes the proof exclusive — namespace and name
+			// are reused by a recreated DataExport, a UID never is.
+			Annotations: map[string]string{
+				dev1alpha1.AnnotationDataExportUIDKey:           string(dataExport.UID),
+				dev1alpha1.AnnotationStorageManagerNamespaceKey: dataExport.Namespace,
+				dev1alpha1.AnnotationStorageManagerNameKey:      dataExport.Name,
 			},
 		},
 		Spec: corev1.PersistentVolumeClaimSpec{
@@ -844,7 +1164,7 @@ func (r *DataexportReconciler) detachPVC(ctx context.Context, userPVC *corev1.Pe
 // - Annotations for tracking original userPVC, DataExport name, and original reclaimPolicy
 // - Label for cache filtering (only labeled PVs are cached) and orphan PV discovery
 // - ReclaimPolicy set to Retain to protect data if exportPVC is accidentally deleted
-func (r *DataexportReconciler) patchPVLabelAnnotationsClaimRef(ctx context.Context, pv *corev1.PersistentVolume, exportPVC *corev1.PersistentVolumeClaim, dataExport *dev1alpha1.DataExport, names Names, userPVCName string) error {
+func (r *DataexportReconciler) patchPVLabelAnnotationsClaimRef(ctx context.Context, pv *corev1.PersistentVolume, exportPVC *corev1.PersistentVolumeClaim, dataExport *dev1alpha1.DataExport, names Names, userPVC *corev1.PersistentVolumeClaim, identityProvable bool) error {
 	updatedPv := pv.DeepCopy()
 
 	if len(updatedPv.Annotations) == 0 {
@@ -864,11 +1184,20 @@ func (r *DataexportReconciler) patchPVLabelAnnotationsClaimRef(ctx context.Conte
 
 	// Used for tracking original userPVC
 	updatedPv.Annotations[dev1alpha1.AnnotationUserPVCNamespaceKey] = dataExport.Namespace
-	updatedPv.Annotations[dev1alpha1.AnnotationUserPVCNameKey] = userPVCName
+	updatedPv.Annotations[dev1alpha1.AnnotationUserPVCNameKey] = userPVC.Name
 
 	// This used for exportRequest func
 	updatedPv.Annotations[dev1alpha1.AnnotationStorageManagerNamespaceKey] = dataExport.Namespace
 	updatedPv.Annotations[dev1alpha1.AnnotationStorageManagerNameKey] = dataExport.Name
+
+	// The takeover identity, kept on the PV as well as in the export status: the PV outlives its claims
+	// and is the one object still present when either claim is gone. A repair pass over a legacy
+	// takeover has nothing to prove the source claim with, and must leave the pair absent rather than
+	// stamp the name-resolved claim as if it had been verified.
+	if identityProvable {
+		updatedPv.Annotations[dev1alpha1.AnnotationDataExportUIDKey] = string(dataExport.UID)
+		updatedPv.Annotations[dev1alpha1.AnnotationUserPVCUIDKey] = string(userPVC.UID)
+	}
 
 	// This used for removing orphan resources
 	updatedPv.Annotations[dev1alpha1.AnnotationPVTargetKindShortKey] = names.TargetKindShort
@@ -896,8 +1225,9 @@ var ErrInvalidOriginalReclaimPolicy = errors.New("invalid original reclaim polic
 
 // parsePVRecoveryInfo reads and validates all data-export annotations from a PV.
 // Returns error if any required annotation is missing, has an invalid value,
-// or doesn't match the expected DataExport (deNS/deName).
-func parsePVRecoveryInfo(pv *corev1.PersistentVolume, deNS, deName string) (*pvRecoveryInfo, error) {
+// or doesn't match the expected DataExport (namespace/name, and UIDs when the caller knows them).
+func parsePVRecoveryInfo(pv *corev1.PersistentVolume, expect pvOwnerExpectation) (*pvRecoveryInfo, error) {
+	deNS, deName := expect.DataExportNamespace, expect.DataExportName
 	// No check userPVC name, because it can be empty (snapshot-based case)
 	userPVCName := pv.Annotations[dev1alpha1.AnnotationUserPVCNameKey]
 	originalReclaimPolicy := corev1.PersistentVolumeReclaimPolicy(pv.Annotations[dev1alpha1.AnnotationOriginalReclaimPolicyKey])
@@ -942,11 +1272,41 @@ func parsePVRecoveryInfo(pv *corev1.PersistentVolume, deNS, deName string) (*pvR
 		return nil, err
 	}
 
+	// The UID pair distinguishes the objects a name cannot: a DataExport recreated under the same name is
+	// a different owner, and a user PVC recreated under the same name is a different claim. Both are
+	// checked only when the annotation is present (a legacy takeover has none) and the caller can prove
+	// what it expects.
+	dataExportUID := pv.Annotations[dev1alpha1.AnnotationDataExportUIDKey]
+	userPVCUID := pv.Annotations[dev1alpha1.AnnotationUserPVCUIDKey]
+
+	// Half a pair is not a legacy takeover: whoever wrote one annotation knew the UID model, so the
+	// other one was lost. Letting it through the legacy door would silently downgrade a corrupted
+	// takeover to an unverified one.
+	if (dataExportUID == "") != (userPVCUID == "") {
+		return nil, fmt.Errorf("PV %s has an incomplete takeover identity (%s=%q, %s=%q): %w",
+			pv.Name,
+			dev1alpha1.AnnotationDataExportUIDKey, dataExportUID,
+			dev1alpha1.AnnotationUserPVCUIDKey, userPVCUID,
+			ErrPVConflict)
+	}
+
+	if dataExportUID != "" && expect.DataExportUID != "" && dataExportUID != string(expect.DataExportUID) {
+		return nil, fmt.Errorf("PV %s was taken over by another DataExport (%s=%s): %w",
+			pv.Name, dev1alpha1.AnnotationDataExportUIDKey, dataExportUID, ErrPVConflict)
+	}
+
+	if userPVCUID != "" && expect.SourcePVCUID != "" && userPVCUID != string(expect.SourcePVCUID) {
+		return nil, fmt.Errorf("PV %s records a different source claim (%s=%s): %w",
+			pv.Name, dev1alpha1.AnnotationUserPVCUIDKey, userPVCUID, ErrPVConflict)
+	}
+
 	return &pvRecoveryInfo{
 		UserPVCNamespace:      userPVCNamespace,
 		UserPVCName:           userPVCName,
+		UserPVCUID:            userPVCUID,
 		DataExportNamespace:   dataExportNamespace,
 		DataExportName:        dataExportName,
+		DataExportUID:         dataExportUID,
 		TargetKindShort:       targetKindShort,
 		HashSuffix:            hashSuffix,
 		OriginalReclaimPolicy: originalReclaimPolicy,
@@ -978,7 +1338,9 @@ func (r *DataexportReconciler) handleInconsistentPV(ctx context.Context, pv *cor
 	return nil
 }
 
-func (r *DataexportReconciler) ensureUserPVCExportingAnnotationAndFinalizer(ctx context.Context, namespace, name string) error {
+// ensureUserPVCExportingAnnotationAndFinalizer marks the user's claim as being exported and returns it,
+// so callers can record its identity (a name alone does not survive a delete/recreate).
+func (r *DataexportReconciler) ensureUserPVCExportingAnnotationAndFinalizer(ctx context.Context, namespace, name string) (*corev1.PersistentVolumeClaim, error) {
 	userPVC := &corev1.PersistentVolumeClaim{}
 
 	userPVCNamespacedName := types.NamespacedName{Namespace: namespace, Name: name}
@@ -991,6 +1353,9 @@ func (r *DataexportReconciler) ensureUserPVCExportingAnnotationAndFinalizer(ctx 
 		// set annotation and finalizer
 		hasAnnotation := userPVC.Annotations[DataExportInProgressKey] == "true"
 		if !hasAnnotation {
+			if userPVC.Annotations == nil {
+				userPVC.Annotations = map[string]string{}
+			}
 			userPVC.Annotations[DataExportInProgressKey] = "true"
 		}
 		hasFinalizer := ContainsString(userPVC.Finalizers, dev1alpha1.StorageManagerFinalizerName)
@@ -1009,10 +1374,10 @@ func (r *DataexportReconciler) ensureUserPVCExportingAnnotationAndFinalizer(ctx 
 		return true, nil
 	})
 	if err != nil {
-		return err
+		return nil, err
 	}
 
-	return nil
+	return userPVC, nil
 }
 
 // restoreOriginalPVState restores PV to its original state after export is complete:
@@ -1124,8 +1489,9 @@ func (r *DataexportReconciler) removeUserPVCExportingAnnotationsAndFinalizer(ctx
 	return nil
 }
 
-// Check for exportPVC exist and doesn't has status Lost (so has Pending or Bound)
-func (r *DataexportReconciler) validateExportPVC(ctx context.Context, dataExport *dev1alpha1.DataExport, exportPVCName string) (*corev1.PersistentVolumeClaim, error) {
+// getExportPVC returns the export claim, or (nil, nil) when it does not exist. It is the plain existence
+// read shared by provisioning and by the drift/loss classification of a serving export.
+func (r *DataexportReconciler) getExportPVC(ctx context.Context, exportPVCName string) (*corev1.PersistentVolumeClaim, error) {
 	exportPVC := &corev1.PersistentVolumeClaim{}
 	err := r.Client.Get(ctx, types.NamespacedName{Namespace: r.Config.ControllerNamespace, Name: exportPVCName}, exportPVC)
 	if err != nil {
@@ -1133,6 +1499,15 @@ func (r *DataexportReconciler) validateExportPVC(ctx context.Context, dataExport
 			return nil, nil
 		}
 		return nil, fmt.Errorf("failed to get exportPVC from cache: %w", err)
+	}
+	return exportPVC, nil
+}
+
+// Check for exportPVC exist and doesn't has status Lost (so has Pending or Bound)
+func (r *DataexportReconciler) validateExportPVC(ctx context.Context, dataExport *dev1alpha1.DataExport, exportPVCName string) (*corev1.PersistentVolumeClaim, error) {
+	exportPVC, err := r.getExportPVC(ctx, exportPVCName)
+	if err != nil || exportPVC == nil {
+		return nil, err
 	}
 	if exportPVC.Status.Phase == corev1.ClaimLost {
 		return nil, fmt.Errorf("export PVC for dataExport %s already exists and has status Lost", dataExport.GetName())
@@ -1157,118 +1532,23 @@ func (r *DataexportReconciler) validateExportDeploy(ctx context.Context, dataExp
 	return exportDeploy, nil
 }
 
-// Delete export deployment and export PVC (if exists)
-// Patch PV for attach it back to user's PVC
-// Delete finalizer: storage-foundation.deckhouse.io/data-exporter-controller
-func (r *DataexportReconciler) clearDataExportProviding(ctx context.Context, dataExport *dev1alpha1.DataExport, generatedNames Names) error {
+// clearDataExportProviding undoes everything this export set up: it works out what was borrowed and hands
+// the job to the one primitive that knows how to give it back safely.
+//
+// It does not touch the finalizer. Whether the object may now be deleted, settled or left alone is the
+// caller's decision, and it may only be taken once this returns done.
+func (r *DataexportReconciler) clearDataExportProviding(
+	ctx context.Context,
+	dataExport *dev1alpha1.DataExport,
+	generatedNames Names,
+) (bool, *recoveryBarrier, error) {
 	log.Printf("Start recovering configuration before Dataexport %s", dataExport.GetName())
 
-	// Remove deployment if exist
-	log.Printf("Deleting export deployment %s/%s", r.Config.ControllerNamespace, generatedNames.DeployName)
-	exportDeploy := &appsv1.Deployment{}
-	err := r.Client.Get(ctx, types.NamespacedName{Namespace: r.Config.ControllerNamespace, Name: generatedNames.DeployName}, exportDeploy)
-	if !kubeerrors.IsNotFound(err) { // if not found - do nothing
-		if err != nil {
-			return fmt.Errorf("failed to get export deployment from cache: %w", err)
-		}
-		err = r.Client.Delete(ctx, exportDeploy)
-		if err != nil {
-			return fmt.Errorf("error deletion export deployment: %w", err)
-		}
-		log.Printf("Export deployment %s deleted", generatedNames.DeployName)
-	}
-
-	// Delete exportPVC
-	log.Printf("Deleting export PVC %s/%s", r.Config.ControllerNamespace, generatedNames.ExportPVCName)
-	exportPVC := &corev1.PersistentVolumeClaim{}
-	err = r.Client.Get(ctx, types.NamespacedName{Namespace: r.Config.ControllerNamespace, Name: generatedNames.ExportPVCName}, exportPVC)
+	takeover, err := r.resolveTakeover(ctx, dataExport, generatedNames)
 	if err != nil {
-		if kubeerrors.IsNotFound(err) {
-			log.Printf("Export PVC %s not found, nothing to delete. Continuing...", generatedNames.ExportPVCName)
-		} else {
-			return fmt.Errorf("failed to get export PVC from cache: %w", err)
-		}
-	} else {
-		err = r.Client.Delete(ctx, exportPVC)
-		if err != nil {
-			return fmt.Errorf("error deletion export PVC: %w", err)
-		}
-		log.Printf("Export PVC %s deleted", generatedNames.ExportPVCName)
+		return false, nil, err
 	}
-
-	switch generatedNames.TargetKindShort {
-	case dev1alpha1.KindPVCShort:
-		log.Printf("Export target kind: %s", generatedNames.TargetKindShort)
-		// detach PVC from DataExport pod and patch PV for attach it back to user's PVC
-		userPVCNamespace := dataExport.Namespace
-		userPVCName := dataExport.Spec.TargetRef.Name
-		err := r.recoverUserPVC(ctx, userPVCNamespace, userPVCName, dataExport.Name, nil)
-		if err != nil {
-			return fmt.Errorf("failed to return PVC to user: %w", err)
-		}
-
-	case dev1alpha1.KindVirtualDiskShort:
-		log.Printf("Export target kind: %s", generatedNames.TargetKindShort)
-		err := r.recoverUserVirtualDisk(ctx, dataExport)
-		if err != nil {
-			return fmt.Errorf("failed to clear virtual disk: %w", err)
-		}
-
-	case dev1alpha1.KindSnapshotShort:
-		// Snapshot export creates no user-PVC detach and no clone VS; the only owned out-of-band object
-		// is the VolumeRestoreRequest that provisioned the export PVC. The export PVC itself is deleted
-		// above; deleting the VRR releases the restore record (it also self-expires by TTL).
-		log.Printf("Export target kind: %s", generatedNames.TargetKindShort)
-		if err := r.deleteVolumeRestoreRequest(ctx, dataExport, generatedNames); err != nil {
-			return fmt.Errorf("failed to clear snapshot export VolumeRestoreRequest: %w", err)
-		}
-
-	default:
-		return fmt.Errorf("unknown export kind: %s", generatedNames.TargetKindShort)
-	}
-
-	// delete service and ingress resource
-	// delete unconditionally: reconcilePublishResources handles the Publish toggle
-	// during normal reconciliation, but if the user disables Publish and deletes
-	// the DataExport in the same reconcile gap, we reach here without the toggle
-	// being processed. DeletePublicResources is idempotent (not-found is not an error).
-	if _, err := publish.DeletePublicResources(
-		ctx,
-		r.Client,
-		types.NamespacedName{
-			Namespace: r.Config.ControllerNamespace,
-			Name:      generatedNames.HeadlessServiceName,
-		},
-		types.NamespacedName{
-			Namespace: r.Config.ControllerNamespace,
-			Name:      generatedNames.IngressResourceName,
-		},
-	); err != nil {
-		return err
-	}
-
-	// delete CA secret
-	log.Printf("Deleting CA secret for export target %s", generatedNames.TargetKindShort)
-	dataExporterCASecret := &corev1.Secret{}
-	err = r.Client.Get(ctx, types.NamespacedName{Namespace: r.Config.ControllerNamespace, Name: generatedNames.CASecretName}, dataExporterCASecret)
-	if !kubeerrors.IsNotFound(err) { // if not found - do nothing
-		if err != nil {
-			return fmt.Errorf("failed to get CA secret from cache: %w", err)
-		}
-		err = r.Client.Delete(ctx, dataExporterCASecret)
-		if err != nil {
-			return fmt.Errorf("error deletion CA secret: %w", err)
-		}
-		log.Printf("CA secret %s deleted", generatedNames.CASecretName)
-	}
-
-	// Delete DataExoport finalizer
-	if len(dataExport.Finalizers) > 0 {
-		dataExport.Finalizers = []string{}
-	}
-
-	log.Printf("Recovering configuration before Dataexport %s finished", dataExport.GetName())
-	return nil
+	return r.reconcileLiveExportRecovery(ctx, generatedNames, takeover)
 }
 
 var ErrPVCValidationFailed = errors.New("PVC validation failed")
@@ -1613,7 +1893,7 @@ func makeVolumeList(pvcName string) []corev1.Volume {
 	return volumes
 }
 
-func (r *DataexportReconciler) getExportPVCFromUserPVC(ctx context.Context, userPVCNameSpace, userPVCName, exportPVCName, dataExportName string) (*corev1.PersistentVolumeClaim, *corev1.PersistentVolume, error) {
+func (r *DataexportReconciler) getExportPVCFromUserPVC(ctx context.Context, userPVCNameSpace, userPVCName, exportPVCName string, dataExport *dev1alpha1.DataExport) (*corev1.PersistentVolumeClaim, *corev1.PersistentVolume, error) {
 	// Get user PVC // TODO: check the PV name in Lost state
 	userPVC := &corev1.PersistentVolumeClaim{}
 	err := r.Client.Get(ctx, types.NamespacedName{Namespace: userPVCNameSpace, Name: userPVCName}, userPVC)
@@ -1634,114 +1914,12 @@ func (r *DataexportReconciler) getExportPVCFromUserPVC(ctx context.Context, user
 	}
 
 	// Create export PVC
-	exportPVC, err := r.detachPVC(ctx, userPVC, pv, exportPVCName, dataExportName)
+	exportPVC, err := r.detachPVC(ctx, userPVC, pv, exportPVCName, dataExport)
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to detach user PVC: %w", err)
 	}
 
 	return exportPVC, pv, nil
-}
-
-// recoverUserPVC restores the PV binding back to the user's PVC after export cleanup.
-// pv may be nil when called from clearDataExportProviding (normal deletion flow),
-// in which case PV is fetched via userPVC.Spec.VolumeName.
-// pv is non-nil when called from removeOrphanResources, where it was already fetched
-// during the PV list scan.
-func (r *DataexportReconciler) recoverUserPVC(ctx context.Context, userPVCNamespace, userPVCName, dataExportName string, pv *corev1.PersistentVolume) error {
-	log.Printf("Recovering user PVC %s/%s", userPVCNamespace, userPVCName)
-	userPVC := &corev1.PersistentVolumeClaim{}
-	err := r.Client.Get(ctx, types.NamespacedName{Namespace: userPVCNamespace, Name: userPVCName}, userPVC)
-	if err != nil {
-		if kubeerrors.IsNotFound(err) {
-			log.Printf("User PVC %s not found, nothing to recover", userPVCName)
-			return nil // Nothing to recover, PVC does not exist
-		}
-		return fmt.Errorf("failed to get user PVC %s/%s: %w", userPVCNamespace, userPVCName, err)
-	}
-
-	// PV was not passed by caller (normal deletion flow via clearDataExportProviding).
-	// Fetch it from userPVC.Spec.VolumeName.
-	if pv == nil {
-		pvName := userPVC.Spec.VolumeName
-		if pvName == "" {
-			return fmt.Errorf("user PVC %s does not have a valid PersistentVolume name in spec", userPVC.GetName())
-		}
-
-		pv = &corev1.PersistentVolume{}
-		err = r.Client.Get(ctx, types.NamespacedName{Name: pvName}, pv)
-		if err != nil {
-			return fmt.Errorf("failed to get PV %s for user PVC %s: %w", pvName, userPVC.GetName(), err)
-		}
-	}
-
-	// Idempotency / already-restored guard. recoverUserPVC is not otherwise re-runnable: a prior
-	// successful run strips the export metadata from the PV LAST (restoreOriginalPVState removes the
-	// original-reclaimPolicy annotation and the data-exporter label). If the controller crashed after that
-	// restore but before persisting the finalizer removal, a re-run would find no original-reclaimPolicy
-	// annotation and wrongly flag the healthy, already-restored PV as inconsistent (marking it and
-	// stalling cleanup forever). The absence of our export marker label means the PV was already restored
-	// (or never exported by us) — there is nothing to recover; just make the user PVC cleanup idempotent.
-	if pv.Labels[dev1alpha1.LabelPVDataExporter] != "true" {
-		log.Printf("PV %s carries no export marker; user PVC %s already restored, ensuring cleanup", pv.Name, userPVC.GetName())
-		return r.removeUserPVCExportingAnnotationsAndFinalizer(ctx, userPVC)
-	}
-
-	// If the original reclaimPolicy annotation is missing or corrupted, recovery is impossible —
-	// we cannot restore PV to its pre-export state without knowing the original policy.
-	// Label the PV as inconsistent and stop. The finalizer stays on DataExport,
-	// preventing its deletion until admin resolves the issue.
-	if _, parseErr := parsePVRecoveryInfo(pv, userPVCNamespace, dataExportName); errors.Is(parseErr, ErrInvalidOriginalReclaimPolicy) {
-		if labelErr := r.handleInconsistentPV(ctx, pv); labelErr != nil {
-			return fmt.Errorf("failed to label inconsistent PV %s: %w", pv.Name, labelErr)
-		}
-		return fmt.Errorf("inconsistent PV %s: %w", pv.Name, ErrInvalidOriginalReclaimPolicy)
-	}
-
-	// Check if PV is in working state
-	err = validateUserPVCInWorkingState(userPVC, pv)
-	if err != nil {
-		log.Printf("User PVC %s is not in working state: %v. Attempting to recover...", userPVC.GetName(), err)
-		// Patch PV to change ClaimRef to user PVC
-		updatedPV := pv.DeepCopy()
-		updatedPV.Spec.ClaimRef = &corev1.ObjectReference{
-			Namespace:       userPVC.Namespace,
-			Name:            userPVC.Name,
-			UID:             userPVC.UID,
-			ResourceVersion: userPVC.ResourceVersion,
-		}
-
-		err = r.Client.Patch(ctx, updatedPV, client.MergeFromWithOptions(pv, client.MergeFromWithOptimisticLock{}))
-		if err != nil {
-			return fmt.Errorf("recover user PVC: failed to patch user PV: %w", err)
-		}
-		log.Printf("User PVC %s recovered successfully", userPVC.GetName())
-
-		// Update pv with the patched version (including new ResourceVersion from API server)
-		// so that restoreOriginalPVState below uses the correct ResourceVersion for optimistic locking.
-		pv = updatedPV.DeepCopy()
-	}
-
-	// If we reach here, user PVC is in working state. TODO: check if user PVC not in lost state
-	err = r.removeUserPVCExportingAnnotationsAndFinalizer(ctx, userPVC)
-	if err != nil {
-		return err
-	}
-
-	log.Printf("User PVC %s is in working state, ready to be used again", userPVC.GetName())
-
-	// Remove annotations and labels from PV, and restore original reclaimPolicy.
-	// NOTE: This is intentionally a separate PV patch from ClaimRef rebinding above.
-	// We cannot combine them because PV labels must be removed LAST:
-	// - If we remove labels in the first patch and finalizer removal fails,
-	//   we lose the ability to retry (no labels = no reconcile trigger).
-	// - We cannot remove finalizers before rebinding PV because that would
-	//   leave userPVC unprotected while PV is still bound to exportPVC.
-	if err := r.restoreOriginalPVState(ctx, pv); err != nil {
-		return fmt.Errorf("failed to remove annotations/labels from PV: %w", err)
-	}
-
-	log.Printf("Successfully removed annotations and labels from PV: %s", pv.GetName())
-	return nil
 }
 
 func (r *DataexportReconciler) getExportPVCFromUserVirtualDisk(ctx context.Context, dataExport *dev1alpha1.DataExport, generatedNames Names) (*corev1.PersistentVolumeClaim, *corev1.PersistentVolume, string, error) {
@@ -1766,7 +1944,7 @@ func (r *DataexportReconciler) getExportPVCFromUserVirtualDisk(ctx context.Conte
 
 	log.Printf("User VirtualDisk %s/%s is ready, using PVC %s/%s for export", userNamespace, userVirtualDiskName, userNamespace, userPVCName)
 
-	exportPVC, pv, err := r.getExportPVCFromUserPVC(ctx, userNamespace, userPVCName, generatedNames.ExportPVCName, dataExport.Name)
+	exportPVC, pv, err := r.getExportPVCFromUserPVC(ctx, userNamespace, userPVCName, generatedNames.ExportPVCName, dataExport)
 	return exportPVC, pv, userPVCName, err
 }
 
@@ -1853,29 +2031,6 @@ func (r *DataexportReconciler) isVirtualDiskReadyForExport(ctx context.Context, 
 
 	log.Printf("User VirtualDisk %s/%s is ready for export", namespace, virtualDiskName)
 	return true, nil
-}
-
-func (r *DataexportReconciler) recoverUserVirtualDisk(ctx context.Context, dataExport *dev1alpha1.DataExport) error {
-	log.Printf("Recovering VirtualDisk for DataExport resource %s/%s", dataExport.Namespace, dataExport.Name)
-	userNamespace := dataExport.Namespace
-	userVirtualDiskName := dataExport.Spec.TargetRef.Name
-	userVirtualDisk := &virtv1alpha2.VirtualDisk{}
-	err := r.Client.Get(ctx, types.NamespacedName{Namespace: userNamespace, Name: userVirtualDiskName}, userVirtualDisk)
-	if err != nil {
-		if kubeerrors.IsNotFound(err) {
-			log.Printf("User VirtualDisk %s/%s not found, nothing to recover", userNamespace, userVirtualDiskName)
-			return nil // Nothing to recover, VirtualDisk does not exist
-		}
-		return fmt.Errorf("failed to get user VirtualDisk %s/%s: %w", userNamespace, userVirtualDiskName, err)
-	}
-
-	userPVCName := userVirtualDisk.Status.Target.PersistentVolumeClaim
-	// err := r.removeAnnotationFromPVCIfNeeded(ctx, userNamespace, userPVCName, DataExportRequestAnnotationKey)
-	// if err != nil {
-	// 	return fmt.Errorf("failed to remove %s annotation from user PVC %s/%s: %w", DataExportRequestAnnotationKey, userNamespace, userPVCName, err)
-	// }
-
-	return r.recoverUserPVC(ctx, userNamespace, userPVCName, dataExport.Name, nil)
 }
 
 func (r *DataexportReconciler) ensureAnnotationsOnPVC(ctx context.Context, pvc *corev1.PersistentVolumeClaim, annotationsToAdd map[string]string) error {
@@ -2006,6 +2161,10 @@ func removePVExportMetadata(updatePV *corev1.PersistentVolume) bool {
 		dev1alpha1.AnnotationPVTargetKindShortKey,
 		dev1alpha1.AnnotationPVHashSuffixKey,
 		dev1alpha1.AnnotationOriginalReclaimPolicyKey,
+		// The takeover identity goes with the rest: a PV returned to its owner records no takeover, and a
+		// leftover UID here would make the next export of the same volume look like someone else's.
+		dev1alpha1.AnnotationDataExportUIDKey,
+		dev1alpha1.AnnotationUserPVCUIDKey,
 	}
 
 	// Remove annotations
@@ -2025,20 +2184,20 @@ func removePVExportMetadata(updatePV *corev1.PersistentVolume) bool {
 	return changed
 }
 
-// removeOrphanResources handles cleanup when a DataExport is deleted while the controller
-// was down. It finds orphaned PVs by label, reads recovery info from annotations, then:
-// 1) Deletes orphaned deployment
-// 2) Deletes orphaned exportPVC
-// 3) Recovers userPVC (restores PV binding and original reclaimPolicy)
-// This is triggered by the PV watch when DataExport is not found during reconciliation.
-func (r *DataexportReconciler) removeOrphanResources(ctx context.Context, dataExportNamespace, dataExportName string) error {
+// removeOrphanResources handles cleanup when a DataExport is deleted while the controller was down. It
+// finds the orphaned PV by label, reads what it can from the annotations, and hands the teardown to the
+// same primitive every other path uses — the parent being gone changes who asks, not what has to happen
+// to the volume. Triggered by the PV watch when the DataExport is not found during reconciliation.
+//
+// There is no finalizer to manage here: the parent it would have protected is already gone.
+func (r *DataexportReconciler) removeOrphanResources(ctx context.Context, dataExportNamespace, dataExportName string) (*recoveryBarrier, error) {
 	log.Printf("Starting cleanup of orphaned resources for deleted DataExport %s/%s", dataExportNamespace, dataExportName)
 
 	// List PVs with data-exporter label. The cache now contains all PVs (no label filter),
 	// so we must use MatchingLabels to filter only PVs managed by DataExport.
 	pvList := &corev1.PersistentVolumeList{}
 	if err := r.Client.List(ctx, pvList, client.MatchingLabels{dev1alpha1.LabelPVDataExporter: "true"}); err != nil {
-		return fmt.Errorf("failed to list PVs for orphan cleanup: %w", err)
+		return nil, fmt.Errorf("failed to list PVs for orphan cleanup: %w", err)
 	}
 
 	for i := range pvList.Items {
@@ -2055,28 +2214,41 @@ func (r *DataexportReconciler) removeOrphanResources(ctx context.Context, dataEx
 		// Validate and extract recovery info from PV annotations.
 		// If annotations are corrupted, label the PV as inconsistent and stop reconcile
 		// instead of attempting cleanup with wrong values.
-		pvInfo, err := parsePVRecoveryInfo(pv, dataExportNamespace, dataExportName)
+		// The parent is gone, so no UID can be proven here: the expectation carries namespace/name only
+		// and the UID checks are skipped.
+		pvInfo, err := parsePVRecoveryInfo(pv, pvOwnerExpectation{
+			DataExportNamespace: dataExportNamespace,
+			DataExportName:      dataExportName,
+		})
 		if err != nil {
 			log.Printf("PV %s has inconsistent state: %v", pv.Name, err)
 			if labelErr := r.handleInconsistentPV(ctx, pv); labelErr != nil {
-				return fmt.Errorf("failed to label inconsistent PV %s: %w", pv.Name, labelErr)
+				return nil, fmt.Errorf("failed to label inconsistent PV %s: %w", pv.Name, labelErr)
 			}
-			return nil // Stop reconcile without error
+			return nil, nil // Stop reconcile without error
 		}
 
-		// 1) Delete orphaned deployment
-		if err := r.deleteOrphanedDeployment(ctx, pvInfo.TargetKindShort, pvInfo.HashSuffix); err != nil {
-			return fmt.Errorf("failed to delete orphaned deployment: %w", err)
+		// The names come from the suffix recorded when the resources were created, not from deriving one
+		// again: the sweep must find the infrastructure that exists, not the infrastructure a
+		// recomputation says should exist. The claim name is only ever the claim to give the volume back
+		// to; no generated name depends on it.
+		names := NewNamesFromPersistedIdentity(pvInfo.TargetKindShort, pvInfo.HashSuffix)
+		takeover := takeoverRef{
+			PVName:       pv.Name,
+			SourcePVCUID: pv.Annotations[dev1alpha1.AnnotationUserPVCUIDKey],
+		}
+		if pvInfo.UserPVCName != "" {
+			// Snapshot-backed exports detach nobody, so they leave these empty and only the volume's own
+			// metadata has to be cleaned up.
+			takeover.SourceClaim = types.NamespacedName{Namespace: pvInfo.UserPVCNamespace, Name: pvInfo.UserPVCName}
 		}
 
-		// 2) Delete orphaned exportPVC
-		if err := r.deleteOrphanedExportPVCs(ctx, pvInfo.TargetKindShort, pvInfo.HashSuffix); err != nil {
-			return fmt.Errorf("failed to delete orphaned export PVCs: %w", err)
+		_, blocked, err := r.reconcileLiveExportRecovery(ctx, names, takeover)
+		if err != nil {
+			return nil, fmt.Errorf("failed to clean up after deleted DataExport %s/%s: %w", dataExportNamespace, dataExportName, err)
 		}
-
-		// 3) Recover userPVC
-		if err := r.recoverOrphanedUserPVC(ctx, pv, pvInfo.UserPVCNamespace, pvInfo.UserPVCName, dataExportName); err != nil {
-			return fmt.Errorf("failed to recover user PVC: %w", err)
+		if blocked != nil {
+			return blocked, nil
 		}
 
 		// One DataExport operates on exactly one PV, so we stop after finding the matching one
@@ -2084,84 +2256,5 @@ func (r *DataexportReconciler) removeOrphanResources(ctx context.Context, dataEx
 	}
 
 	log.Printf("cleanup complete: %s/%s", dataExportNamespace, dataExportName)
-	return nil
-}
-
-// recoverOrphanedUserPVC recovers the user PVC after orphan cleanup.
-// For snapshot-based exports (VolumeSnapshot, VirtualDiskSnapshot), userPVCNamespace and
-// userPVCName are empty because no user PVC was detached — we only need to clean PV annotations.
-// For PVC/VirtualDisk exports, we restore the PV binding to the original user PVC.
-func (r *DataexportReconciler) recoverOrphanedUserPVC(ctx context.Context, pv *corev1.PersistentVolume, userPVCNamespace, userPVCName, dataExportName string) error {
-	// For snapshot-based exports, no user PVC was detached, so we only clean up PV annotations
-	if userPVCNamespace == "" && userPVCName == "" {
-		log.Printf("No user PVC to recover (snapshot-based export), cleaning up PV annotations only")
-
-		if err := r.restoreOriginalPVState(ctx, pv); err != nil {
-			return fmt.Errorf("failed to remove storage manager annotations and labels from PV %s: %w", pv.Name, err)
-		}
-
-		return nil
-	}
-
-	if err := r.recoverUserPVC(ctx, userPVCNamespace, userPVCName, dataExportName, pv); err != nil {
-		return fmt.Errorf("failed to recover user PVC %s/%s: %w", userPVCNamespace, userPVCName, err)
-	}
-
-	return nil
-}
-
-// deleteOrphanedDeployment deletes the data-exporter deployment that was created
-// for the now-deleted DataExport. Uses targetRef and hashSuffix from PV annotations
-// to reconstruct the deployment name.
-func (r *DataexportReconciler) deleteOrphanedDeployment(ctx context.Context, targetKindShort, hashSuffix string) error {
-	deployName := DeployNameForHash(targetKindShort, hashSuffix)
-	deploy := &appsv1.Deployment{}
-
-	if err := r.Client.Get(ctx, types.NamespacedName{Namespace: r.Config.ControllerNamespace, Name: deployName}, deploy); err != nil {
-		if kubeerrors.IsNotFound(err) {
-			return nil
-		}
-		return fmt.Errorf("failed to get deployment: %w", err)
-	}
-
-	label, exists := deploy.Labels[dev1alpha1.LabelApplicationKey]
-	if !exists || label != dev1alpha1.LabelDataExportValue {
-		return fmt.Errorf("deployment %s/%s is not managed by data-exporter: missing or invalid app label", r.Config.ControllerNamespace, deployName)
-	}
-
-	if _, err := DeleteDeployment(ctx, r.Client, r.Config.ControllerNamespace, deployName); err != nil {
-		return fmt.Errorf("failed to delete orphaned deployment %s/%s: %w", r.Config.ControllerNamespace, deployName, err)
-	}
-
-	return nil
-}
-
-// deleteOrphanedExportPVCs deletes the temporary export PVC that was created
-// for the now-deleted DataExport. Uses targetRef and hashSuffix from PV annotations
-// to reconstruct the PVC name.
-func (r *DataexportReconciler) deleteOrphanedExportPVCs(ctx context.Context, targetKindShort, hashSuffix string) error {
-	exportPVCName := ExportPVCNameForHash(targetKindShort, hashSuffix)
-	exportPVC := &corev1.PersistentVolumeClaim{}
-
-	if err := r.Client.Get(ctx, types.NamespacedName{Namespace: r.Config.ControllerNamespace, Name: exportPVCName}, exportPVC); err != nil {
-		if kubeerrors.IsNotFound(err) {
-			return nil
-		}
-		return fmt.Errorf("failed to get export PVC %s/%s: %w", r.Config.ControllerNamespace, exportPVCName, err)
-	}
-
-	label, exists := exportPVC.Labels[dev1alpha1.LabelApplicationKey]
-	if !exists || label != dev1alpha1.LabelDataExportValue {
-		return fmt.Errorf("export PVC %s/%s is not managed by data-exporter: missing or invalid app label", r.Config.ControllerNamespace, exportPVCName)
-	}
-
-	if err := r.Client.Delete(ctx, exportPVC); err != nil {
-		if kubeerrors.IsNotFound(err) {
-			return nil
-		}
-
-		return fmt.Errorf("failed to delete orphaned exportPVC %s/%s: %w", r.Config.ControllerNamespace, exportPVCName, err)
-	}
-
-	return nil
+	return nil, nil
 }

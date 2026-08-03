@@ -231,6 +231,36 @@ spec:
                   description: |
                     Time the DataImport reached a terminal phase (Completed, Expired or Failed). Set once by
                     the controller; the garbage collector measures retention age from this timestamp.
+                cleanupReason:
+                  type: string
+                  description: |
+                    Internal discriminator shared with DataExport: a managed resource was lost or replaced,
+                    and failure-driven recovery must run before the object may become terminal. The
+                    DataImport controller does not write it yet; the field is present so the schema matches
+                    the shared status type and a future writer is not silently pruned by the API server.
+                recovery:
+                  type: object
+                  description: |
+                    Identity of the objects a transfer temporarily took over, shared with DataExport. The
+                    DataImport controller does not write it yet; the field is present so the schema matches
+                    the shared status type.
+                  properties:
+                    sourcePVCUID:
+                      type: string
+                      description: |
+                        UID of the user PersistentVolumeClaim the volume was taken from.
+                    exportPVCUID:
+                      type: string
+                      description: |
+                        UID of the controller-owned claim the volume was temporarily bound to.
+                    pvName:
+                      type: string
+                      description: |
+                        Name of the taken-over PersistentVolume.
+                    pvUID:
+                      type: string
+                      description: |
+                        UID of the taken-over PersistentVolume.
                 serverState:
                   type: string
                   enum: ["Ready", "Finished", "IdleExpired"]
@@ -299,6 +329,9 @@ spec:
                             "Failed",
                             "TargetFailed",
                             "CleanupFailed",
+                            "ManagedResourceLost",
+                            "ManagedResourceIdentityMismatch",
+                            "CleanupBlocked",
                           ]
                       message:
                         description: |-

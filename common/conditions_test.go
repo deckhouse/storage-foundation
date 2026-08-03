@@ -38,6 +38,21 @@ func TestPhaseIsTerminal(t *testing.T) {
 	}
 }
 
+// TestIsManagedResourceFailureReason pins which drift reasons end the operation. CleanupBlocked is the
+// interesting negative: it is written while recovery is still progressing behind a barrier, so treating
+// it as terminal would strand a half-restored volume.
+func TestIsManagedResourceFailureReason(t *testing.T) {
+	terminal := []ConditionReason{ReasonManagedResourceLost, ReasonManagedResourceIdentityMismatch}
+	nonTerminal := []ConditionReason{ReasonCleanupBlocked, ReasonPending, ReasonServerReady, ReasonExpired, ReasonCleanupFailed, ConditionReason("")}
+
+	for _, r := range terminal {
+		assert.True(t, IsManagedResourceFailureReason(r), "%s must end the operation", r)
+	}
+	for _, r := range nonTerminal {
+		assert.False(t, IsManagedResourceFailureReason(r), "%s must NOT end the operation", r)
+	}
+}
+
 // TestStripConditionsNotIn is the load-bearing legacy migration: existing DataImport/DataExport objects
 // carry a stale condition (type "Expired") that the narrowed CRD condition-type enum no longer permits;
 // the controller must strip it (and any other out-of-catalog type) before the first status write, or every
