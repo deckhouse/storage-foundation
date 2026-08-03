@@ -1,6 +1,9 @@
 version: "2"
 run:
-  go: "1.25"
+  # No `go:` pin here. It used to hold the target language at 1.25 so the version check would pass
+  # against a linter built with an older Go; the fix belongs where the binary is built (go-lint.sh
+  # derives that toolchain from the modules), and pinning it here only asks the linter to analyse
+  # 1.26 code as if it were 1.25.
   allow-parallel-runners: true
 linters:
   default: none
