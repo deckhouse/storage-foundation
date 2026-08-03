@@ -46,9 +46,24 @@ linter_version="v2.9.0"
 # in .golangci.yaml does not help: it only silences the version check that would have reported this
 # before the panic. Taking the version from the modules keeps the two in step without a second place
 # to bump.
-required_go=$(grep -h '^go ' $(find images -type f -name go.mod) | awk '{print $2}' | sort -V | tail -1)
-section_start "install_linter" "Installing golangci-lint@$linter_version (built with go$required_go)"
-GOTOOLCHAIN="go${required_go}" GOBIN="$basedir" go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@$linter_version || exit 1
+default_toolchain="go$(grep -h '^go ' $(find images -type f -name go.mod) | awk '{print $2}' | sort -V | tail -1)"
+linter_toolchain="${GOLANGCI_LINT_GOTOOLCHAIN:-$default_toolchain}"
+
+# Keyed by both versions, so a bump of either builds a new binary instead of reusing a stale one.
+# Outside the repository on purpose: the previous location was the working tree, one .gitignore entry
+# away from being committed, and the run had to end by deleting it.
+linter_cache_root="${GOLANGCI_LINT_CACHE_DIR:-${XDG_CACHE_HOME:-$HOME/.cache}/storage-foundation/golangci-lint}"
+linter_bin_dir="$linter_cache_root/$linter_toolchain/$linter_version"
+linter_bin="$linter_bin_dir/golangci-lint"
+
+section_start "install_linter" "Installing golangci-lint@$linter_version with $linter_toolchain"
+if [ ! -x "$linter_bin" ]; then
+    mkdir -p "$linter_bin_dir"
+    if ! GOBIN="$linter_bin_dir" GOTOOLCHAIN="$linter_toolchain" go install "github.com/golangci/golangci-lint/v2/cmd/golangci-lint@$linter_version"; then
+        section_end "install_linter"
+        exit 1
+    fi
+fi
 section_end "install_linter"
 failed='false'
 
@@ -61,7 +76,7 @@ run_linters() {
         # check all editions
         for edition in $GO_BUILD_TAGS ;do
             section_start "run_lint" "Running linter in $dir (edition: $edition) for $run_for"
-            ../../golangci-lint run ${extra_args} --fix --color=always --allow-parallel-runners --build-tags $edition
+            "$linter_bin" run ${extra_args} --fix --color=always --allow-parallel-runners --build-tags $edition
             local linter_status=$?
             section_end "run_lint"
             if [ $linter_status -ne 0 ]; then
@@ -97,8 +112,6 @@ if [ -n "${CI_MERGE_REQUEST_DIFF_BASE_SHA}" ]; then
 fi
 
 run_linters "all files"
-
-rm golangci-lint
 
 if [ $failed == 'true' ]; then
     exit 1
