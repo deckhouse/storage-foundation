@@ -88,10 +88,33 @@ type pvRecoveryInfo struct {
 const (
 	DataExportInProgressKey        = "storage-foundation.deckhouse.io/data-export-in-progress"
 	DataExportRequestAnnotationKey = "storage-foundation.deckhouse.io/data-export-request"
+	// LegacyDataExportRequestAnnotationKey is the pre-rename spelling of
+	// DataExportRequestAnnotationKey (the key was renamed together with our API group).
+	// RELEASED versions of the virtualization module read only this spelling, and the contract is
+	// circular: we annotate the user PVC, virtualization answers with InUse=True/UsedForDataExport on
+	// the VirtualDisk, and only then does isVirtualDiskReadyForExport let us take the PV over. So on a
+	// cluster whose virtualization does not know the new key, a disk export never starts at all.
+	// Their main branch already accepts BOTH keys (commit 96af34088, helper IsDataExportRequested in
+	// images/virtualization-artifact/pkg/common/annotations/annotations.go), so the legacy key is
+	// written purely for clusters running virtualization without that commit. Dropping it is tracked
+	// as item 17 of the project backlog; the condition is "no supported cluster runs a virtualization
+	// release without 96af34088".
+	LegacyDataExportRequestAnnotationKey = "storage.deckhouse.io/data-export-request"
 
 	SeverityWarning = "warning"
 	SeverityError   = "error"
 )
+
+// dataExportRequestAnnotationKeys is the SINGLE source of truth for the data-export-request annotation
+// spellings we maintain on the user PVC. Both ends derive from it — the write in
+// prepareVirtualDiskForExportAndGetPVCName and the removal in
+// removeUserPVCExportingAnnotationsAndFinalizer — so the set cannot drift between them (a key that is
+// set but never removed would leave the user PVC marked as export-requested forever). Do not inline a
+// second copy of this list.
+var dataExportRequestAnnotationKeys = []string{
+	DataExportRequestAnnotationKey,
+	LegacyDataExportRequestAnnotationKey,
+}
 
 // Sentinel errors are used as typed markers so callers can distinguish failure
 // categories with errors.Is without parsing message strings.
@@ -1079,10 +1102,14 @@ func (r *DataexportReconciler) removeUserPVCExportingAnnotationsAndFinalizer(ctx
 		return fmt.Errorf("nil pointer for user PVC")
 	}
 
-	annotationsToRemove := []string{
-		DataExportInProgressKey,
-		DataExportRequestAnnotationKey,
-	}
+	// Removal is symmetric to the write: every spelling of the data-export-request annotation set by
+	// prepareVirtualDiskForExportAndGetPVCName comes off here, derived from the same
+	// dataExportRequestAnnotationKeys list. This one function is the only removal point — all three
+	// paths reach it (clearDataExportProviding on DataExport deletion and on TTL expiry, plus the
+	// orphan path removeOrphanResources -> recoverOrphanedUserPVC).
+	annotationsToRemove := make([]string, 0, 1+len(dataExportRequestAnnotationKeys))
+	annotationsToRemove = append(annotationsToRemove, DataExportInProgressKey)
+	annotationsToRemove = append(annotationsToRemove, dataExportRequestAnnotationKeys...)
 
 	userPVCNamespacedName := types.NamespacedName{Namespace: userPVC.Namespace, Name: userPVC.Name}
 	err := wait.PollUntilContextTimeout(ctx, 500*time.Millisecond, 3*time.Second, true, func(ctx context.Context) (bool, error) {
@@ -1796,12 +1823,18 @@ func (r *DataexportReconciler) prepareVirtualDiskForExportAndGetPVCName(ctx cont
 		return "", fmt.Errorf("failed to get PVC %s/%s for user VirtualDisk %s/%s: %w", namespace, pvcName, namespace, virtualDiskName, err)
 	}
 
-	// Ensure the PVC has the DataExportRequest annotation
-	err = r.ensureAnnotationsOnPVC(ctx, pvc, map[string]string{
-		DataExportRequestAnnotationKey: "true",
-	})
+	// Ensure the PVC carries the data-export-request annotation under EVERY spelling of the contract
+	// (current + legacy, see dataExportRequestAnnotationKeys) in a SINGLE Update: ensureAnnotationsOnPVC
+	// only mutates the object it is handed and persists it, so calling it once per key would mean one
+	// Update per key and an extra write-conflict window on this hot path.
+	requestAnnotations := make(map[string]string, len(dataExportRequestAnnotationKeys))
+	for _, key := range dataExportRequestAnnotationKeys {
+		requestAnnotations[key] = "true"
+	}
+
+	err = r.ensureAnnotationsOnPVC(ctx, pvc, requestAnnotations)
 	if err != nil {
-		return "", fmt.Errorf("failed to ensure DataExportRequest annotation %s on PVC %s/%s: %w", DataExportRequestAnnotationKey, namespace, pvcName, err)
+		return "", fmt.Errorf("failed to ensure DataExportRequest annotations %v on PVC %s/%s: %w", dataExportRequestAnnotationKeys, namespace, pvcName, err)
 	}
 
 	return pvcName, nil
@@ -1870,11 +1903,9 @@ func (r *DataexportReconciler) recoverUserVirtualDisk(ctx context.Context, dataE
 	}
 
 	userPVCName := userVirtualDisk.Status.Target.PersistentVolumeClaim
-	// err := r.removeAnnotationFromPVCIfNeeded(ctx, userNamespace, userPVCName, DataExportRequestAnnotationKey)
-	// if err != nil {
-	// 	return fmt.Errorf("failed to remove %s annotation from user PVC %s/%s: %w", DataExportRequestAnnotationKey, userNamespace, userPVCName, err)
-	// }
 
+	// The data-export-request annotations are stripped by recoverUserPVC below (via
+	// removeUserPVCExportingAnnotationsAndFinalizer) — no separate removal is needed here.
 	return r.recoverUserPVC(ctx, userNamespace, userPVCName, dataExport.Name, nil)
 }
 
