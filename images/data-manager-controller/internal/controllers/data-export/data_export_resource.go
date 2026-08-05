@@ -747,6 +747,35 @@ func (r *DataexportReconciler) resolveUserPVCName(ctx context.Context, dataExpor
 	}
 }
 
+// exportCORSAllowHeaders / exportCORSExposeHeaders are the ingress CORS header contract of the download
+// endpoint. The client that needs it is the console, which downloads from status.publicURL with origin
+// console.<domain>. `d8 data export` with publish reads the same publicURL, but CORS is enforced by
+// browsers only: a CLI client sees every header regardless of these lists, so a successful CLI download
+// says nothing about them being complete — that has to be checked from a browser.
+//
+// Downloads send nothing beyond the standard set — Range for chunked reads and Authorization are
+// already part of it — so the allow-list is the baseline verbatim; it still has to be stated because
+// the annotation replaces the controller default rather than extending it.
+//
+// The exposed list is everything the exporter answers with that a cross-origin reader would otherwise
+// not see:
+//   - Content-Disposition — the filename (export_block/handler.go for a raw device,
+//     export_filesystem/handler.go for a file); unexposed, it silently degrades to a made-up name;
+//   - Content-Range / Accept-Ranges — the range bookkeeping of http.ServeContent, which is how a
+//     client verifies that a 206 covers the bytes it asked for;
+//   - X-Attribute-* — the stat/hash attributes of a filesystem entry (mapAttributesToHeader in
+//     export_filesystem/handler.go), needed to restore mode/owner and to verify content;
+//   - X-LinkTarget — the target of a symlink, whose body is empty by design.
+//
+// X-Type is deliberately absent, though the exporter does set it on every filesystem response,
+// including a HEAD of a single path (writeRequiredHeaders in export_filesystem/handler.go): clients take
+// an entry's type from the "type" field of the directory-listing JSON instead — d8, the reference
+// implementation this contract mirrors, never reads the header. Expose it once a client needs it.
+const (
+	exportCORSAllowHeaders  = publish.CORSStandardAllowHeaders
+	exportCORSExposeHeaders = "Content-Disposition,Content-Range,Accept-Ranges,X-Attribute-Permissions,X-Attribute-Uid,X-Attribute-Gid,X-Attribute-Modtime,X-Attribute-Hash-Md5,X-LinkTarget"
+)
+
 func (r *DataexportReconciler) makePublishConfigs(dataExport *dev1alpha1.DataExport, generatedNames Names) (publish.HeadlessServiceCfg, publish.IngressCfg) {
 	serviceCfg := publish.HeadlessServiceCfg{
 		ServiceName:           types.NamespacedName{Namespace: r.Config.ControllerNamespace, Name: generatedNames.HeadlessServiceName},
@@ -760,6 +789,11 @@ func (r *DataexportReconciler) makePublishConfigs(dataExport *dev1alpha1.DataExp
 		TargetSecretName: IngressSecretName,
 		Path:             fmt.Sprintf("/%s/%s/%s", dataExport.Namespace, generatedNames.TargetKindShort, generatedNames.TargetName),
 		CorsAllowMethods: "GET, HEAD, OPTIONS",
+		// The browser downloads cross-origin, so both directions need an explicit CORS mandate: the
+		// baseline request headers (Authorization, Range) on the way in, and the response headers
+		// carrying the filename, the range bookkeeping and the file attributes on the way back.
+		CorsAllowHeaders:  exportCORSAllowHeaders,
+		CorsExposeHeaders: exportCORSExposeHeaders,
 	}
 
 	return serviceCfg, ingressCfg
