@@ -1,1 +1,11 @@
 base_images.yml
+
+# Fuzzing artifacts (see hack/fuzzing/README.md). The promoted corpus under
+# images/*/cmd/testdata is deliberately not ignored — committing it is how a fuzzing run
+# becomes a regression test.
+hack/fuzzing/out/
+hack/fuzzing/runner/runner
+hack/fuzzing/fuzz_report-*.tar.gz
+images/*/cmd/.fuzzcache/
+images/*/cmd/coverage.txt
+images/*/cmd/coverage_total.txt
