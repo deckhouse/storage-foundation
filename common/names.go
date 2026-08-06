@@ -27,15 +27,16 @@ import (
 )
 
 type Names struct {
-	TargetName          string
-	TargetKindShort     string
-	HashSuffix          string
-	DeployName          string
-	CASecretName        string
-	HeadlessServiceName string
-	IngressResourceName string
-	ExportPVCName       string // Export-specific
-	DummyJobName        string // Import-specific
+	TargetName           string
+	TargetKindShort      string
+	HashSuffix           string
+	DeployName           string
+	CASecretName         string
+	HeadlessServiceName  string
+	IngressResourceName  string
+	ExportPVCName        string // Export-specific
+	DummyJobName         string // Import-specific
+	ImportScratchPVCName string // Import-specific
 }
 
 func generateHashSuffix(namespace, name string) string {
@@ -56,15 +57,16 @@ func NewNamesFromShort(targetKindShort, targetName, namespace, name string) Name
 	hashSuffix := generateHashSuffix(namespace, name)
 
 	return Names{
-		TargetName:          targetName,
-		TargetKindShort:     targetKindShort,
-		HashSuffix:          hashSuffix,
-		DeployName:          fmt.Sprintf("deploy-for-%s-%s", targetKindShort, hashSuffix),
-		CASecretName:        fmt.Sprintf("ca-secret-for-%s-%s", targetKindShort, hashSuffix),
-		HeadlessServiceName: fmt.Sprintf("service-for-%s-%s", targetKindShort, hashSuffix),
-		IngressResourceName: fmt.Sprintf("ingress-for-%s-%s", targetKindShort, hashSuffix),
-		ExportPVCName:       fmt.Sprintf("pvc-for-%s-%s", targetKindShort, hashSuffix),
-		DummyJobName:        fmt.Sprintf("dummy-for-%s-%s", targetKindShort, hashSuffix),
+		TargetName:           targetName,
+		TargetKindShort:      targetKindShort,
+		HashSuffix:           hashSuffix,
+		DeployName:           fmt.Sprintf("deploy-for-%s-%s", targetKindShort, hashSuffix),
+		CASecretName:         fmt.Sprintf("ca-secret-for-%s-%s", targetKindShort, hashSuffix),
+		HeadlessServiceName:  fmt.Sprintf("service-for-%s-%s", targetKindShort, hashSuffix),
+		IngressResourceName:  fmt.Sprintf("ingress-for-%s-%s", targetKindShort, hashSuffix),
+		ExportPVCName:        fmt.Sprintf("pvc-for-%s-%s", targetKindShort, hashSuffix),
+		DummyJobName:         fmt.Sprintf("dummy-for-%s-%s", targetKindShort, hashSuffix),
+		ImportScratchPVCName: fmt.Sprintf("import-pvc-for-%s-%s", targetKindShort, hashSuffix),
 	}
 }
 

@@ -118,24 +118,25 @@ func volumeCaptureRequestName(uid types.UID) string {
 	return "data-import-vcr-" + string(uid)
 }
 
-// buildVolumeCaptureRequest constructs the VCR (unstructured) that captures the populated scratch PVC
-// into the durable artifact. It is owned by the DataImport (namespaced->namespaced ownerRef) so it is
-// garbage-collected with the DataImport.
-func buildVolumeCaptureRequest(name string, di *dev1alpha1.DataImport, scratchPVC *corev1.PersistentVolumeClaim, mode string) *unstructured.Unstructured {
+// buildVolumeCaptureRequest builds the VCR that captures the populated scratch PVC. The owner is the
+// cluster-scoped import ObjectKeeper, not the DataImport: a namespaced owner in another namespace is invalid.
+func buildVolumeCaptureRequest(name, namespace string, keeper *unstructured.Unstructured, scratchPVC *corev1.PersistentVolumeClaim, mode string) *unstructured.Unstructured {
+	ownerRef := keeperOwnerReference(keeper)
+
 	return &unstructured.Unstructured{Object: map[string]interface{}{
 		"apiVersion": volumeCaptureRequestGVR.Group + "/" + volumeCaptureRequestGVR.Version,
 		"kind":       volumeCaptureRequestKind,
 		"metadata": map[string]interface{}{
 			"name":      name,
-			"namespace": di.Namespace,
+			"namespace": namespace,
 			"ownerReferences": []interface{}{
 				map[string]interface{}{
-					"apiVersion":         dev1alpha1.SchemeGroupVersion.String(),
-					"kind":               dataImportKind,
-					"name":               di.Name,
-					"uid":                string(di.UID),
-					"controller":         true,
-					"blockOwnerDeletion": true,
+					"apiVersion": ownerRef.APIVersion,
+					"kind":       ownerRef.Kind,
+					"name":       ownerRef.Name,
+					"uid":        string(ownerRef.UID),
+					// blockOwnerDeletion omitted: it would need objectkeepers/finalizers permission, which is not granted.
+					"controller": true,
 				},
 			},
 		},
@@ -144,7 +145,8 @@ func buildVolumeCaptureRequest(name string, di *dev1alpha1.DataImport, scratchPV
 			// Single-target VCR (wave1): spec.target is a single object, not a spec.targets[] list. The
 			// CRD prunes any unknown spec.targets and the mode=Snapshot CEL rule requires spec.target, so
 			// emitting the legacy list shape produces a target-less VCR that never captures. Namespace is
-			// omitted on purpose: the captured PVC always lives in the VCR's own namespace.
+			// omitted on purpose: the captured PVC always lives in the VCR's own namespace, which is now
+			// genuinely true (both live in the controller namespace).
 			"target": map[string]interface{}{
 				"uid":        string(scratchPVC.UID),
 				"apiVersion": "v1",
@@ -155,10 +157,12 @@ func buildVolumeCaptureRequest(name string, di *dev1alpha1.DataImport, scratchPV
 	}}
 }
 
-// ensureVolumeCaptureRequest idempotently creates the VCR for this import and returns the current object.
-func (r *DataImportReconciler) ensureVolumeCaptureRequest(ctx context.Context, scratchPVC *corev1.PersistentVolumeClaim, mode string) (*unstructured.Unstructured, error) {
+// ensureVolumeCaptureRequest idempotently creates the VCR (in the controller namespace) for this import
+// and returns the current object. scratchPVC may be nil once the VCR already exists (the Get path does
+// not need it); it is required to build a new one.
+func (r *DataImportReconciler) ensureVolumeCaptureRequest(ctx context.Context, scratchPVC *corev1.PersistentVolumeClaim, keeper *unstructured.Unstructured, mode string) (*unstructured.Unstructured, error) {
 	name := volumeCaptureRequestName(r.dataImport.UID)
-	cli := r.Dynamic.Resource(volumeCaptureRequestGVR).Namespace(r.dataImport.Namespace)
+	cli := r.Dynamic.Resource(volumeCaptureRequestGVR).Namespace(r.Config.ControllerNamespace)
 
 	got, err := cli.Get(ctx, name, metav1.GetOptions{})
 	if err == nil {
@@ -168,7 +172,12 @@ func (r *DataImportReconciler) ensureVolumeCaptureRequest(ctx context.Context, s
 		return nil, fmt.Errorf("get VolumeCaptureRequest %s: %w", name, err)
 	}
 
-	obj := buildVolumeCaptureRequest(name, r.dataImport, scratchPVC, mode)
+	if scratchPVC == nil {
+		return nil, fmt.Errorf("%w: %w: internal scratch PVC %s/%s is gone and no VolumeCaptureRequest was ever created; the captured data cannot be recovered",
+			ErrTerminal, ErrTargetFailed, r.Config.ControllerNamespace, r.names.ImportScratchPVCName)
+	}
+
+	obj := buildVolumeCaptureRequest(name, r.Config.ControllerNamespace, keeper, scratchPVC, mode)
 	created, err := cli.Create(ctx, obj, metav1.CreateOptions{})
 	if err != nil {
 		if kubeerrors.IsAlreadyExists(err) {

@@ -22,7 +22,6 @@ import (
 	"fmt"
 	"reflect"
 
-	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	kubeerrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
@@ -180,8 +179,13 @@ func (r *DataImportReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 			ObservedGeneration: r.dataImport.Generation,
 		})
 
-		if cleanupErr := r.cleanupDataImport(ctx); cleanupErr != nil {
+		done, cleanupErr := r.cleanupDataImport(ctx)
+		if cleanupErr != nil {
 			return ctrl.Result{}, fmt.Errorf("%w: %w", ErrCleanupFailed, cleanupErr)
+		}
+		if !done {
+			// Nothing watches Pods here, so a live importer pod produces no event to resume on — self-requeue.
+			return ctrl.Result{RequeueAfter: dataImportRequeueInterval}, nil
 		}
 		return ctrl.Result{}, nil
 	}
@@ -203,8 +207,13 @@ func (r *DataImportReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 			Message:            "DataImport idle timeout expired",
 			ObservedGeneration: r.dataImport.Generation,
 		})
-		if _, cleanupErr := r.teardownImportInfra(ctx); cleanupErr != nil {
+		allGone, cleanupErr := r.teardownImportInfra(ctx)
+		if cleanupErr != nil {
 			return ctrl.Result{}, fmt.Errorf("%w: %w", ErrCleanupFailed, cleanupErr)
+		}
+		if !allGone {
+			// Same as the deletion branch: a live importer pod produces no event to resume on.
+			return ctrl.Result{RequeueAfter: dataImportRequeueInterval}, nil
 		}
 		return ctrl.Result{}, nil
 	}
@@ -240,7 +249,9 @@ func (r *DataImportReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 		return result, err
 	}
 
-	// When PVC is created and bound, Volume Populator controller will handle it
+	// For PopulateData the controller brings up and drives the importer pod directly (see
+	// ensureSnapshotImportTarget); for CreatePVC, the volume populator controller still handles bringing
+	// the target PVC's upload endpoint up once it is created and bound.
 
 	if r.dataImport.Spec.Publish {
 		err = r.ensurePublish(ctx)
@@ -415,14 +426,20 @@ func (r *DataImportReconciler) ensureTarget(ctx context.Context) (ctrl.Result, e
 }
 
 // ensureSnapshotImportTarget runs the PopulateData pipeline: derive scratch-PVC parameters from
-// spec.storageParams -> ensure the scratch PVC (the volume the imported bytes land in) -> once it
-// is bound, produce the durable data artifact (VolumeSnapshotContent). It returns a RequeueAfter while
-// waiting on out-of-band preconditions (PVC bind, VolumeCaptureRequest completion) that the controller
-// does not watch.
+// spec.storageParams -> bring up the internal scratch PVC and its importer Deployment in the controller
+// namespace (the upload phase) -> once the client finishes uploading, stop the importer and capture the
+// scratch volume into the durable data artifact (the capture phase). It returns a RequeueAfter while
+// waiting on out-of-band preconditions (PVC bind, importer pod termination, VolumeCaptureRequest
+// completion) that the controller does not watch.
+//
+// The capture-phase check runs BEFORE the upload phase ensures the PVC: once UploadFinished is True the
+// scratch PVC may already be gone (a prior pass captured it but failed to persist status before
+// returning), and re-creating it here would blindly re-open the upload endpoint for data that was already
+// captured.
 func (r *DataImportReconciler) ensureSnapshotImportTarget(ctx context.Context) (ctrl.Result, error) {
 	logger := log.FromContext(ctx)
 
-	// Terminal: once the artifact is produced the import is done. Re-affirm Completed (idempotent) and
+	// a. Terminal: once the artifact is produced the import is done. Re-affirm Completed (idempotent) and
 	// stop, so completed DataImports don't re-derive the scratch PVC on every publish/server event until
 	// TTL expiry.
 	if r.dataImport.Status.Data != nil && r.dataImport.Status.Data.ArtifactRef != nil {
@@ -437,7 +454,7 @@ func (r *DataImportReconciler) ensureSnapshotImportTarget(ctx context.Context) (
 		return ctrl.Result{}, nil
 	}
 
-	// Scratch-PVC parameters come straight from the spec (provided by d8, mirrored from the source
+	// b. Scratch-PVC parameters come straight from the spec (provided by d8, mirrored from the source
 	// xxxSnapshot.status); the leaf's captured manifest is no longer downloaded on import. Invalid spec
 	// parameters are a terminal, user-fixable error.
 	params, err := scratchVolumeParamsFromSpec(r.dataImport.Spec)
@@ -446,7 +463,7 @@ func (r *DataImportReconciler) ensureSnapshotImportTarget(ctx context.Context) (
 		return ctrl.Result{}, fmt.Errorf("%w: %w: %w", ErrTerminal, ErrTargetFailed, err)
 	}
 
-	// Fail fast: core import supports snapshot-capable CSI only. Snapshot capability is a static
+	// c. Fail fast: core import supports snapshot-capable CSI only. Snapshot capability is a static
 	// property of spec.storageClassName, knowable before any bytes are uploaded, so reject a
 	// non-snapshot-capable StorageClass up front instead of after a full (potentially multi-GiB) upload.
 	// The check is re-run at capture time (ensureDataArtifact) to guard against the annotation changing
@@ -456,17 +473,107 @@ func (r *DataImportReconciler) ensureSnapshotImportTarget(ctx context.Context) (
 		return ctrl.Result{}, fmt.Errorf("%w: %w", ErrTargetFailed, err)
 	}
 
-	if err := r.ensureScratchPVC(ctx, params); err != nil {
-		logger.Error(err, "failed to ensure scratch PVC")
+	pvcKey := types.NamespacedName{Namespace: r.Config.ControllerNamespace, Name: r.names.ImportScratchPVCName}
+
+	if meta.IsStatusConditionTrue(r.dataImport.Status.Conditions, string(common.ConditionUploadFinished)) {
+		return r.captureSnapshotImportTarget(ctx, pvcKey)
+	}
+
+	return r.uploadSnapshotImportTarget(ctx, params, pvcKey)
+}
+
+// captureSnapshotImportTarget runs the PopulateData capture phase, reached once the client's upload has
+// finished (UploadFinished=True).
+//
+// THE HIGHEST-STAKES INVARIANT IN THIS CONTROLLER: the importer must be fully stopped (Deployment deleted
+// AND every importer pod terminated) BEFORE the scratch volume is captured, on every code path, always.
+// images/data-exporter performs no explicit fsync anywhere, so the only available consistency signal is
+// the kubelet's unmount, which completes before the Pod object disappears; capturing while a live writer
+// may still hold the mount would risk a silently corrupt snapshot.
+func (r *DataImportReconciler) captureSnapshotImportTarget(ctx context.Context, scratchPvcKey types.NamespacedName) (ctrl.Result, error) {
+	logger := log.FromContext(ctx)
+
+	stopped, err := r.stopImporter(ctx)
+	if err != nil {
 		return ctrl.Result{}, err
 	}
-	pvc, err := GetScratchPVC(ctx, r.Client, r.dataImport.Namespace, r.dataImport.Name)
+	if !stopped {
+		logger.Info("Stopping the upload server before capturing the volume")
+		meta.SetStatusCondition(&r.dataImport.Status.Conditions, metav1.Condition{
+			Type:               string(common.ConditionReady),
+			Status:             metav1.ConditionFalse,
+			Reason:             string(common.ReasonPending),
+			Message:            "Stopping the upload server before capturing the volume",
+			ObservedGeneration: r.dataImport.Generation,
+		})
+		return ctrl.Result{RequeueAfter: dataImportRequeueInterval}, nil
+	}
+
+	scratchPvc, err := GetPVC(ctx, r.Client, scratchPvcKey)
 	if err != nil {
-		logger.Error(err, "failed to get scratch PVC")
+		return ctrl.Result{}, err
+	}
+	if scratchPvc != nil && scratchPvc.Status.Phase != corev1.ClaimBound {
+		return ctrl.Result{}, fmt.Errorf("%w: %w: internal scratch PVC %s is %s, expected Bound after a finished upload",
+			ErrTerminal, ErrTargetFailed, scratchPvcKey, scratchPvc.Status.Phase)
+	}
+
+	if scratchPvc != nil {
+		// Informational only: keep the previously reported value rather than failing the capture.
+		if volumeMode, err := GetPVCVolumeMode(scratchPvc); err == nil {
+			r.dataImport.Status.VolumeMode = volumeMode
+		}
+	}
+
+	return r.ensureDataArtifact(ctx, scratchPvc)
+}
+
+// uploadSnapshotImportTarget runs the PopulateData upload phase: bring up the internal scratch PVC and
+// its importer Deployment in the controller namespace, so the client can stream bytes into it. Being the
+// PVC's first consumer is what makes a WaitForFirstConsumer StorageClass bind the volume; there is no
+// dummy consumer Job in this mode.
+func (r *DataImportReconciler) uploadSnapshotImportTarget(ctx context.Context, params scratchVolumeParams, pvcKey types.NamespacedName) (ctrl.Result, error) {
+	logger := log.FromContext(ctx)
+
+	pvc, err := r.ensureScratchPVC(ctx, params)
+	if err != nil {
 		return ctrl.Result{}, err
 	}
 
-	return r.handleTargetStatus(ctx, pvc)
+	volumeMode, err := GetPVCVolumeMode(pvc)
+	if err != nil {
+		logger.Error(err, "failed to get scratch PVC volume mode")
+		return ctrl.Result{}, err
+	}
+	r.dataImport.Status.VolumeMode = volumeMode
+
+	if err := r.ensureImporterDeployment(ctx, pvc); err != nil {
+		// common.MakeServerContainer/EnsureDeployment already log the underlying failure; avoid a
+		// second log line for the same error.
+		return ctrl.Result{}, err
+	}
+
+	switch internalPVCStatus(pvc) {
+	case TargetStatusReady:
+		meta.SetStatusCondition(&r.dataImport.Status.Conditions, metav1.Condition{
+			Type:               string(common.ConditionReady),
+			Status:             metav1.ConditionFalse,
+			Reason:             string(common.ReasonPending),
+			Message:            "Internal volume bound, awaiting data upload",
+			ObservedGeneration: r.dataImport.Generation,
+		})
+	case TargetStatusPending:
+		meta.SetStatusCondition(&r.dataImport.Status.Conditions, metav1.Condition{
+			Type:               string(common.ConditionReady),
+			Status:             metav1.ConditionFalse,
+			Reason:             string(common.ReasonPVCCreated),
+			Message:            "Internal volume created, awaiting the upload server pod to bind it",
+			ObservedGeneration: r.dataImport.Generation,
+		})
+	case TargetStatusFailed:
+		return ctrl.Result{}, fmt.Errorf("internal scratch PVC %s is in phase %s: %w", pvcKey, pvc.Status.Phase, ErrTargetFailed)
+	}
+	return ctrl.Result{RequeueAfter: dataImportRequeueInterval}, nil
 }
 
 // scratchVolumeParams holds the parameters used to size and shape the scratch PVC the imported bytes are
@@ -502,18 +609,24 @@ func scratchVolumeParamsFromSpec(spec dev1alpha1.DataImportSpec) (scratchVolumeP
 	}, nil
 }
 
-// ensureScratchPVC creates/updates the internal scratch PVC sized and shaped from the spec parameters.
-// The PVC is populated by the upload path (populator + published endpoint); the produced data artifact
-// is captured from it once bound.
-func (r *DataImportReconciler) ensureScratchPVC(ctx context.Context, params scratchVolumeParams) error {
-	return r.ensureImportPVC(ctx, scratchPVCTemplate(r.dataImport.Name, params))
+// ensureScratchPVC creates/updates the internal volume the imported bytes land in. Two deliberate
+// differences from the CreatePVC target PVC:
+//   - it lives in the CONTROLLER namespace, so the VolumeCaptureRequest that captures it can live there
+//     too (a VCR and its target PVC must share a namespace), and nothing operational appears in the
+//     user's namespace;
+//   - it has NO DataSourceRef, so lib-volume-populator's syncPvc never sees it — the importer Deployment
+//     is the first consumer instead of a dummy Job, and the scheduler sets selected-node naturally.
+func (r *DataImportReconciler) ensureScratchPVC(ctx context.Context, params scratchVolumeParams) (*corev1.PersistentVolumeClaim, error) {
+	return EnsurePVC(ctx, r.Client, r.Config.ControllerNamespace,
+		types.NamespacedName{Namespace: r.dataImport.Namespace, Name: r.dataImport.Name},
+		scratchPVCTemplate(r.names.ImportScratchPVCName, params), nil)
 }
 
 // ensureImportPVC creates/updates the PVC the imported bytes land in from the given template, wiring its
 // DataSourceRef to this DataImport so the volume populator picks it up and brings up the upload endpoint.
 // Both modes share it: PopulateData passes an internally-derived scratch template (named after the
 // DataImport), CreatePVC passes the user's spec.pvcTemplate (named by the user).
-func (r *DataImportReconciler) ensureImportPVC(ctx context.Context, pvcTemplate *dev1alpha1.PersistentVolumeClaimTemplateSpec) error {
+func (r *DataImportReconciler) ensureImportPVC(ctx context.Context, pvcTemplate *dev1alpha1.PersistentVolumeClaimTemplateSpec) (*corev1.PersistentVolumeClaim, error) {
 	apiGroup := dev1alpha1.APIGroup
 	dataSourceRef := &corev1.TypedObjectReference{
 		APIGroup: &apiGroup,
@@ -521,7 +634,7 @@ func (r *DataImportReconciler) ensureImportPVC(ctx context.Context, pvcTemplate 
 		Name:     r.dataImport.Name,
 	}
 	resourceName := types.NamespacedName{Namespace: r.dataImport.Namespace, Name: r.dataImport.Name}
-	return EnsurePVC(ctx, r.Client, resourceName, pvcTemplate, dataSourceRef)
+	return EnsurePVC(ctx, r.Client, r.dataImport.Namespace, resourceName, pvcTemplate, dataSourceRef)
 }
 
 // scratchPVCTemplate builds the PVC template from the spec-derived parameters: RWO access, the requested
@@ -543,77 +656,6 @@ func scratchPVCTemplate(name string, params scratchVolumeParams) *dev1alpha1.Per
 	}
 }
 
-func (r *DataImportReconciler) handleTargetStatus(ctx context.Context, pvc *corev1.PersistentVolumeClaim) (ctrl.Result, error) {
-	logger := log.FromContext(ctx)
-	logger.Info("Checking scratch PVC status")
-	// The scratch PVC is internal to the import (named after the DataImport, filled by the
-	// populator) and never gets a natural first consumer. Under a WaitForFirstConsumer
-	// StorageClass nothing would ever set volume.kubernetes.io/selected-node, so the populator
-	// would wait for node selection forever. Always force a load pod for WFFC (pass
-	// waitForFirstConsumer=false) so import works regardless of the StorageClass binding mode;
-	// spec.WaitForFirstConsumer is intentionally not honored for this internal PVC.
-	status, err := CheckPVCStatus(ctx, r.Client, pvc, false)
-	if err != nil {
-		logger.Error(err, "failed to check scratch PVC status")
-		return ctrl.Result{}, err
-	}
-
-	volumeMode, err := GetPVCVolumeMode(pvc)
-	if err != nil {
-		logger.Error(err, "failed to get scratch PVC volume mode")
-		return ctrl.Result{}, err
-	}
-	r.dataImport.Status.VolumeMode = volumeMode
-
-	switch status {
-	case TargetStatusReady:
-		// PVC bound is necessary but not sufficient: the bytes must be uploaded first. The importer
-		// pod flips UploadFinished=True when the client finishes streaming into the scratch PVC; only
-		// then is it safe to capture the volume into the durable artifact.
-		if cond := common.GetCondition(r.dataImport.Status.Conditions, common.ConditionUploadFinished); cond == nil || cond.Status != metav1.ConditionTrue {
-			logger.Info("Scratch PVC is bound, awaiting data upload before capture")
-			meta.SetStatusCondition(&r.dataImport.Status.Conditions, metav1.Condition{
-				Type:               string(common.ConditionReady),
-				Status:             metav1.ConditionFalse,
-				Reason:             string(common.ReasonPending),
-				Message:            "Scratch PVC bound, awaiting data upload",
-				ObservedGeneration: r.dataImport.Generation,
-			})
-			return ctrl.Result{RequeueAfter: dataImportRequeueInterval}, nil
-		}
-		logger.Info("Upload finished, producing data artifact")
-		return r.ensureDataArtifact(ctx, pvc)
-	case TargetStatusPending:
-		logger.Info("Scratch PVC is pending")
-		meta.SetStatusCondition(&r.dataImport.Status.Conditions, metav1.Condition{
-			Type:               string(common.ConditionReady),
-			Status:             metav1.ConditionFalse,
-			Reason:             string(common.ReasonPVCCreated),
-			Message:            "Scratch PVC is created",
-			ObservedGeneration: r.dataImport.Generation,
-		})
-		return ctrl.Result{RequeueAfter: dataImportRequeueInterval}, nil
-	case TargetStatusNeedConsumer:
-		logger.Info("Scratch PVC needs consumer, ensuring dummy Job")
-		if err := r.ensureDummyJob(ctx, pvc); err != nil {
-			logger.Error(err, "Failed to create dummy Job")
-			return ctrl.Result{}, err
-		}
-		meta.SetStatusCondition(&r.dataImport.Status.Conditions, metav1.Condition{
-			Type:               string(common.ConditionReady),
-			Status:             metav1.ConditionFalse,
-			Reason:             string(common.ReasonPVCCreated),
-			Message:            "Scratch PVC is created, dummy Job created to bind PVC",
-			ObservedGeneration: r.dataImport.Generation,
-		})
-		return ctrl.Result{RequeueAfter: dataImportRequeueInterval}, nil
-	case TargetStatusFailed:
-		return ctrl.Result{}, fmt.Errorf("scratch PVC is in Failed state: %w", ErrTargetFailed)
-	}
-
-	return ctrl.Result{}, nil
-}
-
 // ensurePVCImportTarget runs the CreatePVC pipeline: ensure the user-described target PVC
 // (spec.pvcTemplate) -> once it is bound and the upload has finished, mark the import Completed. Unlike
 // PopulateData it derives nothing from a scratch template, does not gate on snapshot capability, and
@@ -633,13 +675,9 @@ func (r *DataImportReconciler) ensurePVCImportTarget(ctx context.Context) (ctrl.
 		return ctrl.Result{}, fmt.Errorf("%w: %w: pvcTemplate with metadata.name is required for CreatePVC", ErrTerminal, ErrTargetFailed)
 	}
 
-	if err := r.ensureImportPVC(ctx, pvcTemplate); err != nil {
-		logger.Error(err, "failed to ensure target PVC")
-		return ctrl.Result{}, err
-	}
-	pvc, err := GetScratchPVC(ctx, r.Client, r.dataImport.Namespace, pvcTemplate.Name)
+	pvc, err := r.ensureImportPVC(ctx, pvcTemplate)
 	if err != nil {
-		logger.Error(err, "failed to get target PVC")
+		logger.Error(err, "failed to ensure target PVC")
 		return ctrl.Result{}, err
 	}
 
@@ -667,6 +705,11 @@ func (r *DataImportReconciler) handlePVCImportStatus(ctx context.Context, pvc *c
 
 	switch status {
 	case TargetStatusReady:
+		// A failure here retries before the completion logic below, so a stuck delete stalls this import.
+		if err := r.reconcileDummyJobDeletion(ctx, pvc); err != nil {
+			return ctrl.Result{}, err
+		}
+
 		if cond := common.GetCondition(r.dataImport.Status.Conditions, common.ConditionUploadFinished); cond == nil || cond.Status != metav1.ConditionTrue {
 			logger.Info("Target PVC is bound, awaiting data upload")
 			meta.SetStatusCondition(&r.dataImport.Status.Conditions, metav1.Condition{
@@ -719,13 +762,48 @@ func (r *DataImportReconciler) handlePVCImportStatus(ctx context.Context, pvc *c
 	return ctrl.Result{}, nil
 }
 
+// reconcileDummyJobDeletion removes the dummy consumer Job once the target PVC is bound: the Job only
+// exists to trigger WaitForFirstConsumer binding, so it is garbage the moment binding happened.
+//
+// The check is the Job's own existence, deliberately NOT a status condition. An earlier version gated on
+// Ready.Reason==PVCCreated, which silently stranded the Job: in the populator flow the upload server runs
+// on a separate PvcPrime volume, so updateReadiness flips Ready.Reason to ServerReady off the pod's
+// heartbeat while this PVC is still Pending — i.e. before TargetStatusReady is ever reached — closing the
+// gate permanently. Reading the Job is a cached (informer-backed) lookup, so skipping the Delete when it
+// is already gone keeps a no-change reconcile free of write calls without adding a real API round-trip.
+func (r *DataImportReconciler) reconcileDummyJobDeletion(ctx context.Context, pvc *corev1.PersistentVolumeClaim) error {
+	jobName := types.NamespacedName{Namespace: pvc.Namespace, Name: r.names.DummyJobName}
+
+	job, err := common.GetJob(ctx, r.Client, jobName.Namespace, jobName.Name)
+	if err != nil {
+		return fmt.Errorf("failed to get dummy Job after PVC became bound: %w", err)
+	}
+	if job == nil {
+		// Never created (Immediate binding mode) or already deleted: nothing to do, no write issued.
+		return nil
+	}
+	if job.DeletionTimestamp != nil {
+		// Foreground propagation is still waiting on the dummy Pod; a repeat Delete would be accepted as
+		// a no-op but is still a mutating call on unchanged state, and wouldn't unstick the propagation.
+		return nil
+	}
+
+	if _, err := common.DeleteJob(ctx, r.Client, jobName); err != nil {
+		return fmt.Errorf("failed to delete dummy Job after PVC became bound: %w", err)
+	}
+
+	return nil
+}
+
 // ensureDataArtifact captures the bound scratch PVC into a durable cluster-scoped VolumeSnapshotContent
 // via a VolumeCaptureRequest, pins the artifact's reclaim policy to Retain, anchors it to the import's
 // lifetime via the import ObjectKeeper, and records it in status.data.artifactRef + Completed. The capture
 // mode is auto-detected from the spec StorageClass (snapshot-capable -> Snapshot); a non-snapshot-capable
 // StorageClass fails closed. It requeues while the VolumeCaptureRequest is in progress. DataImport never
 // becomes the artifact's controller owner (storage-foundation's VCR retainer is); see object_keeper.go /
-// artifact.go.
+// artifact.go. pvc may be nil: the capture phase may be re-entered after the scratch PVC was already
+// deleted by a prior pass that failed before its status write landed; a nil pvc is only valid once the
+// VCR already exists (ensureVolumeCaptureRequest enforces this).
 func (r *DataImportReconciler) ensureDataArtifact(ctx context.Context, pvc *corev1.PersistentVolumeClaim) (ctrl.Result, error) {
 	logger := log.FromContext(ctx)
 
@@ -736,13 +814,14 @@ func (r *DataImportReconciler) ensureDataArtifact(ctx context.Context, pvc *core
 
 	// Ensure the import keeper exists (with a populated UID) BEFORE the artifact is produced, so the
 	// non-controller ownerRef can be attached as soon as the artifact appears — no window where the
-	// artifact is anchored only to the VCR.
+	// artifact is anchored only to the VCR. It also anchors the VCR's own ownerRef now (buildVolumeCaptureRequest),
+	// so the keeper UID is doubly load-bearing.
 	keeper, res, err := r.ensureObjectKeeper(ctx)
 	if err != nil || keeper == nil {
 		return res, err
 	}
 
-	vcr, err := r.ensureVolumeCaptureRequest(ctx, pvc, mode)
+	vcr, err := r.ensureVolumeCaptureRequest(ctx, pvc, keeper, mode)
 	if err != nil {
 		return ctrl.Result{}, err
 	}
@@ -775,9 +854,12 @@ func (r *DataImportReconciler) ensureDataArtifact(ctx context.Context, pvc *core
 
 	// The scratch PVC is no longer needed now that the artifact is safely captured. Completed is set
 	// only once it's actually deleted — Completed is sticky-terminal, so a swallowed failure here
-	// would never get another chance and would leak the PVC forever.
-	if err := DeleteScratchPVC(ctx, r.Client, pvc); err != nil {
-		return ctrl.Result{}, fmt.Errorf("delete scratch PVC: %w", err)
+	// would never get another chance and would leak the PVC forever. A nil pvc means it is already gone
+	// (a prior pass deleted it before failing to persist status) — nothing left to delete.
+	if pvc != nil {
+		if err := DeleteScratchPVC(ctx, r.Client, pvc); err != nil {
+			return ctrl.Result{}, fmt.Errorf("delete scratch PVC: %w", err)
+		}
 	}
 
 	r.dataImport.Status.Data = &dev1alpha1.DataExportImportData{ArtifactRef: artifact}
@@ -791,62 +873,92 @@ func (r *DataImportReconciler) ensureDataArtifact(ctx context.Context, pvc *core
 	return ctrl.Result{}, nil
 }
 
-// teardownImportInfra deletes the controller-owned server-side resources (dummy Job, publish
-// Service/Ingress) and reports whether ALL server-side infrastructure is gone — including the upload
-// Deployment, which the volume populator owns and tears down when it observes Ready=Expired/Deleted. It
-// never touches finalizers, so it is safe to call both on idle expiry (keep the CR for the GC) and as the
-// first phase of deletion cleanup. It is idempotent: not-found resources count as already gone.
 func (r *DataImportReconciler) teardownImportInfra(ctx context.Context) (allGone bool, err error) {
-	logger := log.FromContext(ctx)
-
-	// Delete dummy Job if it exists
-	jobName := types.NamespacedName{
+	// Every delete below is unconditional (NotFound = success) and repeats on each requeue tick until
+	// allGone; that is cheaper and safer than a Get before each Delete.
+	jobExists, err := common.DeleteJob(ctx, r.Client, types.NamespacedName{
 		Namespace: r.dataImport.Namespace,
 		Name:      r.names.DummyJobName,
-	}
-	isJobExists, err := common.DeleteJob(ctx, r.Client, jobName)
+	})
 	if err != nil {
-		logger.Error(err, "Failed to delete dummy Job")
+		return false, fmt.Errorf("delete dummy Job: %w", err)
+	}
+
+	stopped, err := r.stopImporter(ctx)
+	if err != nil {
 		return false, err
 	}
-	if isJobExists {
-		logger.Info("Dummy Job exists")
-	}
 
-	// Check if server deployment stopped (the populator owns and deletes it)
-	deploymentName := types.NamespacedName{
-		Namespace: r.Config.ControllerNamespace,
-		Name:      r.names.DeployName,
-	}
-
-	deploy := &appsv1.Deployment{}
-	getErr := r.Client.Get(ctx, deploymentName, deploy)
-	isServerDeploymentExists := false
-	if getErr != nil && !kubeerrors.IsNotFound(getErr) {
-		logger.Error(getErr, "Failed to get server Deployment")
-		return false, getErr
-	} else if getErr == nil {
-		logger.Info("Server Deployment exists")
-		isServerDeploymentExists = true
-	}
-
-	// Delete publish resources if created
 	isPublishExists, err := r.deletePublish(ctx)
 	if err != nil {
 		return false, err
 	}
-	if isPublishExists {
-		logger.Info("Ingress or service exists")
+
+	secretExists, err := deleteCASecret(ctx, r.Client, types.NamespacedName{
+		Namespace: r.Config.ControllerNamespace,
+		Name:      r.names.CASecretName,
+	})
+	if err != nil {
+		return false, fmt.Errorf("delete CA secret: %w", err)
 	}
 
-	if isJobExists || isServerDeploymentExists || isPublishExists {
-		logger.Info("Not all resources are deleted")
+	// Never delete a PVC while an importer pod may still hold the mount — the same consistency invariant
+	// that gates the capture phase (see captureSnapshotImportTarget).
+	if !stopped {
 		return false, nil
+	}
+
+	if !r.isCreatePVCMode() {
+		pvc, err := GetPVC(ctx, r.Client, types.NamespacedName{Name: r.names.ImportScratchPVCName, Namespace: r.Config.ControllerNamespace})
+		if err != nil {
+			return false, fmt.Errorf("get internal scratch PVC: %w", err)
+		}
+
+		if pvc == nil {
+			return !jobExists && !isPublishExists && !secretExists, nil
+		}
+
+		if err := DeleteScratchPVC(ctx, r.Client, pvc); err != nil {
+			return false, fmt.Errorf("delete internal scratch PVC: %w", err)
+		}
+	}
+
+	return !jobExists && !isPublishExists && !secretExists, nil
+}
+
+// deleteCASecret deletes the importer's CA secret and reports whether it existed. Mirrors
+// common.DeleteDeployment's shape. NotFound is success.
+func deleteCASecret(ctx context.Context, c client.Client, key types.NamespacedName) (bool, error) {
+	secret := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Namespace: key.Namespace, Name: key.Name}}
+	if err := c.Delete(ctx, secret); err != nil {
+		if kubeerrors.IsNotFound(err) {
+			return false, nil
+		}
+		return false, err
 	}
 	return true, nil
 }
 
-func (r *DataImportReconciler) cleanupDataImport(ctx context.Context) error {
+// deleteVolumeCaptureRequest removes this import's VCR (controller namespace) explicitly rather than
+// relying on the ownerRef cascade through the import ObjectKeeper: the keeper is only collected once the
+// ObjectKeeper controller observes the DataImport is gone, and a VCR that never completed carries no
+// completionTimestamp, so the VCR garbage collector's fail-safe skips it forever. NotFound is success.
+func (r *DataImportReconciler) deleteVolumeCaptureRequest(ctx context.Context) error {
+	name := volumeCaptureRequestName(r.dataImport.UID)
+	err := r.Dynamic.Resource(volumeCaptureRequestGVR).Namespace(r.Config.ControllerNamespace).
+		Delete(ctx, name, metav1.DeleteOptions{})
+	if err != nil && !kubeerrors.IsNotFound(err) {
+		return fmt.Errorf("delete VolumeCaptureRequest %s: %w", name, err)
+	}
+	return nil
+}
+
+// cleanupDataImport runs the deletion-time teardown: tear down every server-side resource
+// (teardownImportInfra), explicitly delete the VCR, then release the DataImport finalizer. It never
+// deletes the CreatePVC target PVC (the user's product) — only its import finalizer is removed, so the
+// preserved volume survives cleanup exactly as it does today. Returns done=false when teardown is not
+// finished yet (e.g. a live importer pod), so the caller can requeue instead of dropping the object.
+func (r *DataImportReconciler) cleanupDataImport(ctx context.Context) (done bool, err error) {
 	logger := log.FromContext(ctx)
 	logger.Info("Cleaning up DataImport")
 
@@ -856,38 +968,37 @@ func (r *DataImportReconciler) cleanupDataImport(ctx context.Context) error {
 
 	allGone, err := r.teardownImportInfra(ctx)
 	if err != nil {
-		return err
+		return false, err
 	}
 	// Check if we ready to shutdown or try again
 	if !allGone {
-		return nil
+		return false, nil
 	}
 
-	// Remove the import finalizer from the PVC. RemovePVCFinalizer never deletes the PVC, so the volume
-	// is preserved in both modes — which is exactly the contract for CreatePVC (the user's PVC is the
-	// product). The PVC name differs by mode: PopulateData's scratch PVC is named after the DataImport,
-	// while CreatePVC's PVC is named by the user's pvcTemplate.
-	pvcName := r.dataImport.Name
+	if err := r.deleteVolumeCaptureRequest(ctx); err != nil {
+		return false, err
+	}
+
+	// CreatePVC only: drop the import finalizer from the user's target PVC, never the PVC itself — it is
+	// the user's product. PopulateData's internal scratch PVC is already gone (teardownImportInfra).
 	if r.isCreatePVCMode() {
 		if tmpl := r.dataImport.Spec.PvcTemplate; tmpl != nil && tmpl.Name != "" {
-			pvcName = tmpl.Name
+			logger.Info("Removing PVC finalizer")
+			if err := RemovePVCFinalizer(
+				ctx,
+				r.Client,
+				types.NamespacedName{Namespace: r.dataImport.Namespace, Name: tmpl.Name},
+				dev1alpha1.StorageManagerFinalizerName,
+			); err != nil {
+				logger.Error(err, "Failed to remove finalizer from target PVC")
+				return false, err
+			}
 		}
-	}
-	logger.Info("Removing PVC finalizer")
-	err = RemovePVCFinalizer(
-		ctx,
-		r.Client,
-		types.NamespacedName{Namespace: r.dataImport.Namespace, Name: pvcName},
-		dev1alpha1.StorageManagerFinalizerName,
-	)
-	if err != nil {
-		logger.Error(err, "Failed to remove finalizer from target PVC")
-		return err
 	}
 
 	logger.Info("Removing DataImport finalizer")
 	common.RemoveFinalizer(ctx, r.Client, r.dataImport, dev1alpha1.StorageManagerFinalizerName)
-	return nil
+	return true, nil
 }
 
 func (r *DataImportReconciler) ensureDummyJob(ctx context.Context, target client.Object) error {
@@ -1058,8 +1169,10 @@ func updateDataImport(ctx context.Context, c client.Client, dataImportOld, dataI
 // ingress is up too. It is upgrade-only: when the endpoint is not ready yet it leaves the Ready condition
 // untouched so the more specific progress reason set by ensureTarget (e.g. PVCCreated, or a target
 // precondition) stays visible instead of being masked by a generic "awaiting server readiness". Ready=True
-// is the signal the client waits on before streaming bytes into the scratch PVC, and in the populator
-// flow that PVC is still Pending at that point, so this must run even while ensureTarget requeues.
+// is the signal the client waits on before streaming bytes into the scratch/target PVC, and that PVC may
+// still be Pending at that point in both modes (for PopulateData the controller brings up the importer pod
+// directly; for CreatePVC the volume populator still does), so this must run even while ensureTarget
+// requeues.
 //
 // NOTE: this only handles the "not ready" -> "ready" transition; it does not downgrade Ready if the
 // server later fails or is deleted (the terminal Expired/Failed transitions own the downgrade).
