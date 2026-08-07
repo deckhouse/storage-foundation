@@ -4,9 +4,15 @@
   {{- $src_version := toString $rawVer }}
   {{- $patches := (printf "/images/%s" $.ImageName) }}
   {{- $patch := false }}
+  {{- /* The VRR executor patch builds against api/ of this repository (replace ../api
+         in go.mod), so for such versions api/ is mounted next to /src. */}}
+  {{- $vrr := false }}
   {{- range $path, $_ := $.Files.Glob (printf "%s/*" $patches) }}
     {{- if contains $src_version $path }}
       {{- $patch = true }}
+      {{- if contains "002-vrr-executor" $path }}
+        {{- $vrr = true }}
+      {{- end }}
     {{- end }}
   {{- end }}
 ---
@@ -65,6 +71,14 @@ import:
   add: /src
   to: /src
   before: install
+    {{- if $vrr }}
+git:
+- add: /api
+  to: /api
+  stageDependencies:
+    install:
+    - '**/*'
+    {{- end }}
 secrets:
 - id: GOPROXY
   value: {{ $.GOPROXY }}

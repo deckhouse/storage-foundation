@@ -44,26 +44,34 @@ git -C <external-provisioner-checkout> diff v6.2.0 <branch> \
 ```
 
 API dependency: the executor imports
-`github.com/deckhouse/storage-foundation/api`. As of wave6 the executor
-reads the **honest-refs** VRR API — `spec.sourceRef` + `spec.pvcTemplate`
+`github.com/deckhouse/storage-foundation/api`. The executor reads the
+**honest-refs** VRR API — `spec.sourceRef` + `spec.pvcTemplate`
 (`metadata.name` + `spec.storageClassName`/`volumeMode`/`accessModes`)
-with `fsType` at the spec root — and never writes status. It is pinned to
-the wave6 API pseudo-version `v0.0.0-20260706134706-2c525506f13c` (commit
-`2c52550`), which carries the `pvcTemplate`/`pvcRef` schema. The patch
-also bumps the `go` directive to `1.26.4` because the `api` module
-requires it.
+with `fsType` at the spec root — and never writes status. The dependency
+is resolved with `replace github.com/deckhouse/storage-foundation/api =>
+../api`, i.e. against the `api/` directory of this very repository, so
+the executor always compiles against the API schema of the same commit.
+The patch also bumps the `go` directive to `1.26.4` because the `api`
+module graph requires it.
 
-Verified (wave6): applying `001` + `002` to a clean `v6.2.0` checkout
-compiles and the executor test suite passes —
-`CGO_ENABLED=0 go build -mod=mod ./cmd/csi-provisioner` and
-`go test -mod=mod ./pkg/controller/` (VRR tests) are both green against
-the pinned wave6 API. When the API gets a published `api/vX.Y.Z` tag,
-replace the pseudo-version with that tag (one `go.mod` line plus matching
-`go.sum` lines).
+`werf.inc.yaml` mounts `api/` into the build stage next to `/src` (`git:
+add: /api` with `stageDependencies: install: '**/*'`), which is why the
+relative path resolves both in the image (`/src/../api` = `/api`) and in
+a local checkout where `api/` sits beside the provisioner tree.
 
-Note: the `api` module is a Go submodule (`module .../api` in `api/`), so
-its version tag is subdirectory-prefixed (`api/vX.Y.Z`); the plain
-`v0.1.x` tags are Deckhouse module-release tags, unrelated to it.
+Verified: applying `001` + `002` to a clean `v6.2.0` checkout with `api/`
+placed alongside it reproduces the build pipeline —
+`go mod download && go mod vendor && make build` under the default
+read-only module mode, plus `go test ./pkg/controller/` (VRR tests) —
+all green, and neither `go.mod` nor `go.sum` is modified during the
+build.
+
+Why not a pseudo-version: the previous pin
+`v0.0.0-20260706134706-2c525506f13c` pointed at a commit of a PR branch
+that squash-merge left unreachable. Once the werf stage cache was
+invalidated (a base-images bump), `go mod download` could no longer
+resolve it — neither over the Go module proxy nor by direct fetch — and
+the image stopped building. A directory `replace` cannot rot that way.
 
 ## 001-fix-cve.patch
 
@@ -109,24 +117,24 @@ workers are started only after the main informer factory cache — which
 backs the StorageClass lister the executor reads — has synced, so a
 freshly-started worker never sees an existing StorageClass as NotFound),
 `pkg/controller/vrr_handler.go` (+`_test.go`, executor), `go.mod` /
-`go.sum` (api pin + `go` directive bump), and `deploy/kubernetes/rbac.yaml`
-(reference RBAC). It imports
+`go.sum` (api `replace` + `go` directive bump), and
+`deploy/kubernetes/rbac.yaml` (reference RBAC). It imports
 `github.com/deckhouse/storage-foundation/api/v1alpha1` (VRR/VCR API
-types) but does **not** vendor it — the dependency is resolved from the
-module proxy (see below).
+types); the module is not fetched from a proxy at all — it is resolved
+from the `api/` directory mounted next to the source tree (see below).
 
 This patch is the source of truth for the executor code (developed on the
 throwaway branch `d8-63742164-vrr`, then diffed against upstream v6.2.0
 excluding `vendor/`). Verified end-to-end on a clean `v6.2.0` checkout
-with `001` + `002` applied: `go build ./cmd/csi-provisioner`
-(CGO_ENABLED=0) and `go test ./pkg/controller/` (VRR tests) both succeed
-against the pinned wave6 API. The build pipeline itself does
-`rm -rf vendor && go mod download && go mod vendor` before `make build`.
+with `001` + `002` applied and `api/` placed beside it: the build
+pipeline itself (`rm -rf vendor && go mod download && go mod vendor &&
+make build`, default read-only module mode) and `go test
+./pkg/controller/` (VRR tests) are both green.
 
-### API dependency — pinned via Go pseudo-version
+### API dependency — resolved via a directory replace
 
-As of wave6 the executor needs the **honest-refs** VRR API:
-`spec.sourceRef` + `spec.pvcTemplate` (with `metadata.name` and
+The executor needs the **honest-refs** VRR API: `spec.sourceRef` +
+`spec.pvcTemplate` (with `metadata.name` and
 `spec.storageClassName`/`volumeMode`/`accessModes`), `fsType` at the spec
 root, and `status.pvcRef`. `pvcTemplate` uses the storage-foundation
 string-alias mirror types (`PersistentVolumeMode`,
@@ -134,17 +142,27 @@ string-alias mirror types (`PersistentVolumeMode`,
 before building CSI capabilities / the PV+PVC (see `convertAccessModes`,
 `vrrVolumeMode`, `vrrStorageClassName`, `vrrTargetPVCName/Namespace`).
 
-The pinned pseudo-version:
+The dependency is declared as:
 
-```
-require github.com/deckhouse/storage-foundation/api v0.0.0-20260706134706-2c525506f13c
+```go.mod
+require github.com/deckhouse/storage-foundation/api v0.0.0
+
+replace github.com/deckhouse/storage-foundation/api => ../api
 ```
 
-resolves to commit `2c52550` (wave6 `pvcTemplate`/`pvcRef` schema). The
-patch also bumps the `go` directive to `1.26.4` because the `api` module
-requires it. When the API gets a published `api/vX.Y.Z` tag, replace the
-pseudo-version with that tag (one `go.mod` line plus matching `go.sum`
-lines).
+so the API always matches the commit being built and no version has to be
+maintained by hand. `go.sum` carries no entry for the module itself (a
+directory replace needs none), only the hashes its dependency graph pulls
+in. Because `api/` requires `golang.org/x/net v0.56.0` and
+`golang.org/x/text v0.39.0`, minimal version selection raises the
+provisioner's own indirect `golang.org/x/*` requirements to exactly the
+versions the retired `003-fix-cve-golang-x.patch` used to force; if
+`api/` ever lowers them, those CVE bumps have to come back as a separate
+patch.
+
+The `go` directive is bumped to `1.26.4` because the `api` module graph
+requires it (`github.com/deckhouse/state-snapshotter/api`); it can be
+lowered once that module lowers its own.
 
 ### RBAC for the provisioner ServiceAccount
 
@@ -168,13 +186,16 @@ provisioning; the only strictly net-new permission is
 `volumerestorerequests` `get/list/watch`. FOLLOW-UP: fold this into the
 shared CSI-driver helm lib so every driver gets it automatically.
 
-## 003-fix-cve-golang-x.patch
+## 003-fix-cve-golang-x.patch (retired)
 
-Bumps `golang.org/x/net` -> `v0.56.0` (CVE-2026-46600) and
-`golang.org/x/text` -> `v0.39.0` (CVE-2026-56852) in `go.mod` / `go.sum` to
-clear the findings reported by Trivy; this also pulls the transitive
+It bumped `golang.org/x/net` -> `v0.56.0` (CVE-2026-46600) and
+`golang.org/x/text` -> `v0.39.0` (CVE-2026-56852), pulling the transitive
 `golang.org/x/crypto` -> `v0.53.0`, `golang.org/x/sys` -> `v0.46.0`,
-`golang.org/x/sync` -> `v0.21.0` and `golang.org/x/term` -> `v0.44.0` bumps. Generated by cloning
-the pinned upstream version, applying the existing patches, then
-`go get`/`go mod tidy` and `git format-patch -1`; touches only
-`go.mod` / `go.sum` (the build re-runs `go mod vendor`/`download`).
+`golang.org/x/sync` -> `v0.21.0`, `golang.org/x/term` -> `v0.44.0`,
+`golang.org/x/mod` -> `v0.37.0` and `golang.org/x/tools` -> `v0.47.0`.
+
+Dropped when `002` moved to the directory `replace`: `api/` requires the
+same `golang.org/x/net` and `golang.org/x/text` versions, so minimal
+version selection now produces that exact set through `002` alone and the
+patch no longer applied. Re-add an equivalent patch if `api/` ever drops
+below those versions.
