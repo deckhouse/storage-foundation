@@ -94,10 +94,10 @@ func (r *DataImportReconciler) getDeploymentCfg(podSpec corev1.PodSpec) common.D
 // no pod left). Capturing the volume while the importer still holds the mount would be less consistent
 // than the pre-existing populator flow, which waited for ClaimLost before tearing the Deployment down.
 func (r *DataImportReconciler) stopImporter(ctx context.Context) (stopped bool, err error) {
-	// common.DeleteDeployment already logs internally; do not also log here before returning.
 	if _, err := common.DeleteDeployment(ctx, r.Client, r.Config.ControllerNamespace, r.names.DeployName); err != nil {
 		return false, err
 	}
+
 	return r.importerPodsGone(ctx)
 }
 
