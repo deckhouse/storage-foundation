@@ -20,6 +20,7 @@ import (
 	"fmt"
 
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/metrics"
 
 	"github.com/deckhouse/storage-foundation/images/controller/pkg/config"
 )
@@ -38,10 +39,17 @@ func AddVolumeCaptureRequestControllerToManager(mgr ctrl.Manager, cfg *config.Op
 		APIReader: apiReader,
 		Scheme:    mgr.GetScheme(),
 		Config:    cfg,
+		Recorder:  mgr.GetEventRecorderFor("volume-capture-request-controller"),
 	}
 
 	if err := reconciler.SetupWithManager(mgr); err != nil {
 		return err
+	}
+
+	// The collector recomputes from the manager's cache on scrape, so it is registered once per
+	// manager and holds no state of its own.
+	if err := metrics.Registry.Register(newStallCollector(mgr.GetClient())); err != nil {
+		return fmt.Errorf("failed to register the stalled capture collector: %w", err)
 	}
 
 	return SetupVCRGC(mgr)

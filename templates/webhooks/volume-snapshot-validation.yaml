@@ -1,0 +1,38 @@
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingWebhookConfiguration
+metadata:
+  name: "d8-{{ .Chart.Name }}-volume-snapshot-validation"
+  labels:
+    heritage: deckhouse
+    module: storage-foundation
+  annotations:
+    # Deploy the webhook only after its backing Service+Deployment are ready: with failurePolicy: Fail a
+    # partial rollout (network issue, OOM) must not leave the webhook without a backend, which would block
+    # every matching VolumeSnapshot CREATE.
+    werf.io/deploy-dependency-deployment: state=ready,kind=Deployment,name=webhooks,namespace=d8-{{ .Chart.Name }}
+    werf.io/deploy-dependency-service: state=present,kind=Service,name=webhooks,namespace=d8-{{ .Chart.Name }}
+webhooks:
+  - name: "d8-{{ .Chart.Name }}-volume-snapshot-validation.storage-foundation.deckhouse.io"
+    failurePolicy: Fail
+    rules:
+      - apiGroups: ["snapshot.storage.k8s.io"]
+        apiVersions: ["v1"]
+        operations: ["CREATE"]
+        resources: ["volumesnapshots"]
+        scope: "Namespaced"
+    # Same scope as the mutation webhook: the verdict is derived from the source PVC's StorageClass, so it
+    # exists only for PVC-source VolumeSnapshots. Restore intent (empty spec.source) and pre-provisioned
+    # snapshots must pass untouched.
+    matchConditions:
+      - name: only-pvc-source-volumesnapshots
+        expression: "has(object.spec.source) && has(object.spec.source.persistentVolumeClaimName)"
+    clientConfig:
+      service:
+        namespace: "d8-{{ .Chart.Name }}"
+        name: "webhooks"
+        path: "/volume-snapshot-validate"
+      caBundle: {{ .Values.storageFoundation.internal.customWebhookCert.ca | b64enc | quote }}
+    admissionReviewVersions: ["v1", "v1beta1"]
+    sideEffects: None
+    timeoutSeconds: 10

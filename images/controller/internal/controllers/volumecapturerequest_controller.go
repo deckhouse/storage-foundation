@@ -24,11 +24,14 @@ import (
 	snapshotv1 "github.com/kubernetes-csi/external-snapshotter/client/v8/apis/volumesnapshot/v1"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/client-go/tools/record"
 	"k8s.io/client-go/util/retry"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	deckhousev1alpha1 "github.com/deckhouse/deckhouse/deckhouse-controller/pkg/apis/deckhouse.io/v1alpha1"
@@ -79,6 +82,32 @@ type VolumeCaptureRequestController struct {
 	APIReader client.Reader // Required: for reading StorageClass directly from API server
 	Scheme    *runtime.Scheme
 	Config    *config.Options
+	// Recorder emits stall diagnostics as Warning events. Optional: a nil recorder only costs
+	// events, never correctness.
+	Recorder record.EventRecorder
+
+	// stallGrace overrides the diagnostic grace periods; the zero value means defaults.
+	// Tests use it to avoid waiting for real thresholds.
+	stallGrace stallThresholds
+	// nowFn overrides the clock in tests. nil means time.Now.
+	nowFn func() time.Time
+}
+
+// stallThresholdsOrDefault returns the configured diagnostic grace periods, falling back to the
+// shipped defaults. Both must be set for an override to take effect: a half-configured pair would
+// silently mix a test value with a two-hour production value.
+func (r *VolumeCaptureRequestController) stallThresholdsOrDefault() stallThresholds {
+	if r.stallGrace.NoPickup > 0 && r.stallGrace.NoCompletion > 0 {
+		return r.stallGrace
+	}
+	return defaultStallThresholds()
+}
+
+func (r *VolumeCaptureRequestController) now() time.Time {
+	if r.nowFn != nil {
+		return r.nowFn()
+	}
+	return time.Now()
 }
 
 func (r *VolumeCaptureRequestController) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
@@ -201,9 +230,15 @@ func (r *VolumeCaptureRequestController) processSnapshotMode(ctx context.Context
 		return ctrl.Result{}, nil
 	}
 
-	// Still capturing: surface progress and requeue.
-	if err := r.patchVCRSnapshotPending(ctx, vcr, tr.pendingMessage); err != nil {
+	// Still capturing: surface progress (including a stall diagnosis, if any) and requeue.
+	// The event decision is taken against the pre-patch conditions, which vcr still carries.
+	emitStallEvent := shouldEmitStallEvent(
+		meta.FindStatusCondition(vcr.Status.Conditions, storagev1alpha1.ConditionTypeStalled), tr.stall)
+	if err := r.patchVCRSnapshotPending(ctx, vcr, tr.pendingMessage, tr.stall); err != nil {
 		return ctrl.Result{}, err
+	}
+	if emitStallEvent && r.Recorder != nil {
+		r.Recorder.Event(vcr, corev1.EventTypeWarning, tr.stall.Reason, tr.stall.Message)
 	}
 	requeueAfter := targetResult.RequeueAfter
 	if requeueAfter == 0 {
@@ -563,6 +598,8 @@ func (r *VolumeCaptureRequestController) finalizeVCR(
 		Message:            message,
 		LastTransitionTime: now,
 	})
+	// A finished request is not stalled, whichever way it finished.
+	applyStallDiagnosis(&vcr.Status.Conditions, stallDiagnosis{}, now)
 
 	// Update status (retry only for status conflicts)
 	if err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
@@ -584,8 +621,22 @@ func (r *VolumeCaptureRequestController) finalizeVCR(
 }
 
 func (r *VolumeCaptureRequestController) SetupWithManager(mgr ctrl.Manager) error {
+	if err := mgr.GetFieldIndexer().IndexField(
+		context.Background(),
+		&storagev1alpha1.VolumeCaptureRequest{},
+		vcrExpectedVSCNameIndex,
+		indexVCRByExpectedVSCName,
+	); err != nil {
+		return fmt.Errorf("failed to index VolumeCaptureRequest by expected VolumeSnapshotContent name: %w", err)
+	}
+
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&storagev1alpha1.VolumeCaptureRequest{}).
+		// Watch the produced content so progress — and the absence of it — is observed as it
+		// happens: status and status.error, the being-created annotation appearing or being
+		// removed, the snapshot-controller finalizer appearing, and deletion of the content.
+		// Without this the controller only learns about them at the next periodic requeue.
+		Watches(&snapshotv1.VolumeSnapshotContent{}, handler.EnqueueRequestsFromMapFunc(r.mapVSCToVCR)).
 		Complete(r)
 }
 

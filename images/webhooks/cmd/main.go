@@ -58,9 +58,10 @@ func initFlags() (config, error) {
 }
 
 const (
-	port                    = ":8443"
-	volumeSnapshotMutatorID = "volumeSnapshotMutation"
-	dataExportValidatorID   = "dataExportValidation"
+	port                      = ":8443"
+	volumeSnapshotMutatorID   = "volumeSnapshotMutation"
+	volumeSnapshotValidatorID = "volumeSnapshotValidation"
+	dataExportValidatorID     = "dataExportValidation"
 )
 
 func main() {
@@ -80,6 +81,12 @@ func main() {
 		os.Exit(1)
 	}
 
+	volumeSnapshotValidatingWebHookHandler, err := handlers.NewValidatingWebhookHandler(handlers.VolumeSnapshotValidateFunc(), volumeSnapshotValidatorID, &snapshotv1.VolumeSnapshot{}, logger)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error creating volumeSnapshotValidatingWebHookHandler: %s", err)
+		os.Exit(1)
+	}
+
 	dataExportValidatingWebHookHandler, err := handlers.NewValidatingWebhookHandler(handlers.DataExportValidateFunc(), dataExportValidatorID, &dev1alpha1.DataExport{}, logger)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error creating dataExportValidatingWebHookHandler: %s", err)
@@ -88,6 +95,7 @@ func main() {
 
 	mux := http.NewServeMux()
 	mux.Handle("/volume-snapshot-mutate", volumeSnapshotMutatingWebHookHandler)
+	mux.Handle("/volume-snapshot-validate", volumeSnapshotValidatingWebHookHandler)
 	mux.Handle("/dataexport-validate", dataExportValidatingWebHookHandler)
 	mux.HandleFunc("/healthz", httpHandlerHealthz)
 

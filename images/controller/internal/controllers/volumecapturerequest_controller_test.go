@@ -28,10 +28,12 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	storagev1 "k8s.io/api/storage/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/tools/record"
 	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
@@ -609,6 +611,172 @@ var _ = Describe("VolumeCaptureRequest Controller", func() {
 					now:    func() time.Time { return time.Now().Add(24 * time.Hour) },
 				}
 				Expect(gcm.ShouldBeDeleted(updated)).To(BeFalse())
+			})
+		})
+
+		Describe("Stall diagnostics", func() {
+			var recorder *record.FakeRecorder
+
+			// setupWaitingTarget brings a capture request to the point where its content exists but
+			// has produced no result — the state every stall diagnosis starts from.
+			setupWaitingTarget := func(vcrName string) (*storagev1alpha1.VolumeCaptureRequest, *snapshotv1.VolumeSnapshotContent) {
+				Expect(client.Create(ctx, newStorageClassWithVSC("test-sc", "test-driver", "test-vsc-class"))).To(Succeed())
+				Expect(client.Create(ctx, newVolumeSnapshotClass("test-vsc-class", "test-driver"))).To(Succeed())
+				Expect(client.Create(ctx, newCSIPV("test-pv", "test-driver", "test-volume-handle"))).To(Succeed())
+				Expect(client.Create(ctx, newBoundPVC("test-pvc", "default", "test-sc", "test-pv"))).To(Succeed())
+
+				targetUID := "uid-test-pvc"
+				vcr := newVCR(vcrName, "default", ModeSnapshot, pvcTarget("default", "test-pvc", targetUID))
+				Expect(client.Create(ctx, vcr)).To(Succeed())
+
+				retainerName := objectKeeperNameForVCR(vcr.UID)
+				Expect(client.Create(ctx, &deckhousev1alpha1.ObjectKeeper{
+					ObjectMeta: metav1.ObjectMeta{Name: retainerName, UID: types.UID("ok-uid-" + string(vcr.UID))},
+					Spec: deckhousev1alpha1.ObjectKeeperSpec{
+						Mode: "FollowObject",
+						FollowObjectRef: &deckhousev1alpha1.FollowObjectRef{
+							APIVersion: APIGroupStorageDeckhouse,
+							Kind:       KindVolumeCaptureRequest,
+							Namespace:  "default",
+							Name:       vcrName,
+							UID:        string(vcr.UID),
+						},
+					},
+				})).To(Succeed())
+
+				vsc := newReadyVSC(snapshotVSCName(vcr.UID, targetUID), false, nil)
+				vsc.UID = types.UID("vsc-uid-" + vcrName)
+				// The fake client does not stamp creationTimestamp, and every stall threshold is
+				// measured from it; a real API server always sets it.
+				vsc.CreationTimestamp = metav1.NewTime(time.Now())
+				Expect(client.Create(ctx, vsc)).To(Succeed())
+				return vcr, vsc
+			}
+
+			reconcileVCR := func(vcr *storagev1alpha1.VolumeCaptureRequest) {
+				_, err := ctrl.Reconcile(ctx, reconcile.Request{NamespacedName: types.NamespacedName{Name: vcr.Name, Namespace: vcr.Namespace}})
+				Expect(err).ToNot(HaveOccurred())
+			}
+
+			readVCR := func(vcr *storagev1alpha1.VolumeCaptureRequest) *storagev1alpha1.VolumeCaptureRequest {
+				updated := &storagev1alpha1.VolumeCaptureRequest{}
+				Expect(client.Get(ctx, types.NamespacedName{Name: vcr.Name, Namespace: vcr.Namespace}, updated)).To(Succeed())
+				return updated
+			}
+
+			stalledCondition := func(vcr *storagev1alpha1.VolumeCaptureRequest) *metav1.Condition {
+				return meta.FindStatusCondition(vcr.Status.Conditions, storagev1alpha1.ConditionTypeStalled)
+			}
+
+			// addSnapshotControllerFinalizer simulates the cluster-wide snapshot-controller doing its
+			// only job in VSC-only mode: the stack is alive, but no per-driver executor has started.
+			addSnapshotControllerFinalizer := func(vsc *snapshotv1.VolumeSnapshotContent) {
+				current := &snapshotv1.VolumeSnapshotContent{}
+				Expect(client.Get(ctx, types.NamespacedName{Name: vsc.Name}, current)).To(Succeed())
+				current.Finalizers = append(current.Finalizers, snapshotContentFinalizer)
+				Expect(client.Update(ctx, current)).To(Succeed())
+			}
+
+			BeforeEach(func() {
+				recorder = record.NewFakeRecorder(10)
+				ctrl.Recorder = recorder
+			})
+
+			It("diagnoses an unobservable execution without failing the request", func() {
+				vcr, vsc := setupWaitingTarget("test-vcr-unobservable")
+				addSnapshotControllerFinalizer(vsc)
+				// Observe the same objects well past the pickup grace.
+				ctrl.nowFn = func() time.Time { return time.Now().Add(10 * time.Minute) }
+
+				reconcileVCR(vcr)
+
+				updated := readVCR(vcr)
+				stalled := stalledCondition(updated)
+				Expect(stalled).ToNot(BeNil())
+				Expect(stalled.Status).To(Equal(metav1.ConditionTrue))
+				Expect(stalled.Reason).To(Equal(storagev1alpha1.ConditionReasonSnapshotExecutionUnobservable))
+				Expect(stalled.Message).To(ContainSubstring("test-driver"))
+
+				// The request is diagnosed, not failed: it keeps running and stays out of the collector's reach.
+				ready := getReadyCondition(updated.Status.Conditions)
+				Expect(ready.Status).To(Equal(metav1.ConditionFalse))
+				Expect(ready.Reason).To(Equal(storagev1alpha1.ConditionReasonTargetsPending))
+				Expect(isVolumeCaptureTerminal(updated.Status.Conditions)).To(BeFalse())
+				Expect(updated.Status.CompletionTimestamp).To(BeNil())
+				Expect(updated.Status.Data).To(BeNil())
+
+				// Exactly one Warning event, and no storm while the same diagnosis persists.
+				Expect(recorder.Events).To(Receive(ContainSubstring(storagev1alpha1.ConditionReasonSnapshotExecutionUnobservable)))
+				reconcileVCR(vcr)
+				Consistently(recorder.Events).ShouldNot(Receive())
+			})
+
+			It("blames the snapshot stack while its finalizer is absent", func() {
+				vcr, _ := setupWaitingTarget("test-vcr-stack-down")
+				ctrl.nowFn = func() time.Time { return time.Now().Add(10 * time.Minute) }
+
+				reconcileVCR(vcr)
+
+				stalled := stalledCondition(readVCR(vcr))
+				Expect(stalled).ToNot(BeNil())
+				Expect(stalled.Reason).To(Equal(storagev1alpha1.ConditionReasonSnapshotStackUnavailable))
+			})
+
+			// Regression, observed on a dev cluster: the content watch reconciles the request on the
+			// content's own creation event, so the classifier runs about a second after the content
+			// appears — before the cluster snapshot-controller can add its finalizer. A healthy capture
+			// used to be accused of a dead snapshot stack there, with a Warning event to match, and was
+			// then left carrying a Stalled=False condition forever.
+			It("says nothing while the content is younger than the pickup grace", func() {
+				vcr, _ := setupWaitingTarget("test-vcr-young")
+
+				reconcileVCR(vcr)
+
+				updated := readVCR(vcr)
+				Expect(stalledCondition(updated)).To(BeNil(), "a young content must leave no trace of a diagnosis")
+				Expect(getReadyCondition(updated.Status.Conditions).Reason).To(Equal(storagev1alpha1.ConditionReasonTargetsPending))
+				Consistently(recorder.Events).ShouldNot(Receive())
+			})
+
+			It("clears the diagnosis once execution becomes observable", func() {
+				vcr, vsc := setupWaitingTarget("test-vcr-resumed")
+				addSnapshotControllerFinalizer(vsc)
+				ctrl.nowFn = func() time.Time { return time.Now().Add(10 * time.Minute) }
+				reconcileVCR(vcr)
+				Expect(stalledCondition(readVCR(vcr)).Status).To(Equal(metav1.ConditionTrue))
+
+				// The sidecar shows up and marks the content as being created.
+				current := &snapshotv1.VolumeSnapshotContent{}
+				Expect(client.Get(ctx, types.NamespacedName{Name: vsc.Name}, current)).To(Succeed())
+				current.Annotations = map[string]string{annVolumeSnapshotBeingCreated: "yes"}
+				Expect(client.Update(ctx, current)).To(Succeed())
+
+				reconcileVCR(vcr)
+
+				updated := readVCR(vcr)
+				stalled := stalledCondition(updated)
+				Expect(stalled.Status).To(Equal(metav1.ConditionFalse))
+				Expect(stalled.Reason).To(Equal(storagev1alpha1.ConditionReasonSnapshotExecutionResumed))
+				Expect(isVolumeCaptureTerminal(updated.Status.Conditions)).To(BeFalse())
+			})
+
+			It("keeps no stall on a request that completed", func() {
+				vcr, vsc := setupWaitingTarget("test-vcr-completed")
+				addSnapshotControllerFinalizer(vsc)
+				ctrl.nowFn = func() time.Time { return time.Now().Add(10 * time.Minute) }
+				reconcileVCR(vcr)
+				Expect(stalledCondition(readVCR(vcr)).Status).To(Equal(metav1.ConditionTrue))
+
+				current := &snapshotv1.VolumeSnapshotContent{}
+				Expect(client.Get(ctx, types.NamespacedName{Name: vsc.Name}, current)).To(Succeed())
+				current.Status = &snapshotv1.VolumeSnapshotContentStatus{ReadyToUse: ptr.To(true)}
+				Expect(client.Status().Update(ctx, current)).To(Succeed())
+
+				reconcileVCR(vcr)
+
+				updated := readVCR(vcr)
+				Expect(getReadyCondition(updated.Status.Conditions).Reason).To(Equal(storagev1alpha1.ConditionReasonCompleted))
+				Expect(stalledCondition(updated).Status).To(Equal(metav1.ConditionFalse))
 			})
 		})
 
