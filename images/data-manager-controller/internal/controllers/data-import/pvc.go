@@ -229,6 +229,47 @@ func GetPVCVolumeMode(pvc *corev1.PersistentVolumeClaim) (string, error) {
 	return string(*pvc.Spec.VolumeMode), nil
 }
 
+// scratchVolumeFSType reports the filesystem the scratch volume was ACTUALLY formatted with, read off its
+// bound PersistentVolume (spec.csi.fsType). It MUST be called while that volume still exists: deleting the
+// scratch PVC takes the PV with it, the captured artifact records no filesystem type, and the import-side
+// consumer only attaches after status.data.artifactRef appears — by then the value exists nowhere and
+// cannot be reconstructed. It is read rather than derived from the StorageClass parameters on purpose: the
+// class can be edited or recreated after provisioning, so it is not evidence about this volume.
+//
+// It returns a string and no error deliberately. The caller publishes the result next to
+// status.data.artifactRef of an artifact that is already durable, so a missing filesystem type must be
+// structurally unable to fail or delay that publication. Every miss yields the empty string, which the API
+// contract defines as "not known": a Block volume (no filesystem at all), an unbound claim, a non-CSI
+// volume, a driver that recorded no fsType, or a lost race with the volume's destruction. Misses are logged
+// so an unexpectedly empty field stays diagnosable.
+func scratchVolumeFSType(ctx context.Context, c client.Reader, pvc *corev1.PersistentVolumeClaim) string {
+	logger := log.FromContext(ctx).WithValues("pvcNamespace", pvc.Namespace, "pvcName", pvc.Name)
+
+	// A raw block volume carries no filesystem. Gate on the claim's volumeMode rather than on the PV field
+	// happening to be empty: a driver may copy the StorageClass fsType parameter onto the PV even for a
+	// Block volume, and publishing that would assert a filesystem the volume does not have.
+	if pvc.Spec.VolumeMode != nil && *pvc.Spec.VolumeMode == corev1.PersistentVolumeBlock {
+		return ""
+	}
+	if pvc.Spec.VolumeName == "" {
+		logger.Info("Scratch PVC has no bound volume; filesystem type is unknown")
+		return ""
+	}
+
+	pv := &corev1.PersistentVolume{}
+	if err := c.Get(ctx, types.NamespacedName{Name: pvc.Spec.VolumeName}, pv); err != nil {
+		logger.Error(err, "Failed to read the scratch PersistentVolume; filesystem type is unknown",
+			"pvName", pvc.Spec.VolumeName)
+		return ""
+	}
+	if pv.Spec.CSI == nil {
+		logger.Info("Scratch PersistentVolume is not a CSI volume; filesystem type is unknown",
+			"pvName", pv.Name)
+		return ""
+	}
+	return pv.Spec.CSI.FSType
+}
+
 // DeleteScratchPVC removes the finalizer from and deletes the scratch PVC used to stage a PopulateData
 // import. Called once the import artifact has been safely captured (Retain + keeper-anchored), so the
 // scratch volume is no longer needed. Idempotent: tolerates the PVC already being gone.

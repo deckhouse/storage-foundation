@@ -262,6 +262,16 @@ spec:
                           description: |
                             UID of the durable data artifact (for example the VolumeSnapshotContent UID),
                             making the reference self-contained. Optional; producers fill it best-effort.
+                    fsType:
+                      type: string
+                      description: |
+                        Filesystem the imported bytes were actually written onto, observed on the scratch
+                        volume's PersistentVolume (`spec.csi.fsType`) before that volume was destroyed. The
+                        scratch volume is deleted right after capture and the artifact itself records no
+                        filesystem type, so this is the only surviving record of it.
+
+                        Empty means "not known", never "default": a Block import carries no filesystem at
+                        all, and a CSI driver may record no filesystem type on the volume.
                 conditions:
                   type: array
                   items:

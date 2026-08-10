@@ -721,7 +721,8 @@ func (r *DataImportReconciler) handlePVCImportStatus(ctx context.Context, pvc *c
 
 // ensureDataArtifact captures the bound scratch PVC into a durable cluster-scoped VolumeSnapshotContent
 // via a VolumeCaptureRequest, pins the artifact's reclaim policy to Retain, anchors it to the import's
-// lifetime via the import ObjectKeeper, and records it in status.data.artifactRef + Completed. The capture
+// lifetime via the import ObjectKeeper, and records it in status.data.artifactRef (alongside the scratch
+// volume's observed status.data.fsType, the one field that outlives the volume) + Completed. The capture
 // mode is auto-detected from the spec StorageClass (snapshot-capable -> Snapshot); a non-snapshot-capable
 // StorageClass fails closed. It requeues while the VolumeCaptureRequest is in progress. DataImport never
 // becomes the artifact's controller owner (storage-foundation's VCR retainer is); see object_keeper.go /
@@ -773,6 +774,13 @@ func (r *DataImportReconciler) ensureDataArtifact(ctx context.Context, pvc *core
 		return ctrl.Result{}, err
 	}
 
+	// Observe the scratch volume's filesystem type BEFORE the delete below destroys it. This is the last
+	// point where the value exists: the PV goes away with the claim, the captured artifact records no
+	// filesystem type, and nothing downstream ever sees this volume again. The observation is best-effort by
+	// construction (scratchVolumeFSType cannot fail), so it can neither block nor delay publishing the
+	// artifact reference — which is already durable at this point.
+	fsType := scratchVolumeFSType(ctx, r.Client, pvc)
+
 	// The scratch PVC is no longer needed now that the artifact is safely captured. Completed is set
 	// only once it's actually deleted — Completed is sticky-terminal, so a swallowed failure here
 	// would never get another chance and would leak the PVC forever.
@@ -780,7 +788,7 @@ func (r *DataImportReconciler) ensureDataArtifact(ctx context.Context, pvc *core
 		return ctrl.Result{}, fmt.Errorf("delete scratch PVC: %w", err)
 	}
 
-	r.dataImport.Status.Data = &dev1alpha1.DataExportImportData{ArtifactRef: artifact}
+	r.dataImport.Status.Data = &dev1alpha1.DataExportImportData{ArtifactRef: artifact, FsType: fsType}
 	meta.SetStatusCondition(&r.dataImport.Status.Conditions, metav1.Condition{
 		Type:               string(common.ConditionCompleted),
 		Status:             metav1.ConditionTrue,
