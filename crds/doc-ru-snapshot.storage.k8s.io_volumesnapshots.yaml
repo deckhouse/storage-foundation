@@ -119,8 +119,6 @@ spec:
                   дескриптор захваченного тома из этого namespaced VolumeSnapshot. Записывается общим
                   контроллером state-snapshotter. Расширение Deckhouse.
                 properties:
-                  accessModes:
-                    description: Режимы доступа исходного PVC (например, ReadWriteOnce).
                   artifactRef:
                     description: Durable-артефакт данных (VolumeSnapshotContent).
                   fsType:
@@ -301,8 +299,6 @@ spec:
                   дескриптор захваченного тома из этого namespaced VolumeSnapshot. Записывается общим
                   контроллером state-snapshotter. Расширение Deckhouse.
                 properties:
-                  accessModes:
-                    description: Режимы доступа исходного PVC (например, ReadWriteOnce).
                   artifactRef:
                     description: Durable-артефакт данных (VolumeSnapshotContent).
                   fsType:
