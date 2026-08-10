@@ -53,7 +53,10 @@ type snapshotTargetResult struct {
 	// Ready=False/TargetsPending condition (e.g. a CSI error that the sidecar keeps retrying).
 	// Empty means "use the default in-progress message".
 	pendingMessage string
-	terminal       *snapshotTargetError
+	// stall is the diagnosis derived from the observed VolumeSnapshotContent. It is reported on the
+	// separate, non-terminal Stalled condition and never influences Ready.
+	stall    stallDiagnosis
+	terminal *snapshotTargetError
 }
 
 func objectKeeperNameForVCR(vcrUID types.UID) string {
@@ -68,6 +71,12 @@ func targetUIDHash(targetUID string) string {
 	return hex.EncodeToString(sum[:])[:snapshotTargetHashHexLen]
 }
 
+// snapshotVSCName derives the name of the VolumeSnapshotContent a request produces.
+//
+// This formula is now also the event delivery path: VolumeCaptureRequests are indexed by the name
+// it returns (see vcrExpectedVSCNameIndex), and content events are routed back to their request by
+// that index. Any independent re-derivation of the name would silently break that routing the
+// moment the two copies drift — call this function instead.
 func snapshotVSCName(vcrUID types.UID, targetUID string) string {
 	return fmt.Sprintf("snapshot-%s-%s", string(vcrUID), targetUIDHash(targetUID))
 }
@@ -86,10 +95,14 @@ func volumeSnapshotBinding(_ storagev1alpha1.VolumeCaptureTarget, vscName, vscUI
 
 // patchVCRSnapshotPending surfaces a non-terminal "capture in progress" Ready=False/TargetsPending
 // condition while the single target is still being captured. It never sets dataRef (only success does).
+// patchVCRSnapshotPending keeps the request in its non-terminal in-progress state and, in the same
+// patch, reflects the stall diagnosis on the separate Stalled condition. Ready stays
+// False/TargetsPending regardless of the diagnosis — see applyStallDiagnosis for why.
 func (r *VolumeCaptureRequestController) patchVCRSnapshotPending(
 	ctx context.Context,
 	vcr *storagev1alpha1.VolumeCaptureRequest,
 	message string,
+	stall stallDiagnosis,
 ) error {
 	if message == "" {
 		message = "target capture in progress"
@@ -110,6 +123,7 @@ func (r *VolumeCaptureRequestController) patchVCRSnapshotPending(
 		}
 		base := current.DeepCopy()
 		setSingleCondition(&current.Status.Conditions, pendingCondition)
+		applyStallDiagnosis(&current.Status.Conditions, stall, now)
 		current.Status.CompletionTimestamp = nil
 		return r.Status().Patch(ctx, current, client.MergeFrom(base))
 	})
@@ -292,6 +306,12 @@ func (r *VolumeCaptureRequestController) processSnapshotTarget(
 		return snapshotTargetResult{}, ctrl.Result{}, fmt.Errorf("failed to get VolumeSnapshotContent: %w", err)
 	}
 
+	// Classify what is observable about the content before deciding how to report progress. The
+	// diagnosis is advisory only: it never changes the outcome of this function.
+	now := r.now()
+	stall := classifyVSC(csiVSC, now, r.stallThresholdsOrDefault())
+	requeueAfter := snapshotPollInterval(now.Sub(csiVSC.CreationTimestamp.Time))
+
 	if csiVSC.Status != nil && csiVSC.Status.Error != nil && csiVSC.Status.Error.Message != nil && *csiVSC.Status.Error.Message != "" {
 		errorMsg := *csiVSC.Status.Error.Message
 		errorDetails := fmt.Sprintf("VSC %s, PVC %s/%s: %s", csiVSCName, pvc.Namespace, pvc.Name, errorMsg)
@@ -308,12 +328,17 @@ func (r *VolumeCaptureRequestController) processSnapshotTarget(
 		return snapshotTargetResult{
 			pending:        true,
 			pendingMessage: fmt.Sprintf("CSI snapshot creation reported an error (will retry): %s", errorDetails),
-		}, ctrl.Result{RequeueAfter: 5 * time.Second}, nil
+			stall:          stall,
+		}, ctrl.Result{RequeueAfter: requeueAfter}, nil
 	}
 
 	if csiVSC.Status == nil || csiVSC.Status.ReadyToUse == nil || !*csiVSC.Status.ReadyToUse {
-		l.Info("Waiting for external-snapshotter to set ReadyToUse=true", "name", csiVSCName)
-		return snapshotTargetResult{pending: true}, ctrl.Result{RequeueAfter: 5 * time.Second}, nil
+		if stall.Stalled {
+			l.Info("Snapshot execution shows no observable progress", "name", csiVSCName, "reason", stall.Reason, "diagnosis", stall.Message)
+		} else {
+			l.Info("Waiting for external-snapshotter to set ReadyToUse=true", "name", csiVSCName)
+		}
+		return snapshotTargetResult{pending: true, stall: stall}, ctrl.Result{RequeueAfter: requeueAfter}, nil
 	}
 
 	binding := volumeSnapshotBinding(target, csiVSCName, string(csiVSC.UID))

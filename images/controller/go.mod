@@ -1,6 +1,7 @@
 module github.com/deckhouse/storage-foundation/images/controller
 
 go 1.26.5
+
 require (
 	github.com/deckhouse/deckhouse v1.67.7-0.20251212134859-497a0dab9fc0
 	github.com/deckhouse/state-snapshotter/api v0.0.0-20260729072518-f90968ad6e5f
@@ -11,6 +12,7 @@ require (
 	github.com/kubernetes-csi/external-snapshotter/client/v8 v8.2.0
 	github.com/onsi/ginkgo/v2 v2.23.3
 	github.com/onsi/gomega v1.37.0
+	github.com/prometheus/client_golang v1.22.0
 	github.com/stretchr/testify v1.11.1
 	k8s.io/api v0.34.1
 	k8s.io/apiextensions-apiserver v0.34.1
@@ -45,13 +47,13 @@ require (
 	github.com/google/uuid v1.6.0 // indirect
 	github.com/josharian/intern v1.0.0 // indirect
 	github.com/json-iterator/go v1.1.12 // indirect
+	github.com/kylelemons/godebug v1.1.0 // indirect
 	github.com/mailru/easyjson v0.9.0 // indirect
 	github.com/modern-go/concurrent v0.0.0-20180306012644-bacd9c7ef1dd // indirect
 	github.com/modern-go/reflect2 v1.0.3-0.20250322232337-35a7c28c31ee // indirect
 	github.com/munnerz/goautoneg v0.0.0-20191010083416-a7dc8b61c822 // indirect
 	github.com/pkg/errors v0.9.1 // indirect
 	github.com/pmezard/go-difflib v1.0.1-0.20181226105442-5d4384ee4fb2 // indirect
-	github.com/prometheus/client_golang v1.22.0 // indirect
 	github.com/prometheus/client_model v0.6.1 // indirect
 	github.com/prometheus/common v0.62.0 // indirect
 	github.com/prometheus/procfs v0.15.1 // indirect

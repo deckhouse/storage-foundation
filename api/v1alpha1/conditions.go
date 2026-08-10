@@ -17,9 +17,16 @@ limitations under the License.
 package v1alpha1
 
 // Condition type constants
-// Only Ready condition is used - it is set to True on success or False on final failure
 const (
+	// ConditionTypeReady is set to True on success or False on final failure.
 	ConditionTypeReady = "Ready"
+	// ConditionTypeStalled reports that a request shows no observable progress. It is a
+	// diagnostic axis independent of Ready and is NEVER terminal.
+	//
+	// Stall MUST NOT be reported by changing the reason of Ready: terminality is derived as
+	// "Ready=False with a reason other than TargetsPending", so a stall reason placed on Ready
+	// would make a live, still-executing request eligible for garbage collection.
+	ConditionTypeStalled = "Stalled"
 )
 
 // Condition reason constants
@@ -53,4 +60,24 @@ const (
 	ConditionReasonTargetsPending = "TargetsPending"
 	// ConditionReasonRestoreFailed indicates restore operation failed
 	ConditionReasonRestoreFailed = "RestoreFailed"
+)
+
+// Diagnostic reasons for the Stalled condition. All of them are non-terminal: they describe what
+// is observable, never what is proven about the storage backend.
+const (
+	// ConditionReasonSnapshotStackUnavailable indicates the cluster-wide snapshot-controller has not
+	// added its finalizer to the VolumeSnapshotContent, i.e. the snapshot stack itself is not running.
+	ConditionReasonSnapshotStackUnavailable = "SnapshotStackUnavailable"
+	// ConditionReasonSnapshotExecutionUnobservable indicates no executor has visibly picked the request
+	// up: the snapshot-controller finalizer is present, but no result and no being-created annotation
+	// appeared within the grace period. It deliberately does NOT claim that the snapshotter sidecar is
+	// absent — that cannot be proven from observation alone.
+	ConditionReasonSnapshotExecutionUnobservable = "SnapshotExecutionUnobservable"
+	// ConditionReasonSnapshotExecutionNotCompleting indicates the request was sent to the storage system
+	// (or is being retried) but produced no result for an unusually long time. This state can never
+	// become terminal: a CSI CreateSnapshot call may be in flight.
+	ConditionReasonSnapshotExecutionNotCompleting = "SnapshotExecutionNotCompleting"
+	// ConditionReasonSnapshotExecutionResumed clears a previously reported stall after observable
+	// activity reappeared.
+	ConditionReasonSnapshotExecutionResumed = "SnapshotExecutionResumed"
 )
