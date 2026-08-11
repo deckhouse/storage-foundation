@@ -1220,7 +1220,7 @@ func (r *DataexportReconciler) validateExportDeploy(ctx context.Context, dataExp
 
 // Delete export deployment and export PVC (if exists)
 // Patch PV for attach it back to user's PVC
-// Delete finalizer: storage-foundation.deckhouse.io/data-exporter-controller
+// Delete the finalizer named by dev1alpha1.StorageManagerFinalizerName
 func (r *DataexportReconciler) clearDataExportProviding(ctx context.Context, dataExport *dev1alpha1.DataExport, generatedNames Names) error {
 	log.Printf("Start recovering configuration before Dataexport %s", dataExport.GetName())
 
