@@ -96,6 +96,5 @@ the adoption window only when that owner would otherwise have the later removal 
   VRR keeper annotation is consumed only by
   `images/csi-external-provisioner/patches/v6.2.0/002-vrr-executor.patch`.
 
-`docs/CR.md` is the current consumer summary. The historical
-`2025-11-30-volume-capture-and-restore-request.md` ADR is rationale only; current behavior is determined
-by the generated CRDs and the implementation files above.
+`docs/CR.md` is the current consumer summary. Current behavior is determined by the generated CRDs
+and the implementation files above.

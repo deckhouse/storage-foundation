@@ -9,11 +9,9 @@ is determined by cluster RBAC; admission currently does not enforce a controller
 are namespaced in `storage-foundation.deckhouse.io/v1alpha1`; their namespace is also the namespace
 of the source or target PVC.
 
-This page summarizes the current generated CRDs and controller/sidecar behavior. The
-state-snapshotter domain SDK ADR defines how domain controllers consume these resources, while the
-unified-snapshots overview owns the core `Ready` reason mapping. The original
-`2025-11-30-volume-capture-and-restore-request.md` ADR is historical rationale, not the current
-implementable schema.
+This page summarizes the current generated CRDs and controller/sidecar behavior. The generated CRDs
+are the schema of record. How a domain controller consumes these resources is defined by the
+state-snapshotter domain snapshot SDK, which also owns the core `Ready` reason mapping.
 
 ## VolumeCaptureRequest
 

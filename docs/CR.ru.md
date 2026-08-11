@@ -10,11 +10,9 @@ controller-only policy. Оба ресурса namespaced и находятся �
 `storage-foundation.deckhouse.io/v1alpha1`; namespace запроса совпадает с namespace
 исходного/целевого PVC.
 
-Эта страница резюмирует текущие generated CRD и поведение controller/sidecar. ADR доменного SDK
-state-snapshotter задаёт контракт использования этих ресурсов доменными контроллерами, а
-unified-snapshots overview владеет core-маппингом `Ready` reasons. Исходный ADR
-`2025-11-30-volume-capture-and-restore-request.md` — историческое обоснование, а не текущая
-implementable-схема.
+Эта страница резюмирует текущие generated CRD и поведение controller/sidecar. Схема истины —
+generated CRD. Контракт использования этих ресурсов доменными контроллерами задаёт domain snapshot SDK
+state-snapshotter, он же владеет core-маппингом `Ready` reasons.
 
 ## VolumeCaptureRequest
 

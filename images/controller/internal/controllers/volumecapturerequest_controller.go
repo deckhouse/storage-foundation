@@ -137,16 +137,16 @@ func (r *VolumeCaptureRequestController) Reconcile(ctx context.Context, req ctrl
 	}
 }
 
-// processSnapshotMode handles Snapshot mode according to ADR:
+// processSnapshotMode handles Snapshot mode:
 // 1. VCR creates ObjectKeeper first (follows VCR, no TTL)
 // 2. VCR creates VolumeSnapshotContent directly with ObjectKeeper as owner
 // 3. external-snapshotter detects VSC and calls CSI CreateSnapshot
 // 4. VCR waits for external-snapshotter to set ReadyToUse=true
 // 5. VCR updates status with DataRef pointing to VSC
 //
-// According to ADR:
+// Contract:
 // - VCR creates VSC directly (VCR is the source of truth)
-// - VCR does NOT create VolumeSnapshot (ADR forbids)
+// - VCR does NOT create a VolumeSnapshot (forbidden: it would pull in the snapshot-controller)
 // - VCR does NOT set annotations on PVC (no snapshot-controller involvement)
 // - OwnerRef chain: ObjectKeeper (controller=true) → VSC
 // - VCR is NOT owner of VSC/PV - ObjectKeeper is the only owner
@@ -212,8 +212,8 @@ func (r *VolumeCaptureRequestController) processSnapshotMode(ctx context.Context
 	return ctrl.Result{RequeueAfter: requeueAfter}, nil
 }
 
-// processDetachMode handles Detach mode: detaches PV from PVC
-// According to ADR, PV after Detach gets annotation storage-foundation.deckhouse.io/detached: "true"
+// processDetachMode handles Detach mode: detaches PV from PVC.
+// After Detach the PV gets the annotation storage-foundation.deckhouse.io/detached: "true"
 // Provisioner ignores such PV for normal binding (quarantine PV).
 func (r *VolumeCaptureRequestController) processDetachMode(ctx context.Context, vcr *storagev1alpha1.VolumeCaptureRequest) (ctrl.Result, error) {
 	l := log.FromContext(ctx).WithValues("vcr", fmt.Sprintf("%s/%s", vcr.Namespace, vcr.Name), "mode", "Detach")
@@ -331,8 +331,7 @@ func (r *VolumeCaptureRequestController) processDetachMode(ctx context.Context, 
 		return ctrl.Result{}, nil
 	}
 
-	// 7. Delete PVC according to ADR (only if PVC still exists)
-	// According to ADR, Detach mode should delete PVC
+	// 7. Delete the PVC (only if it still exists): Detach mode deletes the PVC
 	// PV will be retained due to ReclaimPolicy=Retain
 	if !pvcNotFound {
 		// Check if PVC is already deleted
@@ -375,7 +374,7 @@ func (r *VolumeCaptureRequestController) processDetachMode(ctx context.Context, 
 	}
 
 	// 9. Detach PV from PVC and set ownerRef in a single Patch operation
-	// According to ADR, PV after Detach gets annotation storage-foundation.deckhouse.io/detached: "true"
+	// After Detach the PV gets the annotation storage-foundation.deckhouse.io/detached: "true"
 	// NOTE: PV should have ReclaimPolicy=Retain to prevent accidental deletion
 	// Re-read PV to get latest state before patching
 	updatedPV := &corev1.PersistentVolume{}

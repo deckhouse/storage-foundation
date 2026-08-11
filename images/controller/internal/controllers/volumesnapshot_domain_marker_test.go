@@ -43,7 +43,7 @@ func newDomainMarkerReconciler(t *testing.T, vs *sfsnapv1.VolumeSnapshot) *Volum
 
 // TestLatchManagedTrueStampsDeleteProtected asserts a VolumeSnapshot adopted as a managed tree node
 // (managed=true) is stamped with the authoritative delete-protection marker in the SAME latch patch,
-// i.e. before any graph edge is published (delete-protection-contract.md §6.1/§8.1).
+// i.e. before any graph edge is published.
 func TestLatchManagedTrueStampsDeleteProtected(t *testing.T) {
 	ctx := context.Background()
 	vs := &sfsnapv1.VolumeSnapshot{ObjectMeta: metav1.ObjectMeta{Name: "vs-managed", Namespace: "ns"}}
@@ -70,7 +70,7 @@ func TestLatchManagedTrueStampsDeleteProtected(t *testing.T) {
 }
 
 // TestLatchManagedFalseDoesNotStampDeleteProtected asserts a vetoed (managed=false) VolumeSnapshot is a
-// plain CSI snapshot, NOT a tree node, and therefore MUST NOT be delete-protected (§8.1/§8.5).
+// plain CSI snapshot, NOT a tree node, and therefore MUST NOT be delete-protected.
 func TestLatchManagedFalseDoesNotStampDeleteProtected(t *testing.T) {
 	ctx := context.Background()
 	vs := &sfsnapv1.VolumeSnapshot{ObjectMeta: metav1.ObjectMeta{Name: "vs-vetoed", Namespace: "ns"}}
