@@ -36,21 +36,23 @@ import (
 	"github.com/deckhouse/storage-foundation/common"
 )
 
-// Creates or updates a PVC based on the template
+// EnsurePVC creates or updates the PVC from the template and returns the current object. pvcNamespace is
+// where the PVC lives, resourceName is the owning DataImport — they differ for PopulateData's internal volume.
 func EnsurePVC(
 	ctx context.Context,
 	client client.Client,
+	pvcNamespace string,
 	resourceName types.NamespacedName,
 	pvcTemplate *dev1alpha1.PersistentVolumeClaimTemplateSpec,
 	dataSourceRef *corev1.TypedObjectReference,
-) error {
+) (*corev1.PersistentVolumeClaim, error) {
 	logger := log.FromContext(ctx).WithValues("pvcName", pvcTemplate.Name)
 	logger.Info("Ensuring PVC")
 
-	newPVC := makePVC(pvcTemplate, dataSourceRef, resourceName)
+	newPVC := makePVC(pvcTemplate, dataSourceRef, pvcNamespace, resourceName)
 
 	namespacedName := types.NamespacedName{
-		Namespace: resourceName.Namespace, // PVC is created in same namespace as DataImport resource
+		Namespace: pvcNamespace,
 		Name:      pvcTemplate.Name,
 	}
 
@@ -58,30 +60,32 @@ func EnsurePVC(
 	err := client.Get(ctx, namespacedName, oldPVC)
 	if err != nil && !kubeerrors.IsNotFound(err) {
 		logger.Error(err, "Failed to get PVC")
-		return err
+		return nil, err
 	}
 
 	if kubeerrors.IsNotFound(err) {
 		// PVC doesn't exist, create new PVC
 		logger.Info("Creating new PVC")
 
-		err := client.Create(ctx, newPVC)
-		if err != nil {
+		if err := client.Create(ctx, newPVC); err != nil {
 			logger.Error(err, "Failed to create PVC")
-			return err
+			return nil, err
 		}
 
 		logger.Info("Successfully created PVC")
-		return nil
+		return newPVC, nil
 	}
 
 	// PVC exists, check its state and handle accordingly
 	return handleExistingPVC(ctx, client, oldPVC, newPVC)
 }
 
+// makePVC builds the PVC object. The storage-manager annotations always carry the owning DataImport's
+// namespace/name, not pvcNamespace: server_pod.go and cmd/main.go's map-func resolve the DataImport through them.
 func makePVC(
 	pvcTemplate *dev1alpha1.PersistentVolumeClaimTemplateSpec,
 	dataSourceRef *corev1.TypedObjectReference,
+	pvcNamespace string,
 	resourceName types.NamespacedName,
 ) *corev1.PersistentVolumeClaim {
 	modes := lo.Map(
@@ -99,7 +103,7 @@ func makePVC(
 	pvc := &corev1.PersistentVolumeClaim{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      pvcTemplate.Name,
-			Namespace: resourceName.Namespace, // PVC is created in same namespace as DataImport resource
+			Namespace: pvcNamespace,
 			Labels: lo.Assign(pvcTemplate.Labels, map[string]string{
 				dev1alpha1.LabelApplicationKey: dev1alpha1.LabelDataImportValue,
 			}),
@@ -123,7 +127,7 @@ func makePVC(
 	return pvc
 }
 
-func handleExistingPVC(ctx context.Context, client client.Client, existingPVC *corev1.PersistentVolumeClaim, newPVC *corev1.PersistentVolumeClaim) error {
+func handleExistingPVC(ctx context.Context, client client.Client, existingPVC *corev1.PersistentVolumeClaim, newPVC *corev1.PersistentVolumeClaim) (*corev1.PersistentVolumeClaim, error) {
 	logger := log.FromContext(ctx).WithValues("pvcNamespace", existingPVC.Namespace, "pvcName", existingPVC.Name)
 	logger.Info("Handling existing PVC")
 
@@ -134,16 +138,15 @@ func handleExistingPVC(ctx context.Context, client client.Client, existingPVC *c
 		// TODO: we update only spec. What if meta changed (labels, annotations etc)?
 		existingPVC.Spec = newPVC.Spec
 
-		err := client.Update(ctx, existingPVC)
-		if err != nil {
+		if err := client.Update(ctx, existingPVC); err != nil {
 			logger.Error(err, "Failed to update PVC")
-			return err
+			return nil, err
 		}
 		logger.Info("Successfully updated PVC")
-		return nil
+		return existingPVC, nil
 	}
 	logger.Info("PVC is up to date")
-	return nil
+	return existingPVC, nil
 }
 
 func needsPVCSpecUpdate(existingPVC *corev1.PersistentVolumeClaim, newPVC *corev1.PersistentVolumeClaim) bool {
@@ -163,31 +166,53 @@ func ptrEqual[T comparable](a, b *T) bool {
 	return *a == *b
 }
 
+// internalPVCStatus classifies the internal scratch PVC without touching the API: the importer pod is its
+// first consumer, so a WaitForFirstConsumer StorageClass needs no dummy consumer to unblock it.
+func internalPVCStatus(pvc *corev1.PersistentVolumeClaim) TargetStatus {
+	switch pvc.Status.Phase {
+	case corev1.ClaimBound:
+		return TargetStatusReady
+	case corev1.ClaimPending:
+		return TargetStatusPending
+	default:
+		return TargetStatusFailed
+	}
+}
+
 func CheckPVCStatus(
 	ctx context.Context,
 	client client.Client,
 	pvc *corev1.PersistentVolumeClaim,
 	waitForFirstConsumer bool,
 ) (TargetStatus, error) {
-	logger := log.FromContext(ctx).WithValues("pvcNamespace", pvc.Namespace, "pvcName", pvc.Name)
-
 	switch pvc.Status.Phase {
 	case corev1.ClaimBound:
 		return TargetStatusReady, nil
 	case corev1.ClaimPending:
-		scWffc, err := isWaitForFirstConsumer(ctx, client, pvc)
-		if err != nil {
-			logger.Error(err, "Failed to check if need dummy pod")
-			return TargetStatusUnknown, err
-		}
-
-		if scWffc && !waitForFirstConsumer {
-			return TargetStatusNeedConsumer, nil
-		}
-		return TargetStatusPending, nil
+		return processPVCPendingStatus(ctx, client, pvc, waitForFirstConsumer)
 	default:
 		return TargetStatusFailed, nil
 	}
+}
+
+func processPVCPendingStatus(
+	ctx context.Context,
+	client client.Client,
+	pvc *corev1.PersistentVolumeClaim,
+	waitForFirstConsumer bool,
+) (TargetStatus, error) {
+	logger := log.FromContext(ctx).WithValues("pvcNamespace", pvc.Namespace, "pvcName", pvc.Name)
+	scWffc, err := isWaitForFirstConsumer(ctx, client, pvc)
+	if err != nil {
+		logger.Error(err, "Failed to check if need dummy pod")
+		return TargetStatusUnknown, err
+	}
+
+	if scWffc && !waitForFirstConsumer {
+		return TargetStatusNeedConsumer, nil
+	}
+
+	return TargetStatusPending, nil
 }
 
 func isWaitForFirstConsumer(ctx context.Context, client client.Client, pvc *corev1.PersistentVolumeClaim) (bool, error) {
@@ -249,6 +274,19 @@ func DeleteScratchPVC(ctx context.Context, c client.Client, pvc *corev1.Persiste
 	}
 	logger.Info("Deleted scratch PVC")
 	return nil
+}
+
+// GetPVC fetches a PVC by key, returning (nil, nil) when it does not exist.
+func GetPVC(ctx context.Context, c client.Client, pvcKey types.NamespacedName) (*corev1.PersistentVolumeClaim, error) {
+	pvc := new(corev1.PersistentVolumeClaim)
+	if err := c.Get(ctx, pvcKey, pvc); err != nil {
+		if kubeerrors.IsNotFound(err) {
+			return nil, nil
+		}
+		return nil, err
+	}
+
+	return pvc, nil
 }
 
 // RemovePVCFinalizer removes a finalizer from a PVC by namespace and name

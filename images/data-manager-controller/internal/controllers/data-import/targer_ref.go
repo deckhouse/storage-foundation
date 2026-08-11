@@ -16,14 +16,6 @@ limitations under the License.
 
 package dataimport
 
-import (
-	"context"
-
-	corev1 "k8s.io/api/core/v1"
-	"k8s.io/apimachinery/pkg/types"
-	"sigs.k8s.io/controller-runtime/pkg/client"
-)
-
 // Status of a target reference
 type TargetStatus int
 
@@ -34,13 +26,3 @@ const (
 	TargetStatusReady                            // Target is ready for use
 	TargetStatusFailed                           // Target  failed
 )
-
-// GetScratchPVC fetches by name the PVC the imported bytes are written into. In mode PopulateData
-// (snapshot leaf import) this is the internal scratch PVC named after the DataImport, with spec derived
-// from spec.storageParams (storageClass/size/volumeMode). In mode CreatePVC (standalone PVC
-// import) it is the user-described PVC named by spec.pvcTemplate.metadata.name.
-func GetScratchPVC(ctx context.Context, c client.Client, namespace, name string) (*corev1.PersistentVolumeClaim, error) {
-	pvc := &corev1.PersistentVolumeClaim{}
-	err := c.Get(ctx, types.NamespacedName{Namespace: namespace, Name: name}, pvc)
-	return pvc, err
-}

@@ -40,13 +40,15 @@ import (
 
 	dev1alpha1 "github.com/deckhouse/storage-foundation/api/v1alpha1"
 	"github.com/deckhouse/storage-foundation/common"
+	"github.com/deckhouse/storage-foundation/common/config"
 )
 
 const (
-	captureTestNamespace  = "ns"
-	captureTestImportName = "imp-1"
-	captureTestImportUID  = types.UID("di-uid")
-	captureTestVSCName    = "vsc-1"
+	captureTestNamespace           = "ns"
+	captureTestImportName          = "imp-1"
+	captureTestImportUID           = types.UID("di-uid")
+	captureTestVSCName             = "vsc-1"
+	captureTestControllerNamespace = "d8"
 )
 
 // artifactCaptureScheme carries every typed API group ensureDataArtifact's real dependencies touch:
@@ -164,13 +166,15 @@ func newArtifactCaptureReconciler(t *testing.T, interceptorFuncs ...interceptor.
 	vcrName := volumeCaptureRequestName(di.UID)
 	dyn := dynamicfake.NewSimpleDynamicClientWithCustomListKinds(runtime.NewScheme(), gvrToListKind,
 		readyObjectKeeper(keeperName, di),
-		readyVolumeCaptureRequest(vcrName, di.Namespace, captureTestVSCName),
+		readyVolumeCaptureRequest(vcrName, captureTestControllerNamespace, captureTestVSCName),
 	)
 
 	r := &DataImportReconciler{
 		Client:     c,
 		Dynamic:    dyn,
+		Config:     &config.Options{ControllerNamespace: captureTestControllerNamespace},
 		dataImport: di,
+		names:      common.NewNames(dev1alpha1.KindPVC, di.Name, di.Namespace, di.Name),
 	}
 
 	// Fetch the scratch PVC back through the client so it carries a real resourceVersion, matching how
