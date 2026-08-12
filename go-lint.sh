@@ -34,7 +34,11 @@ section_end() {
     fi
 }
 
-linter_version="v1.64.5"
+# Keep in sync with the golangci-lint version installed by the Go linter action
+# used in .github/workflows/go_checks.yaml: a local run has to read the same
+# .golangci.yaml and enable the same set of linters as CI does. The config is
+# written in the v2 schema, which only v2 binaries can read.
+linter_version="v2.9.0"
 section_start "install_linter" "Installing golangci-lint@$linter_version"
 curl -sSfL https://raw.githubusercontent.com/golangci/golangci-lint/master/install.sh | sh -s -- -b . $linter_version
 section_end "install_linter"
