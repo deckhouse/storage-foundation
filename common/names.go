@@ -22,8 +22,9 @@ import (
 	"fmt"
 	"strings"
 
-	dev1alpha1 "github.com/deckhouse/storage-foundation/api/v1alpha1"
 	virtv1alpha2 "github.com/deckhouse/virtualization/api/core/v1alpha2"
+
+	dev1alpha1 "github.com/deckhouse/storage-foundation/api/v1alpha1"
 )
 
 type Names struct {
@@ -50,7 +51,7 @@ func NewNames(targetKind, targetName, namespace, name string) Names {
 }
 
 // NewNamesFromShort builds the generated resource names from an already-resolved target short kind
-// (pvc/vd/snap/...). DataExport resolves the short from the GroupKind targetRef directly via
+// (pvc/vd/snap/...). DataExport (C6) resolves the short from the GroupKind targetRef directly via
 // classifyTargetRef, so it calls this instead of NewNames; DataImport still goes through NewNames with a kind.
 func NewNamesFromShort(targetKindShort, targetName, namespace, name string) Names {
 	hashSuffix := generateHashSuffix(namespace, name)

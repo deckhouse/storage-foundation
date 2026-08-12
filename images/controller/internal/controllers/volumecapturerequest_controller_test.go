@@ -22,6 +22,7 @@ import (
 	"testing"
 	"time"
 
+	deckhousev1alpha1 "github.com/deckhouse/deckhouse/deckhouse-controller/pkg/apis/deckhouse.io/v1alpha1"
 	snapshotv1 "github.com/kubernetes-csi/external-snapshotter/client/v8/apis/volumesnapshot/v1"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
@@ -37,7 +38,6 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
-	deckhousev1alpha1 "github.com/deckhouse/deckhouse/deckhouse-controller/pkg/apis/deckhouse.io/v1alpha1"
 	ssstoragev1alpha1 "github.com/deckhouse/state-snapshotter/api/storage/v1alpha1"
 	storagev1alpha1 "github.com/deckhouse/storage-foundation/api/v1alpha1"
 	"github.com/deckhouse/storage-foundation/images/controller/pkg/config"
@@ -372,8 +372,7 @@ var _ = Describe("VolumeCaptureRequest Controller", func() {
 				vsc := &snapshotv1.VolumeSnapshotContent{}
 				Expect(client.Get(ctx, types.NamespacedName{Name: csiVSCName}, vsc)).To(Succeed())
 				// The managed VSC must appear in the API already delete-protected: the marker is part of the
-				// CREATE payload, never a post-create patch — Create and a follow-up Patch have no guaranteed
-				// ordering, so a patch would leave a window in which the artifact is deletable. We assert it
+				// CREATE payload (delete-protection-contract.md §6.2), never a post-create patch. We assert it
 				// on the very first read, before any status/ownerRef workaround touches the object.
 				Expect(ssstoragev1alpha1.IsDeleteProtected(vsc)).To(BeTrue(),
 					"created managed VSC must carry %s=%s in the CREATE payload",

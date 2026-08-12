@@ -7,3 +7,44 @@
 - from: tmp_dir
   to: /root/.cache/go-build
 {{- end }}
+
+{{- /* Credentials for the private fox Go modules.
+
+       `api` and `images/controller` require
+       github.com/deckhouse/state-snapshotter/{api,pkg/snapshotsdk}, and
+       that project is private: the public module proxy cannot serve it, so the
+       fetch goes straight to GitLab over git and needs a token. Without one the
+       ?go-get=1 discovery yields nothing and the Go tool falls back to probing
+       path prefixes -- it ends up asking for the GROUP repository
+       (github.com/deckhouse.git) and fails with a confusing
+       "could not read Username".
+
+       The token is the pipeline's CI_JOB_TOKEN, which needs storage-foundation on
+       state-snapshotter's job-token allowlist. netrc covers the discovery request,
+       url.insteadOf covers the git fetch, and GOPRIVATE keeps proxy.golang.org and
+       sum.golang.org out of the path for the prefix (go.sum still pins it).
+
+       An empty token is not an error here: builds that do not reach the private
+       module (every image except controller, and the vendored sidecars) keep
+       working, and a build that does reach it fails with the message above. */}}
+{{- define "secret for private go modules" }}
+- id: GO_PRIVATE_TOKEN
+  value: {{ .GO_PRIVATE_TOKEN }}
+{{- end }}
+
+{{- define "auth for private go modules" -}}
+- |
+  # builder/golang ships without git, and a direct (proxy-less) module fetch is a
+  # git fetch.
+  pm install git
+- |
+  GO_PRIVATE_TOKEN="$(cat /run/secrets/GO_PRIVATE_TOKEN)"
+  export GOPRIVATE=github.com
+  if [ -n "${GO_PRIVATE_TOKEN}" ]; then
+    umask 077
+    printf 'machine github.com login gitlab-ci-token password %s\n' "${GO_PRIVATE_TOKEN}" > "${HOME}/.netrc"
+    git config --global url."https://gitlab-ci-token:${GO_PRIVATE_TOKEN}@github.com/".insteadOf "https://github.com/"
+  else
+    echo "GO_PRIVATE_TOKEN is empty: modules under ${GOPRIVATE} cannot be fetched"
+  fi
+{{- end -}}

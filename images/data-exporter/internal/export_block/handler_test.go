@@ -24,9 +24,9 @@ import (
 	"os"
 	"testing"
 
+	"github.com/deckhouse/sds-common-lib/fs/mockfs"
 	"github.com/stretchr/testify/assert"
 
-	"github.com/deckhouse/sds-common-lib/fs/mockfs"
 	"github.com/deckhouse/storage-foundation/images/data-exporter/internal/export_block"
 	"github.com/deckhouse/storage-foundation/images/data-exporter/internal/test"
 )

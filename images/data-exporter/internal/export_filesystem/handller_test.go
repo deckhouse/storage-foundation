@@ -28,10 +28,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/stretchr/testify/assert"
-
 	"github.com/deckhouse/sds-common-lib/fs/fsext"
 	"github.com/deckhouse/sds-common-lib/fs/mockfs"
+	"github.com/stretchr/testify/assert"
+
 	"github.com/deckhouse/storage-foundation/images/data-exporter/internal/export_filesystem"
 	"github.com/deckhouse/storage-foundation/images/data-exporter/internal/test"
 )

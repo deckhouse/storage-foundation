@@ -23,6 +23,7 @@ import (
 	"fmt"
 	"time"
 
+	deckhousev1alpha1 "github.com/deckhouse/deckhouse/deckhouse-controller/pkg/apis/deckhouse.io/v1alpha1"
 	snapshotv1 "github.com/kubernetes-csi/external-snapshotter/client/v8/apis/volumesnapshot/v1"
 	corev1 "k8s.io/api/core/v1"
 	storagev1 "k8s.io/api/storage/v1"
@@ -34,7 +35,6 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
-	deckhousev1alpha1 "github.com/deckhouse/deckhouse/deckhouse-controller/pkg/apis/deckhouse.io/v1alpha1"
 	ssstoragev1alpha1 "github.com/deckhouse/state-snapshotter/api/storage/v1alpha1"
 	storagev1alpha1 "github.com/deckhouse/storage-foundation/api/v1alpha1"
 )
@@ -279,8 +279,8 @@ func (r *VolumeCaptureRequestController) processSnapshotTarget(
 		}
 		// Stamp the authoritative delete-protection state into the CREATE payload so the managed VSC
 		// appears in the Kubernetes API already protected: there is no guaranteed ordering between Create
-		// and a follow-up Patch, so a post-create patch would leave a short unprotected window.
-		// This does NOT change VCR lifecycle/retry/CSI semantics.
+		// and a follow-up Patch, so a post-create patch would leave a short unprotected window
+		// (delete-protection-contract.md §6.1/§6.2). This does NOT change VCR lifecycle/retry/CSI semantics.
 		ssstoragev1alpha1.StampDeleteProtected(csiVSC)
 		if err := r.Create(ctx, csiVSC); err != nil {
 			return snapshotTargetResult{}, ctrl.Result{}, fmt.Errorf("failed to create VolumeSnapshotContent: %w", err)

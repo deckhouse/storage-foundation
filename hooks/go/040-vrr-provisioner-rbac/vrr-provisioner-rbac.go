@@ -41,15 +41,15 @@ import (
 	"errors"
 	"fmt"
 
+	"github.com/deckhouse/module-sdk/pkg"
+	"github.com/deckhouse/module-sdk/pkg/registry"
+	"github.com/deckhouse/sds-common-lib/kubeclient"
 	rbacv1 "k8s.io/api/rbac/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	"github.com/deckhouse/module-sdk/pkg"
-	"github.com/deckhouse/module-sdk/pkg/registry"
-	"github.com/deckhouse/sds-common-lib/kubeclient"
 	"github.com/deckhouse/storage-foundation/hooks/go/consts"
 )
 

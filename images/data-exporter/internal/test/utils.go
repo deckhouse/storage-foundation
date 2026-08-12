@@ -23,9 +23,8 @@ import (
 	"net/http"
 	"testing"
 
-	"github.com/stretchr/testify/assert"
-
 	"github.com/deckhouse/sds-common-lib/fs/mockfs"
+	"github.com/stretchr/testify/assert"
 )
 
 func AssertHeader(t *testing.T, response *http.Response, name string, expected string) {

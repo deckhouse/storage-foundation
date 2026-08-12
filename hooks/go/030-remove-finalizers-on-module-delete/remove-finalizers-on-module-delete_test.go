@@ -20,6 +20,7 @@ import (
 	"context"
 	"testing"
 
+	"github.com/deckhouse/deckhouse/pkg/log"
 	snapv1 "github.com/kubernetes-csi/external-snapshotter/client/v8/apis/volumesnapshot/v1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -30,7 +31,6 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
-	"github.com/deckhouse/deckhouse/pkg/log"
 	"github.com/deckhouse/storage-foundation/hooks/go/consts"
 )
 

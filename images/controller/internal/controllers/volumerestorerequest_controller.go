@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"time"
 
+	deckhousev1alpha1 "github.com/deckhouse/deckhouse/deckhouse-controller/pkg/apis/deckhouse.io/v1alpha1"
 	snapshotv1 "github.com/kubernetes-csi/external-snapshotter/client/v8/apis/volumesnapshot/v1"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -31,7 +32,6 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
-	deckhousev1alpha1 "github.com/deckhouse/deckhouse/deckhouse-controller/pkg/apis/deckhouse.io/v1alpha1"
 	storagev1alpha1 "github.com/deckhouse/storage-foundation/api/v1alpha1"
 	"github.com/deckhouse/storage-foundation/images/controller/pkg/config"
 )
@@ -53,7 +53,7 @@ const (
 //  3. Observes result (target PVC created by external-provisioner and Bound)
 //  4. Finalizes VRR status
 //
-// IMPORTANT ARCHITECTURAL DECISIONS:
+// IMPORTANT ARCHITECTURAL DECISIONS (per ADR):
 // - VolumeSnapshot objects MUST NOT be created for restore operations
 // - external-provisioner (patched) handles restore directly:
 //   - Watches VolumeRestoreRequest
@@ -226,7 +226,7 @@ func (r *VolumeRestoreRequestController) ensureObjectKeeper(
 
 // processVolumeSnapshotContentRestore handles restore from VolumeSnapshotContent
 //
-// VRR is a service-request, not an orchestrator.
+// According to ADR, VRR is a service-request, not an orchestrator.
 // VRR controller:
 //  1. Validates that source VSC exists and is ReadyToUse
 //  2. Creates ObjectKeeper (ownership anchor)
@@ -318,7 +318,7 @@ func (r *VolumeRestoreRequestController) processVolumeSnapshotContentRestore(
 
 // processPersistentVolumeRestore handles restore from PersistentVolume
 //
-// VRR is a service-request, not an orchestrator.
+// According to ADR, VRR is a service-request, not an orchestrator.
 // VRR controller:
 //  1. Validates that source PV exists
 //  2. Creates ObjectKeeper (ownership anchor)

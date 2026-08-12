@@ -37,7 +37,7 @@ const (
 
 // DataExportValidateFunc returns the DataExport admission validator.
 //
-// DataExport is resource-agnostic: spec.targetRef is a GroupKind ({group, kind, name}, namespace
+// C6 makes DataExport resource-agnostic: spec.targetRef is a GroupKind ({group, kind, name}, namespace
 // implicit), not a fixed kind enum. There is therefore no compiled-in allowlist of kinds to validate
 // against, and the controller (not the webhook) resolves the target and surfaces existence / readiness
 // through DataExport conditions. The webhook keeps the two checks that must hold at admission time

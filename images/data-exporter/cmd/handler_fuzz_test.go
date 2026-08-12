@@ -27,10 +27,10 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/deckhouse/sds-common-lib/fs/mockfs"
 	"github.com/stretchr/testify/assert"
 	"go.uber.org/mock/gomock"
 
-	"github.com/deckhouse/sds-common-lib/fs/mockfs"
 	"github.com/deckhouse/storage-foundation/common"
 	"github.com/deckhouse/storage-foundation/images/data-exporter/internal/authorization"
 	"github.com/deckhouse/storage-foundation/images/data-exporter/internal/config"

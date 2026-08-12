@@ -29,6 +29,7 @@ import (
 	"sync"
 
 	"github.com/deckhouse/sds-common-lib/fs/fsext"
+
 	"github.com/deckhouse/storage-foundation/common"
 	"github.com/deckhouse/storage-foundation/images/data-exporter/internal/config"
 	"github.com/deckhouse/storage-foundation/images/data-exporter/internal/httpiohelpers"
