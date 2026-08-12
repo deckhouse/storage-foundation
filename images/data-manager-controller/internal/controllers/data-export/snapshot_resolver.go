@@ -38,7 +38,7 @@ import (
 // targetCategory classifies a DataExport target by its GroupKind so the controller can dispatch
 // without compiling in domain types: live PVC and live VirtualDisk keep their bespoke direct-export
 // paths; everything else is a snapshot leaf exported through the resource-agnostic SnapshotContent ->
-// VolumeRestoreRequest path (C6).
+// VolumeRestoreRequest path.
 type targetCategory int
 
 const (
@@ -104,8 +104,8 @@ func classifyTargetRef(group, kind string) (targetCategory, string, error) {
 
 // snapshotDataArtifact is the trusted view of a snapshot leaf's data leg, read from the leaf's bound
 // SnapshotContent.status.data. Every field originates from the controller-written SnapshotContent
-// (never from user input or annotations) — this is the C6 trust hardening: the artifact name and the
-// restore parameters are taken from the snapshot, not the request.
+// (never from user input or annotations) — that is the trust boundary of the generic snapshot export
+// path: the artifact name and the restore parameters are taken from the snapshot, not the request.
 type snapshotDataArtifact struct {
 	ArtifactKind     string
 	ArtifactName     string

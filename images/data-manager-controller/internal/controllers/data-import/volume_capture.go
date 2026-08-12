@@ -217,9 +217,10 @@ func vcrReadyCondition(vcr *unstructured.Unstructured) (status, reason string, o
 }
 
 // volumeCaptureArtifact extracts the durable artifact reference from the VolumeCaptureRequest's single
-// status.dataRef. The VCR carries one target per request (singular status.dataRef), so there
-// is no list to match by targetUID. It validates the artifact kind matches what the chosen mode must
-// produce and carries the artifact uid through into DataArtifactReference.
+// status.data object. The VCR carries exactly one target per request (hence status.data is a single
+// object and not a list), so there is no list to match by targetUID. It validates the artifact kind
+// matches what the chosen mode must produce and carries the artifact uid through into
+// DataArtifactReference.
 func volumeCaptureArtifact(vcr *unstructured.Unstructured, expectedKind string) (*dev1alpha1.DataArtifactReference, error) {
 	dataRef, found, err := unstructured.NestedMap(vcr.Object, "status", "data")
 	if err != nil || !found || len(dataRef) == 0 {

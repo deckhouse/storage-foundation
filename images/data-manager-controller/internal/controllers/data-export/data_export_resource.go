@@ -52,7 +52,7 @@ type DataexportReconciler struct {
 	Client client.Client
 	Reader client.Reader
 	Config *config.Options
-	// Dynamic and RESTMapper drive the resource-agnostic snapshot export path (C6): the target leaf is
+	// Dynamic and RESTMapper drive the resource-agnostic snapshot export path: the target leaf is
 	// any registered snapshot CR addressed by GroupKind, resolved to its SnapshotContent.dataRef
 	// without compiling in domain types.
 	Dynamic    dynamic.Interface
@@ -533,7 +533,7 @@ func (r *DataexportReconciler) implementDataExportProviding(ctx context.Context,
 			}
 
 		case dev1alpha1.KindSnapshotShort:
-			// Resource-agnostic snapshot path (C6): any namespaced snapshot leaf (generic VolumeSnapshot,
+			// Resource-agnostic snapshot path: any namespaced snapshot leaf (generic VolumeSnapshot,
 			// VirtualDiskSnapshot, domain snapshot, ...) is exported the same way — resolve the leaf's
 			// SnapshotContent.dataRef and provision the export PVC from the durable artifact via a VRR.
 			log.Printf("Export target kind: %s", generatedNames.TargetKindShort)
@@ -1988,7 +1988,7 @@ func isVDReady(vd *virtv1alpha2.VirtualDisk, condition metav1.Condition) bool {
 }
 
 // validateDataExportSpec performs cheap, permanent-until-spec-change validation. With the GroupKind
-// targetRef (C6) there is no kind allowlist: classifyTargetRef rejects structurally invalid / forbidden
+// targetRef there is no kind allowlist: classifyTargetRef rejects structurally invalid / forbidden
 // targets (e.g. a bare VolumeSnapshotContent), and only the live-VirtualDisk path needs a CRD presence
 // pre-check (the snapshot path is generic and surfaces missing targets through Ready conditions).
 // validateDataExportSpec performs cheap, permanent-until-spec-change validation. It returns an

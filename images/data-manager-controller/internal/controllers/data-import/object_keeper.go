@@ -44,7 +44,7 @@ import (
 // keeper only anchors the artifact to the VCR's (bounded) lifetime, not to the import's. DataImport adds
 // its own cluster-scoped keeper (FollowObject -> DataImport) as an ADDITIONAL, non-controller owner of
 // the artifact so the artifact's Kubernetes object survives the VCR TTL until the state-snapshotter
-// import orchestrator (C5) adopts it under a SnapshotContent (the durable owner). Multi-owner GC keeps
+// import orchestrator adopts it under a SnapshotContent (the durable owner). Multi-owner GC keeps
 // the artifact alive while ANY owner remains. We never become the controller owner and never remove the
 // storage-foundation owner — the Retain pin (artifact.go) additionally protects the physical data.
 const (
@@ -162,8 +162,8 @@ func (r *DataImportReconciler) ensureArtifactKeptByKeeper(ctx context.Context, a
 
 // appendOwnerRef appends the desired non-controller ownerReference to the named cluster-scoped artifact
 // if absent. It re-reads under RetryOnConflict and patches with an optimistic lock so a concurrent
-// ownerReferences writer (e.g. the C5 import orchestrator adding the SnapshotContent owner) can never be
-// clobbered — the loser re-reads and re-merges instead of dropping the other's owner.
+// ownerReferences writer (e.g. the state-snapshotter import orchestrator adding the SnapshotContent
+// owner) can never be clobbered — the loser re-reads and re-merges instead of dropping the other's owner.
 func (r *DataImportReconciler) appendOwnerRef(ctx context.Context, name string, desired metav1.OwnerReference, newObj func() client.Object) error {
 	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
 		obj := newObj()

@@ -79,7 +79,7 @@ const (
 	KindVolumeSnapshotShort      = "vs"
 	KindVirtualDiskShort         = "vd"
 	KindVirtualDiskSnapshotShort = "vdsnapshot"
-	// KindSnapshotShort is the generic short kind for ALL snapshot-backed export targets (C6): any
+	// KindSnapshotShort is the generic short kind for ALL snapshot-backed export targets: any
 	// registered snapshot CR (generic VolumeSnapshot, VirtualDiskSnapshot, domain snapshot, ...) is
 	// exported through the same resource-agnostic VRR path keyed off the leaf's SnapshotContent.dataRef,
 	// so they share one short for deterministic resource naming / orphan recovery. The live PVC/VirtualDisk
