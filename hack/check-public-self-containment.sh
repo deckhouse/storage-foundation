@@ -16,17 +16,10 @@
 
 # check-public-self-containment.sh — guard that the texts of this repository can be read on their own.
 #
-# THE RULE
-#   This repository is public, and most of the people reading it hold nothing else. A comment, a CRD
-#   description, a page under docs/, a changelog entry, a commit message or a test name must
-#   therefore never point at material the reader cannot open. Where the reasoning behind an invariant
-#   lives somewhere else, spell the invariant out here in full words; where it must never drift, name
-#   the test in THIS repository that keeps it honest. A pointer to unavailable material replaces
-#   neither.
-#
-#   The rule bites hardest in api/: controller-gen turns a Go doc comment on an API type into the
-#   description of the CRD, which then shows up in `kubectl explain` and on the documentation site.
-#   Editing such a comment edits user-facing documentation.
+# THE RULE LIVES IN CLAUDE.md, section "Comments and descriptions are self-contained", and is
+# deliberately NOT restated here: two copies of a norm drift apart silently, and the copy nobody
+# runs is the one that goes stale. This header is only about the check — what it matches, what it
+# skips, what it cannot see. Read the rule there; read the limits below before trusting a green run.
 #
 # WHAT IT LOOKS FOR
 #   Short labels that carry meaning only for someone holding the other document — ids of components,
