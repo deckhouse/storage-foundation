@@ -48,7 +48,8 @@
 #   * A retelling of the content of a document nobody outside can open — the worst case, because the
 #     text looks self-contained while its correctness rests on something invisible.
 #   Those three need a human reviewer. This script catches only the mechanical, greppable form.
-#   It also looks at TRACKED files only, and files that grep treats as binary are not searched.
+#   It also looks at TRACKED files only, and files that grep treats as binary are not searched (the
+#   summary counts them as skipped, never as searched).
 #
 # HOW TO FIX A FINDING
 #   Say what the label stood for. Do not widen the expressions below, and do not add an exclusion to
@@ -61,6 +62,13 @@
 # run (and therefore proves nothing).
 
 set -euo pipefail
+
+# mapfile -d '' below needs bash >= 4.4; macOS still ships 3.2 as /bin/bash. Refuse loudly with
+# exit 2 (the check could not run, so it proves nothing) instead of dying on an option error.
+if ((BASH_VERSINFO[0] < 4 || (BASH_VERSINFO[0] == 4 && BASH_VERSINFO[1] < 4))); then
+  echo "ERROR: this check needs bash >= 4.4 (mapfile -d); run it with a newer bash (macOS: brew install bash)." >&2
+  exit 2
+fi
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "${REPO_ROOT}" || exit 2
@@ -112,6 +120,23 @@ if [[ ${#files[@]} -eq 0 || "${seen_anchor}" != yes || "${seen_nested}" != yes ]
   exit 2
 fi
 
+# grep -I silently skips files it treats as binary, so they must not be counted as searched — the
+# summary would overclaim coverage exactly where the check read nothing. Split them out first; the
+# probe is the same test grep itself applies (-I with a match-anything pattern on a non-empty file).
+searchable=()
+binaries=0
+for f in "${files[@]}"; do
+  if [[ -s "${f}" ]] && ! grep -I -q -m1 -e '' -- "${f}"; then
+    binaries=$((binaries + 1))
+  else
+    searchable+=("${f}")
+  fi
+done
+if [[ ${#searchable[@]} -eq 0 ]]; then
+  echo "ERROR: every candidate file came out binary; nothing would be searched, so a green result would mean nothing." >&2
+  exit 2
+fi
+
 # The section sign is written as its UTF-8 bytes so that this file does not match its own pattern.
 SECTION_SIGN="$(printf '\302\247')"
 
@@ -124,7 +149,7 @@ findings_total=0
 # grows by an order of magnitude, feed the list through xargs instead.
 check_pattern() {
   local regex="$1" label="$2" hits count
-  hits="$(grep -I -n -E -e "${regex}" -- "${files[@]}" || true)"
+  hits="$(grep -I -n -E -e "${regex}" -- "${searchable[@]}" || true)"
   if [[ -z "${hits}" ]]; then
     printf '  ok     %-38s %s\n' "${label}" "${regex}"
     return 0
@@ -151,9 +176,9 @@ check_pattern '\b[Dd]ecision #'  'numbered decision reference'
 check_pattern '\bOption [A-C]\b' 'lettered alternative'
 
 echo
-echo "searched ${#files[@]} of ${#tracked_all[@]} tracked files:" \
+echo "searched ${#searchable[@]} of ${#tracked_all[@]} tracked files:" \
   "$(( ${#tracked_all[@]} - ${#candidates[@]} )) skipped by the rules above," \
-  "${absent} listed but absent from the working tree"
+  "${binaries} skipped as binary, ${absent} listed but absent from the working tree"
 echo "found ${findings_total} occurrence(s)"
 
 if [[ ${findings_total} -gt 0 ]]; then
