@@ -12,6 +12,17 @@ requirements:
     # storage-foundation and state-snapshotter are released together as v1.0.0; the snapshot
     # domain (SnapshotContent/VRR) lives in state-snapshotter, so pin the GA baseline explicitly.
     state-snapshotter: ">= 1.0.0"
+    # A gate, not a dependency: storage-foundation never needs snapshot-controller (it embeds its
+    # own copy of the controller). But snapshot-controller builds older than v0.2.0 ship an older
+    # schema of the shared snapshot.storage.k8s.io CRDs — running one NEXT TO storage-foundation
+    # makes the two modules rewrite those CRDs with different content on every converge, and the
+    # older schema prunes the newer status.data fields. v0.2.0 is the first build that keeps its
+    # CRD copies byte-identical, empties itself while storage-foundation is enabled, and drops the
+    # module-disable hook that stripped finalizers from live VolumeSnapshot objects. `!optional`
+    # means: ignored when the snapshot-controller module is absent or disabled; while an OLDER
+    # snapshot-controller is enabled, storage-foundation refuses to enable or update, and unblocks
+    # itself once v0.2.0 arrives on that module's release channel.
+    snapshot-controller: ">= 0.2.0 !optional"
 accessibility:
   editions:
     _default:
