@@ -1594,7 +1594,7 @@ func TestDataExportRequestAnnotationKeys_PinnedContract(t *testing.T) {
 	assert.Contains(t, dataExportRequestAnnotationKeys, DataExportRequestAnnotationKey,
 		"the current key must stay in the list both the write and the removal derive from")
 	assert.Contains(t, dataExportRequestAnnotationKeys, LegacyDataExportRequestAnnotationKey,
-		"dropping the legacy key from this list silently abandons dual-write; it may only go away together with backlog item 17")
+		"dropping the legacy key from this list silently abandons dual-write; it may only go away once no supported cluster runs a virtualization release without commit 96af34088")
 }
 
 // TestDataExportRequestAnnotations_SetAndRemovedSymmetrically is the symmetry guard: every key of

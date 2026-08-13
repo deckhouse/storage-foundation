@@ -9,17 +9,18 @@ was generated on top of it and overlaps in `pkg/common-controller/snapshot_contr
 
 Editing a patch is verifiable without a build: the whole chain applies to a throwaway
 copy of the upstream tag in about a minute. Take the version from `oss.yaml` (entry
-`id: snapshot-controller`); the upstream repository is mirrored internally, so the tag is
-available in whatever local checkout of that mirror you have. Export it with
-`git archive` — never `git worktree`, and never switch branches in that checkout, because
-work in progress may be sitting in it. Then replay the chain the way `werf.inc.yaml` does
-(cwd = upstream root, plain `git apply`, glob order), checking each patch against the
-state the previous ones produced:
+`id: snapshot-controller`); the upstream repository is public
+(<https://github.com/kubernetes-csi/external-snapshotter>), so a fresh shallow clone of the
+tag is the simplest source. If you reuse an existing local checkout instead, export the tag
+into a temp dir with `git archive` (then `git init` there) — never `git worktree`, and never
+switch branches in that checkout, because work in progress may be sitting in it. Then replay
+the chain the way `werf.inc.yaml` does (cwd = upstream root, plain `git apply`, glob order),
+checking each patch against the state the previous ones produced:
 
 ```bash
 tmp=$(mktemp -d)
-git -C <checkout-of-the-external-snapshotter-mirror> archive v8.5.0 | tar -x -C "$tmp"
-cd "$tmp" && git init -q
+git clone -q --depth 1 --branch v8.5.0 https://github.com/kubernetes-csi/external-snapshotter.git "$tmp"
+cd "$tmp"
 for p in <this-dir>/*.patch; do
   git apply --check "$p" && git apply "$p" && echo "ok $p" || { echo "FAILED $p"; break; }
 done

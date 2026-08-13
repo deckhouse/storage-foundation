@@ -96,9 +96,8 @@ const (
 	// cluster whose virtualization does not know the new key, a disk export never starts at all.
 	// Their main branch already accepts BOTH keys (commit 96af34088, helper IsDataExportRequested in
 	// images/virtualization-artifact/pkg/common/annotations/annotations.go), so the legacy key is
-	// written purely for clusters running virtualization without that commit. Dropping it is tracked
-	// as item 17 of the project backlog; the condition is "no supported cluster runs a virtualization
-	// release without 96af34088".
+	// written purely for clusters running virtualization without that commit. It may be dropped only
+	// once no supported cluster runs a virtualization release without 96af34088.
 	LegacyDataExportRequestAnnotationKey = "storage.deckhouse.io/data-export-request"
 
 	SeverityWarning = "warning"
