@@ -52,7 +52,7 @@ type DataexportReconciler struct {
 	Client client.Client
 	Reader client.Reader
 	Config *config.Options
-	// Dynamic and RESTMapper drive the resource-agnostic snapshot export path (C6): the target leaf is
+	// Dynamic and RESTMapper drive the resource-agnostic snapshot export path: the target leaf is
 	// any registered snapshot CR addressed by GroupKind, resolved to its SnapshotContent.dataRef
 	// without compiling in domain types.
 	Dynamic    dynamic.Interface
@@ -88,10 +88,32 @@ type pvRecoveryInfo struct {
 const (
 	DataExportInProgressKey        = "storage-foundation.deckhouse.io/data-export-in-progress"
 	DataExportRequestAnnotationKey = "storage-foundation.deckhouse.io/data-export-request"
+	// LegacyDataExportRequestAnnotationKey is the pre-rename spelling of
+	// DataExportRequestAnnotationKey (the key was renamed together with our API group).
+	// RELEASED versions of the virtualization module read only this spelling, and the contract is
+	// circular: we annotate the user PVC, virtualization answers with InUse=True/UsedForDataExport on
+	// the VirtualDisk, and only then does isVirtualDiskReadyForExport let us take the PV over. So on a
+	// cluster whose virtualization does not know the new key, a disk export never starts at all.
+	// Their main branch already accepts BOTH keys (commit 96af34088, helper IsDataExportRequested in
+	// images/virtualization-artifact/pkg/common/annotations/annotations.go), so the legacy key is
+	// written purely for clusters running virtualization without that commit. It may be dropped only
+	// once no supported cluster runs a virtualization release without 96af34088.
+	LegacyDataExportRequestAnnotationKey = "storage.deckhouse.io/data-export-request"
 
 	SeverityWarning = "warning"
 	SeverityError   = "error"
 )
+
+// dataExportRequestAnnotationKeys is the SINGLE source of truth for the data-export-request annotation
+// spellings we maintain on the user PVC. Both ends derive from it — the write in
+// prepareVirtualDiskForExportAndGetPVCName and the removal in
+// removeUserPVCExportingAnnotationsAndFinalizer — so the set cannot drift between them (a key that is
+// set but never removed would leave the user PVC marked as export-requested forever). Do not inline a
+// second copy of this list.
+var dataExportRequestAnnotationKeys = []string{
+	DataExportRequestAnnotationKey,
+	LegacyDataExportRequestAnnotationKey,
+}
 
 // Sentinel errors are used as typed markers so callers can distinguish failure
 // categories with errors.Is without parsing message strings.
@@ -510,7 +532,7 @@ func (r *DataexportReconciler) implementDataExportProviding(ctx context.Context,
 			}
 
 		case dev1alpha1.KindSnapshotShort:
-			// Resource-agnostic snapshot path (C6): any namespaced snapshot leaf (generic VolumeSnapshot,
+			// Resource-agnostic snapshot path: any namespaced snapshot leaf (generic VolumeSnapshot,
 			// VirtualDiskSnapshot, domain snapshot, ...) is exported the same way — resolve the leaf's
 			// SnapshotContent.dataRef and provision the export PVC from the durable artifact via a VRR.
 			log.Printf("Export target kind: %s", generatedNames.TargetKindShort)
@@ -724,6 +746,35 @@ func (r *DataexportReconciler) resolveUserPVCName(ctx context.Context, dataExpor
 	}
 }
 
+// exportCORSAllowHeaders / exportCORSExposeHeaders are the ingress CORS header contract of the download
+// endpoint. The client that needs it is the console, which downloads from status.publicURL with origin
+// console.<domain>. `d8 data export` with publish reads the same publicURL, but CORS is enforced by
+// browsers only: a CLI client sees every header regardless of these lists, so a successful CLI download
+// says nothing about them being complete — that has to be checked from a browser.
+//
+// Downloads send nothing beyond the standard set — Range for chunked reads and Authorization are
+// already part of it — so the allow-list is the baseline verbatim; it still has to be stated because
+// the annotation replaces the controller default rather than extending it.
+//
+// The exposed list is everything the exporter answers with that a cross-origin reader would otherwise
+// not see:
+//   - Content-Disposition — the filename (export_block/handler.go for a raw device,
+//     export_filesystem/handler.go for a file); unexposed, it silently degrades to a made-up name;
+//   - Content-Range / Accept-Ranges — the range bookkeeping of http.ServeContent, which is how a
+//     client verifies that a 206 covers the bytes it asked for;
+//   - X-Attribute-* — the stat/hash attributes of a filesystem entry (mapAttributesToHeader in
+//     export_filesystem/handler.go), needed to restore mode/owner and to verify content;
+//   - X-LinkTarget — the target of a symlink, whose body is empty by design.
+//
+// X-Type is deliberately absent, though the exporter does set it on every filesystem response,
+// including a HEAD of a single path (writeRequiredHeaders in export_filesystem/handler.go): clients take
+// an entry's type from the "type" field of the directory-listing JSON instead — d8, the reference
+// implementation this contract mirrors, never reads the header. Expose it once a client needs it.
+const (
+	exportCORSAllowHeaders  = publish.CORSStandardAllowHeaders
+	exportCORSExposeHeaders = "Content-Disposition,Content-Range,Accept-Ranges,X-Attribute-Permissions,X-Attribute-Uid,X-Attribute-Gid,X-Attribute-Modtime,X-Attribute-Hash-Md5,X-LinkTarget"
+)
+
 func (r *DataexportReconciler) makePublishConfigs(dataExport *dev1alpha1.DataExport, generatedNames Names) (publish.HeadlessServiceCfg, publish.IngressCfg) {
 	serviceCfg := publish.HeadlessServiceCfg{
 		ServiceName:           types.NamespacedName{Namespace: r.Config.ControllerNamespace, Name: generatedNames.HeadlessServiceName},
@@ -737,6 +788,11 @@ func (r *DataexportReconciler) makePublishConfigs(dataExport *dev1alpha1.DataExp
 		TargetSecretName: IngressSecretName,
 		Path:             fmt.Sprintf("/%s/%s/%s", dataExport.Namespace, generatedNames.TargetKindShort, generatedNames.TargetName),
 		CorsAllowMethods: "GET, HEAD, OPTIONS",
+		// The browser downloads cross-origin, so both directions need an explicit CORS mandate: the
+		// baseline request headers (Authorization, Range) on the way in, and the response headers
+		// carrying the filename, the range bookkeeping and the file attributes on the way back.
+		CorsAllowHeaders:  exportCORSAllowHeaders,
+		CorsExposeHeaders: exportCORSExposeHeaders,
 	}
 
 	return serviceCfg, ingressCfg
@@ -1079,10 +1135,14 @@ func (r *DataexportReconciler) removeUserPVCExportingAnnotationsAndFinalizer(ctx
 		return fmt.Errorf("nil pointer for user PVC")
 	}
 
-	annotationsToRemove := []string{
-		DataExportInProgressKey,
-		DataExportRequestAnnotationKey,
-	}
+	// Removal is symmetric to the write: every spelling of the data-export-request annotation set by
+	// prepareVirtualDiskForExportAndGetPVCName comes off here, derived from the same
+	// dataExportRequestAnnotationKeys list. This one function is the only removal point — all three
+	// paths reach it (clearDataExportProviding on DataExport deletion and on TTL expiry, plus the
+	// orphan path removeOrphanResources -> recoverOrphanedUserPVC).
+	annotationsToRemove := make([]string, 0, 1+len(dataExportRequestAnnotationKeys))
+	annotationsToRemove = append(annotationsToRemove, DataExportInProgressKey)
+	annotationsToRemove = append(annotationsToRemove, dataExportRequestAnnotationKeys...)
 
 	userPVCNamespacedName := types.NamespacedName{Namespace: userPVC.Namespace, Name: userPVC.Name}
 	err := wait.PollUntilContextTimeout(ctx, 500*time.Millisecond, 3*time.Second, true, func(ctx context.Context) (bool, error) {
@@ -1159,7 +1219,7 @@ func (r *DataexportReconciler) validateExportDeploy(ctx context.Context, dataExp
 
 // Delete export deployment and export PVC (if exists)
 // Patch PV for attach it back to user's PVC
-// Delete finalizer: storage-foundation.deckhouse.io/data-exporter-controller
+// Delete the finalizer named by dev1alpha1.StorageManagerFinalizerName
 func (r *DataexportReconciler) clearDataExportProviding(ctx context.Context, dataExport *dev1alpha1.DataExport, generatedNames Names) error {
 	log.Printf("Start recovering configuration before Dataexport %s", dataExport.GetName())
 
@@ -1796,12 +1856,18 @@ func (r *DataexportReconciler) prepareVirtualDiskForExportAndGetPVCName(ctx cont
 		return "", fmt.Errorf("failed to get PVC %s/%s for user VirtualDisk %s/%s: %w", namespace, pvcName, namespace, virtualDiskName, err)
 	}
 
-	// Ensure the PVC has the DataExportRequest annotation
-	err = r.ensureAnnotationsOnPVC(ctx, pvc, map[string]string{
-		DataExportRequestAnnotationKey: "true",
-	})
+	// Ensure the PVC carries the data-export-request annotation under EVERY spelling of the contract
+	// (current + legacy, see dataExportRequestAnnotationKeys) in a SINGLE Update: ensureAnnotationsOnPVC
+	// only mutates the object it is handed and persists it, so calling it once per key would mean one
+	// Update per key and an extra write-conflict window on this hot path.
+	requestAnnotations := make(map[string]string, len(dataExportRequestAnnotationKeys))
+	for _, key := range dataExportRequestAnnotationKeys {
+		requestAnnotations[key] = "true"
+	}
+
+	err = r.ensureAnnotationsOnPVC(ctx, pvc, requestAnnotations)
 	if err != nil {
-		return "", fmt.Errorf("failed to ensure DataExportRequest annotation %s on PVC %s/%s: %w", DataExportRequestAnnotationKey, namespace, pvcName, err)
+		return "", fmt.Errorf("failed to ensure DataExportRequest annotations %v on PVC %s/%s: %w", dataExportRequestAnnotationKeys, namespace, pvcName, err)
 	}
 
 	return pvcName, nil
@@ -1870,11 +1936,9 @@ func (r *DataexportReconciler) recoverUserVirtualDisk(ctx context.Context, dataE
 	}
 
 	userPVCName := userVirtualDisk.Status.Target.PersistentVolumeClaim
-	// err := r.removeAnnotationFromPVCIfNeeded(ctx, userNamespace, userPVCName, DataExportRequestAnnotationKey)
-	// if err != nil {
-	// 	return fmt.Errorf("failed to remove %s annotation from user PVC %s/%s: %w", DataExportRequestAnnotationKey, userNamespace, userPVCName, err)
-	// }
 
+	// The data-export-request annotations are stripped by recoverUserPVC below (via
+	// removeUserPVCExportingAnnotationsAndFinalizer) — no separate removal is needed here.
 	return r.recoverUserPVC(ctx, userNamespace, userPVCName, dataExport.Name, nil)
 }
 
@@ -1923,7 +1987,7 @@ func isVDReady(vd *virtv1alpha2.VirtualDisk, condition metav1.Condition) bool {
 }
 
 // validateDataExportSpec performs cheap, permanent-until-spec-change validation. With the GroupKind
-// targetRef (C6) there is no kind allowlist: classifyTargetRef rejects structurally invalid / forbidden
+// targetRef there is no kind allowlist: classifyTargetRef rejects structurally invalid / forbidden
 // targets (e.g. a bare VolumeSnapshotContent), and only the live-VirtualDisk path needs a CRD presence
 // pre-check (the snapshot path is generic and surfaces missing targets through Ready conditions).
 // validateDataExportSpec performs cheap, permanent-until-spec-change validation. It returns an

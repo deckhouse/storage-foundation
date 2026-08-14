@@ -41,12 +41,15 @@ import (
 	dev1alpha1 "github.com/deckhouse/storage-foundation/api/v1alpha1"
 	"github.com/deckhouse/storage-foundation/common"
 	"github.com/deckhouse/storage-foundation/common/config"
+	virtv1alpha2 "github.com/deckhouse/virtualization/api/core/v1alpha2"
 )
 
 const (
-	dataExportName      = "test-de"
-	dataExportNamespace = "test-ns"
-	testUserPVCName     = "test-pvc"
+	dataExportName          = "test-de"
+	dataExportNamespace     = "test-ns"
+	testUserPVCName         = "test-pvc"
+	testUserVirtualDiskName = "test-vd"
+	testUserPVName          = "test-pv"
 )
 
 var testNames = common.NewNames(dev1alpha1.KindPVC, testUserPVCName, dataExportNamespace, dataExportName)
@@ -1467,5 +1470,164 @@ func TestDeleteOrphanedExportPVCs(t *testing.T) {
 				assert.True(t, client.IgnoreNotFound(err) == nil, "export PVC should be deleted")
 			}
 		})
+	}
+}
+
+// setupTestSchemeWithVirtualization is setupTestScheme plus the virtualization types. It is separate on
+// purpose: no pre-existing test in this package works with a VirtualDisk object, and registering the
+// virtualization group unconditionally could change what the shared scheme means for those tests.
+func setupTestSchemeWithVirtualization(t *testing.T) *runtime.Scheme {
+	t.Helper()
+	scheme := setupTestScheme()
+	require.NoError(t, virtv1alpha2.AddToScheme(scheme))
+	return scheme
+}
+
+// newVirtualDiskExportFixture seeds a fake client with a VirtualDisk whose status points at the user PVC
+// (the shape prepareVirtualDiskForExportAndGetPVCName needs) and returns a counter of PVC Updates, so a
+// caller can assert that all request annotations are written by ONE Update rather than one per key.
+func newVirtualDiskExportFixture(t *testing.T) (*DataexportReconciler, client.Client, *int) {
+	t.Helper()
+
+	virtualDisk := &virtv1alpha2.VirtualDisk{
+		ObjectMeta: metav1.ObjectMeta{Name: testUserVirtualDiskName, Namespace: dataExportNamespace},
+	}
+	virtualDisk.Status.Target.PersistentVolumeClaim = testUserPVCName
+
+	userPVC := &corev1.PersistentVolumeClaim{
+		ObjectMeta: metav1.ObjectMeta{Name: testUserPVCName, Namespace: dataExportNamespace},
+		Spec:       corev1.PersistentVolumeClaimSpec{VolumeName: testUserPVName},
+		Status:     corev1.PersistentVolumeClaimStatus{Phase: corev1.ClaimBound},
+	}
+
+	pvcUpdates := 0
+	fakeClient := fake.NewClientBuilder().
+		WithScheme(setupTestSchemeWithVirtualization(t)).
+		WithObjects(virtualDisk, userPVC).
+		WithInterceptorFuncs(interceptor.Funcs{
+			Update: func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.UpdateOption) error {
+				if _, isPVC := obj.(*corev1.PersistentVolumeClaim); isPVC {
+					pvcUpdates++
+				}
+				return c.Update(ctx, obj, opts...)
+			},
+		}).
+		Build()
+
+	return createTestReconciler(fakeClient, fakeClient, createTestConfig()), fakeClient, &pvcUpdates
+}
+
+// newRecoverUserPVCFixture seeds a user PVC carrying the given annotations plus our finalizer, bound to a
+// PV that is already restored (no export marker label). recoverUserPVC then takes its idempotent
+// "already restored" branch straight into removeUserPVCExportingAnnotationsAndFinalizer — the single
+// removal point every cleanup path funnels through (DataExport deletion and TTL expiry via
+// clearDataExportProviding, plus the orphan sweep removeOrphanResources -> recoverOrphanedUserPVC).
+func newRecoverUserPVCFixture(t *testing.T, pvcAnnotations map[string]string) (*DataexportReconciler, client.Client) {
+	t.Helper()
+
+	userPVC := &corev1.PersistentVolumeClaim{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:        testUserPVCName,
+			Namespace:   dataExportNamespace,
+			Annotations: pvcAnnotations,
+			Finalizers:  []string{dev1alpha1.StorageManagerFinalizerName},
+		},
+		Spec:   corev1.PersistentVolumeClaimSpec{VolumeName: testUserPVName},
+		Status: corev1.PersistentVolumeClaimStatus{Phase: corev1.ClaimBound},
+	}
+	pv := &corev1.PersistentVolume{
+		ObjectMeta: metav1.ObjectMeta{Name: testUserPVName},
+		Spec: corev1.PersistentVolumeSpec{
+			PersistentVolumeReclaimPolicy: corev1.PersistentVolumeReclaimDelete,
+			ClaimRef:                      &corev1.ObjectReference{Name: testUserPVCName, Namespace: dataExportNamespace},
+		},
+	}
+
+	fakeClient := fake.NewClientBuilder().WithScheme(setupTestScheme()).WithObjects(pv, userPVC).Build()
+	return createTestReconciler(fakeClient, fakeClient, createTestConfig()), fakeClient
+}
+
+// TestPrepareVirtualDiskForExport_WritesBothRequestAnnotationsOnce guards the write end of the
+// data-export-request contract. The keys are asserted BY CONSTANT NAME, not by iterating
+// dataExportRequestAnnotationKeys: an assertion derived from the same list as the production write would
+// stay green if the legacy key were quietly dropped from that list, i.e. exactly at the defect this test
+// exists for. It also pins the cost of the write: ensureAnnotationsOnPVC issues an Update of the object it
+// was handed, so writing the keys in separate calls would double the write-conflict window on this path.
+func TestPrepareVirtualDiskForExport_WritesBothRequestAnnotationsOnce(t *testing.T) {
+	reconciler, fakeClient, pvcUpdates := newVirtualDiskExportFixture(t)
+
+	pvcName, err := reconciler.prepareVirtualDiskForExportAndGetPVCName(context.Background(), dataExportNamespace, testUserVirtualDiskName)
+	require.NoError(t, err)
+	require.Equal(t, testUserPVCName, pvcName)
+
+	got := &corev1.PersistentVolumeClaim{}
+	require.NoError(t, fakeClient.Get(context.Background(), types.NamespacedName{Namespace: dataExportNamespace, Name: testUserPVCName}, got))
+
+	assert.Equal(t, "true", got.Annotations[DataExportRequestAnnotationKey],
+		"current key %s must be set on the user PVC", DataExportRequestAnnotationKey)
+	assert.Equal(t, "true", got.Annotations[LegacyDataExportRequestAnnotationKey],
+		"legacy key %s must be set too: released virtualization versions read only this spelling, and without it InUse=True/UsedForDataExport never appears, so isVirtualDiskReadyForExport never opens the gate and the export never starts", LegacyDataExportRequestAnnotationKey)
+	assert.Equal(t, 1, *pvcUpdates, "all request annotations must be written by a single PVC Update, not one Update per key")
+}
+
+// TestDataExportRequestAnnotationKeys_PinnedContract is the tightening test: it pins both wire strings as
+// literals and pins the COMPOSITION of dataExportRequestAnnotationKeys by asserting membership of both
+// constants. Membership is what keeps the behavioural tests honest — they can only prove that whatever is
+// in the list is handled, never that the list still holds the legacy spelling.
+//
+// The virtualization constant cannot be imported to compare against: it lives in an internal package of
+// another module (images/virtualization-artifact/pkg/common/annotations, AnnDataExportRequest /
+// AnnDataExportRequestLegacy), and the public module storage-foundation already depends on,
+// github.com/deckhouse/virtualization/api, does not export it. Hence literals plus this pointer to the
+// source of truth.
+//
+// The second end of the contract is those two read sites in virtualization, both routed through the
+// IsDataExportRequested helper: checkDataExportUsage in inuse.go (raises InUse=True with reason
+// UsedForDataExport, which is what isVirtualDiskReadyForExport waits for before the PV takeover) and
+// ready_step.go (reports phase Exporting instead of Lost while the PVC is ClaimLost).
+func TestDataExportRequestAnnotationKeys_PinnedContract(t *testing.T) {
+	assert.Equal(t, "storage-foundation.deckhouse.io/data-export-request", DataExportRequestAnnotationKey,
+		"the wire string is read by other modules and cannot be changed silently")
+	assert.Equal(t, "storage.deckhouse.io/data-export-request", LegacyDataExportRequestAnnotationKey,
+		"the legacy wire string is what released virtualization versions read")
+
+	assert.Contains(t, dataExportRequestAnnotationKeys, DataExportRequestAnnotationKey,
+		"the current key must stay in the list both the write and the removal derive from")
+	assert.Contains(t, dataExportRequestAnnotationKeys, LegacyDataExportRequestAnnotationKey,
+		"dropping the legacy key from this list silently abandons dual-write; it may only go away once no supported cluster runs a virtualization release without commit 96af34088")
+}
+
+// TestDataExportRequestAnnotations_SetAndRemovedSymmetrically is the symmetry guard: every key of
+// dataExportRequestAnnotationKeys must be both written by the export preparation and removed by the
+// recovery. It catches "a key was added to the list but one of the two ends was missed" (an annotation
+// left behind keeps the user PVC marked as export-requested forever). It deliberately does NOT catch a key
+// being removed from the list — that is the job of TestDataExportRequestAnnotationKeys_PinnedContract.
+func TestDataExportRequestAnnotations_SetAndRemovedSymmetrically(t *testing.T) {
+	require.NotEmpty(t, dataExportRequestAnnotationKeys, "the list must not be empty, otherwise this test asserts nothing")
+
+	setReconciler, setClient, _ := newVirtualDiskExportFixture(t)
+	_, err := setReconciler.prepareVirtualDiskForExportAndGetPVCName(context.Background(), dataExportNamespace, testUserVirtualDiskName)
+	require.NoError(t, err)
+
+	setPVC := &corev1.PersistentVolumeClaim{}
+	require.NoError(t, setClient.Get(context.Background(), types.NamespacedName{Namespace: dataExportNamespace, Name: testUserPVCName}, setPVC))
+	for _, key := range dataExportRequestAnnotationKeys {
+		assert.Equal(t, "true", setPVC.Annotations[key],
+			"key %s is in dataExportRequestAnnotationKeys, so prepareVirtualDiskForExportAndGetPVCName must set it", key)
+	}
+
+	seeded := map[string]string{DataExportInProgressKey: "true"}
+	for _, key := range dataExportRequestAnnotationKeys {
+		seeded[key] = "true"
+	}
+
+	removeReconciler, removeClient := newRecoverUserPVCFixture(t, seeded)
+	require.NoError(t, removeReconciler.recoverUserPVC(context.Background(), dataExportNamespace, testUserPVCName, dataExportName, nil))
+
+	removedPVC := &corev1.PersistentVolumeClaim{}
+	require.NoError(t, removeClient.Get(context.Background(), types.NamespacedName{Namespace: dataExportNamespace, Name: testUserPVCName}, removedPVC))
+	for _, key := range dataExportRequestAnnotationKeys {
+		assert.NotContains(t, removedPVC.Annotations, key,
+			"key %s is in dataExportRequestAnnotationKeys, so recoverUserPVC must remove it", key)
 	}
 }

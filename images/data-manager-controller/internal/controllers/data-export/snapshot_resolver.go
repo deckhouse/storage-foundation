@@ -38,7 +38,7 @@ import (
 // targetCategory classifies a DataExport target by its GroupKind so the controller can dispatch
 // without compiling in domain types: live PVC and live VirtualDisk keep their bespoke direct-export
 // paths; everything else is a snapshot leaf exported through the resource-agnostic SnapshotContent ->
-// VolumeRestoreRequest path (C6).
+// VolumeRestoreRequest path.
 type targetCategory int
 
 const (
@@ -104,15 +104,14 @@ func classifyTargetRef(group, kind string) (targetCategory, string, error) {
 
 // snapshotDataArtifact is the trusted view of a snapshot leaf's data leg, read from the leaf's bound
 // SnapshotContent.status.data. Every field originates from the controller-written SnapshotContent
-// (never from user input or annotations) — this is the C6 trust hardening: the artifact name and the
-// restore parameters are taken from the snapshot, not the request.
+// (never from user input or annotations) — that is the trust boundary of the generic snapshot export
+// path: the artifact name and the restore parameters are taken from the snapshot, not the request.
 type snapshotDataArtifact struct {
 	ArtifactKind     string
 	ArtifactName     string
 	VolumeMode       string
 	StorageClassName string
 	FsType           string
-	AccessModes      []string
 }
 
 // resolveSnapshotDataArtifact walks targetRef -> leaf.status.boundSnapshotContentName -> SnapshotContent
@@ -211,9 +210,6 @@ func (r *DataexportReconciler) resolveSnapshotDataArtifact(ctx context.Context, 
 	}
 	art.StorageClassName, _, _ = unstructured.NestedString(data, "storageClassName")
 	art.FsType, _, _ = unstructured.NestedString(data, "fsType")
-	if modes, found, _ := unstructured.NestedStringSlice(data, "accessModes"); found {
-		art.AccessModes = modes
-	}
 	return art, nil
 }
 
@@ -280,13 +276,15 @@ func (r *DataexportReconciler) ensureVolumeRestoreRequest(ctx context.Context, d
 	if art.StorageClassName != "" {
 		pvcSpec["storageClassName"] = art.StorageClassName
 	}
-	if len(art.AccessModes) > 0 {
-		modes := make([]interface{}, 0, len(art.AccessModes))
-		for _, m := range art.AccessModes {
-			modes = append(modes, m)
-		}
-		pvcSpec["accessModes"] = modes
-	}
+	// accessModes is deliberately absent, not forgotten. The export PVC is a short-lived transit volume
+	// mounted by exactly one exporter pod, so the source volume's modes carry no meaning here — the
+	// live-PVC export path narrows them to ReadWriteOncePod for the same reason (see detachPVC). An empty
+	// list is a supported VRR input: the patched external-provisioner substitutes ReadWriteOnce in
+	// effectiveAccessModes (images/csi-external-provisioner/patches/v6.2.0/002-vrr-executor.patch), and
+	// that value is what the CSI volume capability, the provisioned PV and the bound PVC all carry. So a
+	// source that was ReadWriteMany still exports; it just exports through a ReadWriteOnce transit volume.
+	// SnapshotContent.status.data has no accessModes field at all any more (dropped from the
+	// state-snapshotter schema before its release), so there is also nothing left to copy.
 	spec := map[string]interface{}{
 		"sourceRef": map[string]interface{}{
 			"kind": art.ArtifactKind,

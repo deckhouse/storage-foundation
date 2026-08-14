@@ -721,7 +721,8 @@ func (r *DataImportReconciler) handlePVCImportStatus(ctx context.Context, pvc *c
 
 // ensureDataArtifact captures the bound scratch PVC into a durable cluster-scoped VolumeSnapshotContent
 // via a VolumeCaptureRequest, pins the artifact's reclaim policy to Retain, anchors it to the import's
-// lifetime via the import ObjectKeeper, and records it in status.data.artifactRef + Completed. The capture
+// lifetime via the import ObjectKeeper, and records it in status.data.artifactRef (alongside the scratch
+// volume's observed status.data.fsType, the one field that outlives the volume) + Completed. The capture
 // mode is auto-detected from the spec StorageClass (snapshot-capable -> Snapshot); a non-snapshot-capable
 // StorageClass fails closed. It requeues while the VolumeCaptureRequest is in progress. DataImport never
 // becomes the artifact's controller owner (storage-foundation's VCR retainer is); see object_keeper.go /
@@ -773,6 +774,13 @@ func (r *DataImportReconciler) ensureDataArtifact(ctx context.Context, pvc *core
 		return ctrl.Result{}, err
 	}
 
+	// Observe the scratch volume's filesystem type BEFORE the delete below destroys it. This is the last
+	// point where the value exists: the PV goes away with the claim, the captured artifact records no
+	// filesystem type, and nothing downstream ever sees this volume again. The observation is best-effort by
+	// construction (scratchVolumeFSType cannot fail), so it can neither block nor delay publishing the
+	// artifact reference — which is already durable at this point.
+	fsType := scratchVolumeFSType(ctx, r.Client, pvc)
+
 	// The scratch PVC is no longer needed now that the artifact is safely captured. Completed is set
 	// only once it's actually deleted — Completed is sticky-terminal, so a swallowed failure here
 	// would never get another chance and would leak the PVC forever.
@@ -780,7 +788,7 @@ func (r *DataImportReconciler) ensureDataArtifact(ctx context.Context, pvc *core
 		return ctrl.Result{}, fmt.Errorf("delete scratch PVC: %w", err)
 	}
 
-	r.dataImport.Status.Data = &dev1alpha1.DataExportImportData{ArtifactRef: artifact}
+	r.dataImport.Status.Data = &dev1alpha1.DataExportImportData{ArtifactRef: artifact, FsType: fsType}
 	meta.SetStatusCondition(&r.dataImport.Status.Conditions, metav1.Condition{
 		Type:               string(common.ConditionCompleted),
 		Status:             metav1.ConditionTrue,
@@ -945,6 +953,74 @@ func (r *DataImportReconciler) ensureDummyJob(ctx context.Context, target client
 	return err
 }
 
+// importProtocolAllowHeaders lists the request headers of the upload protocol itself, on top of
+// publish.CORSStandardAllowHeaders. The first five are what the exporter demands of a PUT: a request
+// without them is refused with 400 before the handler runs (CheckRequiredHeaders in
+// images/data-exporter/internal/middleware/http.go). X-Attribute-ModTime and X-LinkTarget are optional
+// per file but carry filesystem metadata the importer cannot reconstruct (see
+// images/data-exporter/internal/httpiohelpers/file.go).
+//
+// An omission in THIS list fails earlier and far more quietly than that 400: nothing is stripped from
+// the request and no request is made. The preflight answers with an Access-Control-Allow-Headers that
+// lacks the name, the browser rejects the whole thing as a CORS error, and the actual PUT never leaves
+// it — so the exporter logs no request at all.
+//
+// Only a browser is affected, because only a browser enforces CORS. nginx neither strips a request
+// header that is missing from the allow-list nor hides a response header that is missing from the
+// expose-list; a CLI client sees both regardless. Note this does NOT mean "d8 does not use this
+// ingress": `d8 data import upload --publish` uploads to exactly this status.publicURL with exactly
+// these headers. It just never consults Access-Control-Allow-Headers, so a green CLI upload through
+// this ingress proves nothing about the list being complete — that has to be checked from a browser.
+//
+// The two lists are joined by the controller, never hand-copied.
+const importProtocolAllowHeaders = "X-Offset,X-Content-Length,X-Attribute-Permissions,X-Attribute-Uid,X-Attribute-Gid,X-Attribute-ModTime,X-LinkTarget"
+
+// importCORSAllowHeaders / importCORSExposeHeaders are the ingress CORS header contract of the upload
+// endpoint. The client that needs it is the console, which uploads to status.publicURL from origin
+// console.<domain>; `d8 data import upload --publish` uses the same publicURL, but as a non-browser
+// client it is bound by neither list.
+//
+// Every exposed header is load-bearing, and each is easy to lose without breaking a single request:
+//   - X-Next-Offset is where the next chunk starts, written on success by import_block/handler.go and
+//     import_filesystem/handler.go;
+//   - X-Expected-Offset accompanies the 409 raised on an offset mismatch (import_block/handler.go,
+//     import_filesystem/handler.go). The other 409 — a competing writer — carries no headers at all,
+//     so without X-Expected-Offset the client cannot tell the two apart: a recoverable
+//     reposition-and-continue becomes an unrecoverable failure;
+//   - X-Device-Size is the size of the target block device, answered on the same HEAD as X-Next-Offset
+//     (import_block/handler.go) and reported nowhere else in this API, so it is how a client learns how
+//     much room it has. Writing past the end is refused with a bare 416 that carries no headers
+//     whatsoever (import_block/handler.go, both the offset and the body-length branch), so a client that
+//     cannot read the size can neither check "this archive is larger than the volume" up front nor
+//     explain the failure afterwards — it only finds out at the end of a transfer that may have run for
+//     hours.
+const (
+	importCORSAllowHeaders  = publish.CORSStandardAllowHeaders + "," + importProtocolAllowHeaders
+	importCORSExposeHeaders = "X-Next-Offset,X-Expected-Offset,X-Device-Size"
+)
+
+// makeIngressCfg builds the Ingress configuration of the upload endpoint. It is a separate function so
+// the published contract (CORS header lists, body size limit) is unit-testable without a cluster.
+func (r *DataImportReconciler) makeIngressCfg() publish.IngressCfg {
+	return publish.IngressCfg{
+		IngressName:      types.NamespacedName{Namespace: r.Config.ControllerNamespace, Name: r.names.IngressResourceName},
+		ServiceName:      types.NamespacedName{Namespace: r.Config.ControllerNamespace, Name: r.names.HeadlessServiceName},
+		OriginIngress:    types.NamespacedName{Namespace: r.Config.OriginIngressNamespace, Name: common.OriginIngressName},
+		TargetSecretName: common.IngressSecretName,
+		Path:             fmt.Sprintf("/%s/%s/%s", r.dataImport.Namespace, r.names.TargetKindShort, r.names.TargetName),
+		CorsAllowMethods: "PUT, POST, HEAD, OPTIONS",
+		// The browser uploads cross-origin, so every protocol header needs an explicit CORS mandate:
+		// allow-headers on the way in, expose-headers on the way back.
+		CorsAllowHeaders:  importCORSAllowHeaders,
+		CorsExposeHeaders: importCORSExposeHeaders,
+		// Uploads are PUT with a body; the block/filesystem import protocol is resumable (offset-based,
+		// X-Next-Offset), so clients chunk. Cap a single request at 64m instead of the controller default
+		// (1m, which 413s any real upload) — bounded to avoid unbounded nginx request buffering on the
+		// ingress node while still allowing arbitrarily large volumes via chunked PUTs.
+		ProxyBodySize: "64m",
+	}
+}
+
 func (r *DataImportReconciler) ensurePublish(ctx context.Context) error {
 	publicURL, err := publish.EnsurePublicURL(
 		ctx,
@@ -955,19 +1031,7 @@ func (r *DataImportReconciler) ensurePublish(ctx context.Context) error {
 			DeploymentName:        r.names.DeployName,
 			LabelApplicationValue: dev1alpha1.LabelDataImportValue,
 		},
-		publish.IngressCfg{
-			IngressName:      types.NamespacedName{Namespace: r.Config.ControllerNamespace, Name: r.names.IngressResourceName},
-			ServiceName:      types.NamespacedName{Namespace: r.Config.ControllerNamespace, Name: r.names.HeadlessServiceName},
-			OriginIngress:    types.NamespacedName{Namespace: r.Config.OriginIngressNamespace, Name: common.OriginIngressName},
-			TargetSecretName: common.IngressSecretName,
-			Path:             fmt.Sprintf("/%s/%s/%s", r.dataImport.Namespace, r.names.TargetKindShort, r.names.TargetName),
-			CorsAllowMethods: "PUT, POST, HEAD, OPTIONS",
-			// Uploads are PUT with a body; the block/filesystem import protocol is resumable (offset-based,
-			// X-Next-Offset), so clients chunk. Cap a single request at 64m instead of the controller default
-			// (1m, which 413s any real upload) — bounded to avoid unbounded nginx request buffering on the
-			// ingress node while still allowing arbitrarily large volumes via chunked PUTs.
-			ProxyBodySize: "64m",
-		})
+		r.makeIngressCfg())
 	if err != nil {
 		return err
 	}

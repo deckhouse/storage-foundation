@@ -108,7 +108,9 @@ spec:
                 publicURL:
                   type: string
                   description: |
-                    Public URL for external access (e.g., https://data-exporter.<public-domain>/<namespace>/<DataExport-name>).
+                    Public URL for external access (e.g., https://api.<public-domain>/<namespace>/<target-kind>/<target-name>/).
+                    Here <target-kind> is the short kind of the export target: pvc, vd or snap (any snapshot-backed target),
+                    and <target-name> is the value of spec.targetRef.name.
                 accessTimestamp:
                   type: string
                   format: date-time

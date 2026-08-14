@@ -19,3 +19,16 @@ testing
 tools
 werf*.yaml
 e2e
+common
+go-lint.sh
+known_vulnerabilities.vex
+module.yaml
+oss.yaml
+.git
+.github
+.gitignore
+.gitleaks.toml
+.golangci.yaml
+.dmtlint.yaml
+.namespace
+.werf

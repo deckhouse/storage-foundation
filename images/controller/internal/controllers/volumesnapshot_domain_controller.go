@@ -47,7 +47,7 @@ const (
 	labelForkProcessed = "storage-foundation.deckhouse.io/processed"
 
 	// labelSnapshotManaged latches the adoption outcome of the exclude veto, evaluated ONCE on the source
-	// PVC at adoption time (design §11.3). "true" => domain-captured (MCR + protocol); "false" => vetoed
+	// PVC at adoption time. "true" => domain-captured (MCR + protocol); "false" => vetoed
 	// (a plain CSI snapshot is still created by the fork, but no domain capture happens). It is
 	// deliberately scoped to the state-snapshotter group so it does not collide with the storage-foundation
 	// "managed" ANNOTATION (snapshotmeta.AnnDeckhouseManaged), which has unrelated CSI-skip semantics.
@@ -301,8 +301,10 @@ func (r *VolumeSnapshotDomainReconciler) latchManagedLabel(ctx context.Context, 
 		cur.Labels[labelSnapshotManaged] = desired
 		// A VolumeSnapshot adopted as a domain-managed node (managed=true) is a protected tree node: stamp
 		// the authoritative delete-protection state in the SAME patch that latches adoption, i.e. before any
-		// graph edge is published (delete-protection-contract.md §6.1/§8.1). A vetoed (managed=false)
-		// VolumeSnapshot is a plain CSI snapshot, not a tree node, and MUST NOT be protected.
+		// graph edge is published — a tree node must never be reachable from the tree while still deletable. A
+		// vetoed (managed=false) VolumeSnapshot is a plain CSI snapshot, not a tree node, and MUST NOT be
+		// protected. Both halves are guarded by TestLatchManagedTrueStampsDeleteProtected and
+		// TestLatchManagedFalseDoesNotStampDeleteProtected.
 		if desired == managedValueTrue {
 			storagev1alpha1.StampDeleteProtected(cur)
 		}

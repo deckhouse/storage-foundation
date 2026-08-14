@@ -19,16 +19,22 @@ package dataexport
 import (
 	"context"
 	"errors"
+	"fmt"
+	"os"
+	"reflect"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	dynamicfake "k8s.io/client-go/dynamic/fake"
+	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	dev1alpha1 "github.com/deckhouse/storage-foundation/api/v1alpha1"
 	"github.com/deckhouse/storage-foundation/common"
@@ -321,6 +327,190 @@ func TestEnsureVolumeRestoreRequest_CreatesAndIsIdempotent(t *testing.T) {
 
 	// Second call must be a no-op (Get-before-Create), not an error.
 	require.NoError(t, r.ensureVolumeRestoreRequest(context.Background(), de, names, art))
+}
+
+// staleAccessModesKey is the status.data key this module used to consume. It is spelled out in the test
+// only: production code must not mention it any more, so there is deliberately no constant to import.
+const staleAccessModesKey = "accessModes"
+
+// withStaleAccessModes stamps the removed status.data.accessModes key onto a SnapshotContent. It stands
+// for an etcd row written before the field left the state-snapshotter schema (the value physically
+// survives there until the object is rewritten) and for any writer that still emits it. Such a value
+// must neither block the export nor reach the VolumeRestoreRequest.
+func withStaleAccessModes(content *unstructured.Unstructured, modes ...string) *unstructured.Unstructured {
+	if err := unstructured.SetNestedStringSlice(content.Object, modes, "status", "data", staleAccessModesKey); err != nil {
+		panic(err)
+	}
+	return content
+}
+
+// findKeyPaths walks every map key of a nested unstructured object and returns how many keys it visited
+// plus the paths whose key equals want. Limit: it descends maps and slices only (a VRR object holds
+// nothing else) and it matches key names, not values.
+func findKeyPaths(obj interface{}, want, path string) (visited int, hits []string) {
+	switch typed := obj.(type) {
+	case map[string]interface{}:
+		for key, value := range typed {
+			childPath := path + "." + key
+			visited++
+			if key == want {
+				hits = append(hits, childPath)
+			}
+			childVisited, childHits := findKeyPaths(value, want, childPath)
+			visited += childVisited
+			hits = append(hits, childHits...)
+		}
+	case []interface{}:
+		for i, value := range typed {
+			childVisited, childHits := findKeyPaths(value, want, fmt.Sprintf("%s[%d]", path, i))
+			visited += childVisited
+			hits = append(hits, childHits...)
+		}
+	}
+	return visited, hits
+}
+
+// TestSnapshotDataArtifact_CarriesNoAccessModes pins the removal at the type level: the trusted view of
+// status.data has no access-mode field, so nothing can read one back in without tripping this test.
+// Limit: it matches field names, so a differently named field holding access modes would pass here and
+// be caught instead by the VRR-shape tests below.
+func TestSnapshotDataArtifact_CarriesNoAccessModes(t *testing.T) {
+	artType := reflect.TypeOf(snapshotDataArtifact{})
+	for i := 0; i < artType.NumField(); i++ {
+		name := artType.Field(i).Name
+		assert.NotContains(t, strings.ToLower(name), "accessmode",
+			"snapshotDataArtifact must not carry access modes: the export PVC is a single-pod transit volume and the provisioner defaults them")
+	}
+	t.Logf("snapshotDataArtifact fields inspected: %d", artType.NumField())
+	require.NotZero(t, artType.NumField(), "reflection found no fields at all — the check would be vacuously green")
+}
+
+// TestResolveSnapshotDataArtifact_StaleAccessModesIgnored is the "former RWX volume still exports" case
+// at the resolve stage: a leftover ReadWriteMany value must be ignored, not turned into a refusal, and
+// the sibling fields must still be picked up.
+func TestResolveSnapshotDataArtifact_StaleAccessModesIgnored(t *testing.T) {
+	leaf := newSnapshotLeaf("content1")
+	content := withStaleAccessModes(
+		newSnapshotContent("content1", "test-ns", artifactKindVolumeSnapshotContent, "vsc1", "Filesystem"),
+		"ReadWriteMany", "ReadOnlyMany",
+	)
+	require.NoError(t, unstructured.SetNestedField(content.Object, "local", "status", "data", "storageClassName"))
+	require.NoError(t, unstructured.SetNestedField(content.Object, "ext4", "status", "data", "fsType"))
+	r := newResolverReconciler(leaf, content)
+
+	art, err := r.resolveSnapshotDataArtifact(context.Background(), newSnapshotDataExport("snapshot.storage.k8s.io", "VolumeSnapshot", "leaf1"))
+	require.NoError(t, err, "a ReadWriteMany source must stay exportable")
+	require.NotNil(t, art)
+	assert.Equal(t, "Filesystem", art.VolumeMode)
+	assert.Equal(t, "local", art.StorageClassName)
+	assert.Equal(t, "ext4", art.FsType)
+}
+
+// TestEnsureVolumeRestoreRequest_OmitsAccessModes is the mutation gate for the removal: restoring the
+// old read+write of status.data.accessModes makes the VRR carry the key again and fails this test. The
+// export PVC template is expected to name only the fields the restore genuinely needs; access modes are
+// supplied by the patched external-provisioner (effectiveAccessModes -> ReadWriteOnce).
+func TestEnsureVolumeRestoreRequest_OmitsAccessModes(t *testing.T) {
+	leaf := newSnapshotLeaf("content1")
+	content := withStaleAccessModes(
+		newSnapshotContent("content1", "test-ns", artifactKindVolumeSnapshotContent, "vsc1", "Filesystem"),
+		"ReadWriteMany",
+	)
+	require.NoError(t, unstructured.SetNestedField(content.Object, "local", "status", "data", "storageClassName"))
+	require.NoError(t, unstructured.SetNestedField(content.Object, "ext4", "status", "data", "fsType"))
+	r := newResolverReconciler(leaf, content)
+	de := newSnapshotDataExport("snapshot.storage.k8s.io", "VolumeSnapshot", "leaf1")
+	names := common.NewNamesFromShort(dev1alpha1.KindSnapshotShort, "leaf1", de.Namespace, de.Name)
+
+	art, err := r.resolveSnapshotDataArtifact(context.Background(), de)
+	require.NoError(t, err)
+	require.NoError(t, r.ensureVolumeRestoreRequest(context.Background(), de, names, art))
+
+	vrr, err := r.Dynamic.Resource(volumeRestoreRequestGVR).Namespace(testControllerNamespace).Get(context.Background(), volumeRestoreRequestName(names), metav1.GetOptions{})
+	require.NoError(t, err)
+
+	visited, hits := findKeyPaths(vrr.Object, staleAccessModesKey, "vrr")
+	t.Logf("VRR object keys inspected: %d", visited)
+	require.NotZero(t, visited, "key walk found nothing — the check would be vacuously green")
+	assert.Empty(t, hits, "the VolumeRestoreRequest must carry no accessModes key")
+
+	pvcSpec, found, err := unstructured.NestedMap(vrr.Object, "spec", "pvcTemplate", "spec")
+	require.NoError(t, err)
+	require.True(t, found)
+	specKeys := make([]string, 0, len(pvcSpec))
+	for key := range pvcSpec {
+		specKeys = append(specKeys, key)
+	}
+	// Exact set on purpose: a newly added pvcTemplate.spec field has to be declared here, which is the
+	// only way this test keeps catching a re-added accessModes among other churn.
+	assert.ElementsMatch(t, []string{"volumeMode", "storageClassName"}, specKeys)
+	fsType, _, _ := unstructured.NestedString(vrr.Object, "spec", "fsType")
+	assert.Equal(t, "ext4", fsType, "fsType stays a spec-root restore parameter, unaffected by the removal")
+}
+
+// TestGetExportPVCFromSnapshot_FormerRWXSourceExports covers the whole sf-side export path for a source
+// that was ReadWriteMany: resolve -> VRR -> the export PVC the provisioner binds out of band. Dropping
+// the access modes must not degrade this into a wait or an error. The export PVC is pre-seeded because
+// the patched external-provisioner (not this controller) creates it.
+func TestGetExportPVCFromSnapshot_FormerRWXSourceExports(t *testing.T) {
+	de := newSnapshotDataExport("snapshot.storage.k8s.io", "VolumeSnapshot", "leaf1")
+	names := common.NewNamesFromShort(dev1alpha1.KindSnapshotShort, "leaf1", de.Namespace, de.Name)
+	filesystem := corev1.PersistentVolumeFilesystem
+	exportPVC := &corev1.PersistentVolumeClaim{
+		ObjectMeta: metav1.ObjectMeta{Name: names.ExportPVCName, Namespace: testControllerNamespace},
+		Spec: corev1.PersistentVolumeClaimSpec{
+			VolumeMode: &filesystem,
+			// ReadWriteOnce: what effectiveAccessModes in the provisioner patch substitutes when the VRR
+			// template names no modes, regardless of the source volume having been ReadWriteMany.
+			AccessModes: []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce},
+		},
+		Status: corev1.PersistentVolumeClaimStatus{Phase: corev1.ClaimBound},
+	}
+
+	leaf := newSnapshotLeaf("content1")
+	content := withStaleAccessModes(
+		newSnapshotContent("content1", "test-ns", artifactKindVolumeSnapshotContent, "vsc1", "Filesystem"),
+		"ReadWriteMany",
+	)
+	r := newResolverReconciler(leaf, content)
+	r.Client = fake.NewClientBuilder().WithScheme(setupTestScheme()).WithObjects(exportPVC).Build()
+
+	got, err := r.getExportPVCFromSnapshot(context.Background(), de, names)
+	require.NoError(t, err, "a former ReadWriteMany source must still export")
+	require.NotNil(t, got)
+	assert.Equal(t, names.ExportPVCName, got.Name)
+
+	vrr, err := r.Dynamic.Resource(volumeRestoreRequestGVR).Namespace(testControllerNamespace).Get(context.Background(), volumeRestoreRequestName(names), metav1.GetOptions{})
+	require.NoError(t, err)
+	_, hits := findKeyPaths(vrr.Object, staleAccessModesKey, "vrr")
+	assert.Empty(t, hits, "the VolumeRestoreRequest must carry no accessModes key")
+}
+
+// TestProvisionerPatchStillDefaultsAccessModes pins the assumption this module now relies on: the
+// external-provisioner patch, not the export resolver, supplies ReadWriteOnce when a VRR names no
+// access modes. Losing that default would silently break every snapshot export, so the dependency is
+// asserted here instead of being left as a comment. Limit: this is a text check on the patch — it
+// proves the default is written, not that the patched binary runs it (that belongs to e2e).
+func TestProvisionerPatchStillDefaultsAccessModes(t *testing.T) {
+	const patchPath = "../../../../csi-external-provisioner/patches/v6.2.0/002-vrr-executor.patch"
+
+	raw, err := os.ReadFile(patchPath)
+	require.NoError(t, err, "the provisioner patch must stay readable: the export PVC has no access modes of its own and depends on its default")
+	patch := string(raw)
+
+	// The default lives in effectiveAccessModes; the two call sites are the CSI volume capability and the
+	// PV/PVC the restore creates.
+	needles := []string{
+		"func effectiveAccessModes(",
+		"return []v1.PersistentVolumeAccessMode{v1.ReadWriteOnce}",
+		"accessmodes.ToCSIAccessMode(effectiveAccessModes(vrr)",
+		"effectiveAccessModes(vrr))",
+	}
+	for _, needle := range needles {
+		assert.Contains(t, patch, needle,
+			"provisioner patch no longer defaults VRR access modes to ReadWriteOnce; the export PVC template stopped setting them on purpose")
+	}
+	t.Logf("provisioner patch fragments inspected: %d (patch %d bytes)", len(needles), len(patch))
 }
 
 func TestDeleteVolumeRestoreRequest_Idempotent(t *testing.T) {

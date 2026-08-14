@@ -272,6 +272,37 @@ func TestRecoverUserPVC_AlreadyRestoredIsIdempotent(t *testing.T) {
 	assert.NotContains(t, gotPVC.Finalizers, dev1alpha1.StorageManagerFinalizerName)
 }
 
+// TestRecoverUserPVC_RemovesBothDataExportRequestAnnotations guards the removal end of the
+// data-export-request contract: cleanup must be symmetric to the write, which puts BOTH the current and
+// the legacy spelling on the user PVC. A key left behind is not cosmetic — released virtualization
+// versions read the legacy spelling and would keep the disk marked as used for data export after the
+// export is long gone. The keys are asserted BY CONSTANT NAME (not by iterating
+// dataExportRequestAnnotationKeys, and not by the size of the map), so that dropping the legacy key from
+// that list cannot make this test pass vacuously.
+//
+// recoverUserPVC is the entry point on purpose: it is the funnel every cleanup path goes through
+// (clearDataExportProviding on DataExport deletion and on TTL expiry, plus the orphan sweep
+// removeOrphanResources -> recoverOrphanedUserPVC), so one assertion covers all three.
+func TestRecoverUserPVC_RemovesBothDataExportRequestAnnotations(t *testing.T) {
+	reconciler, fakeClient := newRecoverUserPVCFixture(t, map[string]string{
+		DataExportInProgressKey:              "true",
+		DataExportRequestAnnotationKey:       "true",
+		LegacyDataExportRequestAnnotationKey: "true",
+	})
+
+	require.NoError(t, reconciler.recoverUserPVC(context.Background(), dataExportNamespace, testUserPVCName, dataExportName, nil))
+
+	got := &corev1.PersistentVolumeClaim{}
+	require.NoError(t, fakeClient.Get(context.Background(), types.NamespacedName{Namespace: dataExportNamespace, Name: testUserPVCName}, got))
+
+	assert.NotContains(t, got.Annotations, DataExportRequestAnnotationKey,
+		"current key %s must be removed on cleanup", DataExportRequestAnnotationKey)
+	assert.NotContains(t, got.Annotations, LegacyDataExportRequestAnnotationKey,
+		"legacy key %s must be removed on cleanup too, otherwise dual-write leaks a stale marker onto the user PVC", LegacyDataExportRequestAnnotationKey)
+	assert.NotContains(t, got.Annotations, DataExportInProgressKey)
+	assert.NotContains(t, got.Finalizers, dev1alpha1.StorageManagerFinalizerName)
+}
+
 // TestReconcilePodReadyResources_DetectsDeploymentDrift is the drift-repair guard: if the export server
 // Deployment is deleted mid-life, the controller must NOT degrade the object to a terminal phase — it flags
 // Ready=False/Pending ("re-provisioning") and returns nil so the next reconcile rebuilds the server (the

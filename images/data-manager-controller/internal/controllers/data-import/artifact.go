@@ -35,9 +35,10 @@ import (
 // VCR garbage collector deletes a completed VCR after GC_VCR_TTL (default 24h), cascading GC to the
 // artifact. So DataImport ALSO adds its own keeper (FollowObject -> DataImport) as a non-controller
 // additional owner
-// (object_keeper.go) to anchor the artifact to the import's lifetime until C5 adopts it under a durable
-// SnapshotContent owner. Independently, DataImport pins the reclaim policy to Retain so a deleted per-run
-// handle never reclaims the physical data before C5 adopts it.
+// (object_keeper.go) to anchor the artifact to the import's lifetime until the state-snapshotter import
+// orchestrator adopts it under a durable SnapshotContent owner. Independently, DataImport pins the
+// reclaim policy to Retain so a deleted per-run handle never reclaims the physical data before that
+// adoption happens.
 
 // pinArtifactRetain pins the produced artifact's reclaim policy to Retain so it survives deletion of any
 // per-run handle: VolumeSnapshotContent.spec.deletionPolicy=Retain or

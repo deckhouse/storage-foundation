@@ -68,6 +68,20 @@ type DataExportImportData struct {
 	// ArtifactRef references the durable cluster-scoped data artifact (VolumeSnapshotContent or PersistentVolume).
 	// +optional
 	ArtifactRef *DataArtifactReference `json:"artifactRef,omitempty"`
+
+	// FsType is the filesystem the imported bytes were ACTUALLY written onto, observed on the scratch
+	// volume's PersistentVolume (spec.csi.fsType) while that volume still existed. The scratch volume is
+	// destroyed immediately after capture and the produced artifact records no filesystem type, so this
+	// field is the only surviving record of it: the state-snapshotter import orchestrator copies it into
+	// SnapshotContent.status.data.fsType, from where a later restore hands it to the provisioner.
+	//
+	// It is observed, never derived from the StorageClass parameters: the class can be edited or recreated
+	// after the volume was provisioned, so it is not evidence of what this particular volume carries.
+	//
+	// Empty means "not known", never "default": a Block import has no filesystem at all, and a driver that
+	// recorded no fsType on the PV leaves nothing to publish. Consumers must not substitute a guess.
+	// +optional
+	FsType string `json:"fsType,omitempty"`
 }
 
 // DataArtifactReference references a cluster-scoped durable data artifact (VolumeSnapshotContent or
