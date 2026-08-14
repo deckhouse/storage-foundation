@@ -14,4 +14,4 @@ Changes:
 - Added CI check hack/check-consumer-crds.sh, which protects against byte-to-byte
   discrepancies between the CRD of this module and their copies in other modules -
   snapshot CRDs transmitted by the snapshot-controller module, and the vendor CRD
-  VolumePopulators, which is installed by both storage-foundation and storage-volume-data-manager.
+  VolumePopulators, which is installed by both storage-foundation and storage-volume-data-manager
