@@ -14,4 +14,4 @@
   - Добавлена CI-проверка hack/check-consumer-crds.sh, которая защищает от расхождения байт-в-байт
     между CRD этого модуля и их копиями в других модулях — снимочные CRD, передаваемые модулем
     snapshot-controller, и вендоренная CRD VolumePopulators, которую устанавливают и
-    storage-foundation, и storage-volume-data-manager.
+    storage-foundation, и storage-volume-data-manager
