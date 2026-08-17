@@ -54,11 +54,12 @@ shell:
     - export GOOS=linux GOARCH=amd64 CGO_ENABLED=0
     - |
       {{- include "image-build.build" (set $ "BuildCommand" (printf `go build -ldflags="-s -w" -o /%s ./cmd` $.ImageName)) | nindent 6 }}
-    - chmod +x /{{ $.ImageName }}
+    - chmod 0755 /{{ $.ImageName }}
 
 ---
 image: {{ .ModuleNamePrefix }}{{ .ImageName }}
 from: {{ index $.Images "builder/distroless" }}
+fromCacheVersion: "1"
 
 import:
   - image: {{ .ModuleNamePrefix }}{{ .ImageName }}-golang-artifact

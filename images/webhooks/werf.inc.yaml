@@ -45,7 +45,7 @@ shell:
     - export GOOS=linux GOARCH=amd64 CGO_ENABLED=0
     - |
       {{- include "image-build.build" (set $ "BuildCommand" (printf `go build -ldflags="-s -w" -tags %s -o /%s` $.MODULE_EDITION $.ImageName)) | nindent 6 }}
-    - chmod +x /{{ $.ImageName }}
+    - chmod 0755 /{{ $.ImageName }}
 
 ---
 image: {{ .ModuleNamePrefix }}{{ .ImageName }}

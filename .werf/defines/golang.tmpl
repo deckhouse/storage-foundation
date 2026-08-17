@@ -41,8 +41,11 @@
   GO_PRIVATE_TOKEN="$(cat /run/secrets/GO_PRIVATE_TOKEN)"
   export GOPRIVATE=github.com
   if [ -n "${GO_PRIVATE_TOKEN}" ]; then
-    umask 077
-    printf 'machine github.com login gitlab-ci-token password %s\n' "${GO_PRIVATE_TOKEN}" > "${HOME}/.netrc"
+    # The tightened umask is confined to a subshell. werf runs every line of a
+    # stage in one shell, so a umask left set here reaches the `go build` that
+    # follows and yields a 0700 binary -- unreadable to the non-root user the
+    # module's containers run as, which fails at exec time, not at build time.
+    ( umask 077; printf 'machine github.com login gitlab-ci-token password %s\n' "${GO_PRIVATE_TOKEN}" > "${HOME}/.netrc" )
     git config --global url."https://gitlab-ci-token:${GO_PRIVATE_TOKEN}@github.com/".insteadOf "https://github.com/"
   else
     echo "GO_PRIVATE_TOKEN is empty: modules under ${GOPRIVATE} cannot be fetched"
