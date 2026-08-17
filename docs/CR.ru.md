@@ -10,11 +10,9 @@ controller-only policy. Оба ресурса namespaced и находятся �
 `storage-foundation.deckhouse.io/v1alpha1`; namespace запроса совпадает с namespace
 исходного/целевого PVC.
 
-Эта страница резюмирует текущие generated CRD и поведение controller/sidecar. ADR доменного SDK
-state-snapshotter задаёт контракт использования этих ресурсов доменными контроллерами, а
-unified-snapshots overview владеет core-маппингом `Ready` reasons. Исходный ADR
-`2025-11-30-volume-capture-and-restore-request.md` — историческое обоснование, а не текущая
-implementable-схема.
+Эта страница резюмирует текущие generated CRD и поведение controller/sidecar. Схема истины —
+generated CRD. Контракт использования этих ресурсов доменными контроллерами задаёт domain snapshot SDK
+state-snapshotter, он же владеет core-маппингом `Ready` reasons.
 
 ## VolumeCaptureRequest
 
@@ -179,13 +177,12 @@ controllers. Ошибка `status.error` у VSC-источника VRR — др�
 | `GC_VCR_TTL` / `GC_VRR_TTL` | `24h` |
 | `GC_VCR_SCHEDULE` / `GC_VRR_SCHEDULE` | `0 * * * *` |
 
-Per-object TTL-аннотаций и module settings для этих значений нет. Подробности ownership артефактов
-и adoption DataImport — в `images/controller/docs/TTL_MECHANISM.md`. На успешном пути
+Per-object TTL-аннотаций и module settings для этих значений нет. На успешном пути
 state-snapshotter может удалить VCR раньше, после durable handoff; generic GC чистит терминальные
 остатки. Request без терминального `Ready` и `completionTimestamp`, включая malformed VRR выше,
 collector не удаляет.
 Текущий VRR keeper не связан с созданным executor'ом restore target PVC, поэтому GC запроса не
-удаляет этот PVC; implementation-specific детали ownership приведены в linked TTL page.
+удаляет этот PVC.
 
 ## Валидация и RBAC
 

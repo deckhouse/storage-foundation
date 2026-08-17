@@ -25,23 +25,10 @@ const (
 )
 
 const (
-	// APIGroup is the unified DataExport/DataImport API group served by storage-foundation
-	// (shared with the storage-volume-data-manager module since its v0.2.0).
+	// APIGroup is the DataExport/DataImport API group served by storage-foundation. This module
+	// owns only the resources in this group: DataExport/DataImport served by another module under
+	// a different API group belong to that module's controller and are never touched from here.
 	APIGroup = "storage-foundation.deckhouse.io"
-	// LegacyAPIGroup is the pre-unification API group. The 025-migrate-legacy-crds hook moves
-	// live DataExport/DataImport resources from it to APIGroup and deletes the legacy CRDs.
-	LegacyAPIGroup = "storage.deckhouse.io"
-
-	// LegacyStorageManagerFinalizerName is the pre-unification finalizer the old controller put
-	// on PVCs involved in an export/import. The unified controller only manages resources under
-	// APIGroup, so the migration hook strips the legacy finalizer (otherwise such PVCs would hang
-	// in Terminating forever once deleted).
-	LegacyStorageManagerFinalizerName = LegacyAPIGroup + "/storage-manager-controller"
-
-	// LegacyDataExportCRDName and LegacyDataImportCRDName are the names of the pre-unification
-	// CRDs the migration hook deletes after moving live resources to APIGroup.
-	LegacyDataExportCRDName = "dataexports." + LegacyAPIGroup
-	LegacyDataImportCRDName = "dataimports." + LegacyAPIGroup
 )
 
 const (

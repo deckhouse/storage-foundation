@@ -16,9 +16,9 @@ limitations under the License.
 
 // Package v1 defines a Deckhouse-owned client-side Go type for the CSI snapshot.storage.k8s.io/v1
 // VolumeSnapshot, EXTENDED with the state-snapshotter domain-capture protocol status fields
-// (captureState/childrenSnapshotRefs/sourceRef/conditions — see design §11.1/§11.3).
+// (captureState/childrenSnapshotRefs/sourceRef/conditions).
 //
-// Rationale (design §11.3, wave8 Block 3c): the storage-foundation VolumeSnapshot domain reconciler needs
+// Rationale: the storage-foundation VolumeSnapshot domain reconciler needs
 // TYPED access to the protocol status fields the core writes/reads, but the CRD is the CSI VolumeSnapshot
 // (owned by the external-snapshotter fork). The fork's own client module tracks a different Kubernetes API
 // version line, so importing it into images/controller would force a version skew. Instead this package

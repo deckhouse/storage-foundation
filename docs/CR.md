@@ -9,11 +9,9 @@ is determined by cluster RBAC; admission currently does not enforce a controller
 are namespaced in `storage-foundation.deckhouse.io/v1alpha1`; their namespace is also the namespace
 of the source or target PVC.
 
-This page summarizes the current generated CRDs and controller/sidecar behavior. The
-state-snapshotter domain SDK ADR defines how domain controllers consume these resources, while the
-unified-snapshots overview owns the core `Ready` reason mapping. The original
-`2025-11-30-volume-capture-and-restore-request.md` ADR is historical rationale, not the current
-implementable schema.
+This page summarizes the current generated CRDs and controller/sidecar behavior. The generated CRDs
+are the schema of record. How a domain controller consumes these resources is defined by the
+state-snapshotter domain snapshot SDK, which also owns the core `Ready` reason mapping.
 
 ## VolumeCaptureRequest
 
@@ -177,13 +175,12 @@ Terminal VCR/VRR objects are deleted by cron-driven generic GC using
 | `GC_VCR_TTL` / `GC_VRR_TTL` | `24h` |
 | `GC_VCR_SCHEDULE` / `GC_VRR_SCHEDULE` | `0 * * * *` |
 
-There are no per-object TTL annotations and no module settings for these values. See
-`images/controller/docs/TTL_MECHANISM.md` for artifact ownership and DataImport adoption details.
+There are no per-object TTL annotations and no module settings for these values.
 On the successful state-snapshotter path, core may delete a VCR earlier after it has persisted the
 data handoff; generic GC is the cleanup path for terminal leftovers. A request without a terminal
 `Ready` condition and `completionTimestamp`, including the malformed VRR case above, is not collected.
 The current VRR keeper is not connected to the executor-created restore target PVC, so collecting the
-VRR does not delete that PVC; see the implementation-specific ownership details in the linked TTL page.
+VRR does not delete that PVC.
 
 ## Validation and RBAC
 

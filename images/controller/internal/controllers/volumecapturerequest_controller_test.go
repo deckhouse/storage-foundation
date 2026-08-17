@@ -372,7 +372,8 @@ var _ = Describe("VolumeCaptureRequest Controller", func() {
 				vsc := &snapshotv1.VolumeSnapshotContent{}
 				Expect(client.Get(ctx, types.NamespacedName{Name: csiVSCName}, vsc)).To(Succeed())
 				// The managed VSC must appear in the API already delete-protected: the marker is part of the
-				// CREATE payload (delete-protection-contract.md §6.2), never a post-create patch. We assert it
+				// CREATE payload, never a post-create patch — Create and a follow-up Patch have no guaranteed
+				// ordering, so a patch would leave a window in which the artifact is deletable. We assert it
 				// on the very first read, before any status/ownerRef workaround touches the object.
 				Expect(ssstoragev1alpha1.IsDeleteProtected(vsc)).To(BeTrue(),
 					"created managed VSC must carry %s=%s in the CREATE payload",

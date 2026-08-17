@@ -141,7 +141,7 @@ func buildVolumeCaptureRequest(name string, di *dev1alpha1.DataImport, scratchPV
 		},
 		"spec": map[string]interface{}{
 			"mode": mode,
-			// Single-target VCR (wave1): spec.target is a single object, not a spec.targets[] list. The
+			// Single-target VCR: spec.target is a single object, not a spec.targets[] list. The
 			// CRD prunes any unknown spec.targets and the mode=Snapshot CEL rule requires spec.target, so
 			// emitting the legacy list shape produces a target-less VCR that never captures. Namespace is
 			// omitted on purpose: the captured PVC always lives in the VCR's own namespace.
@@ -217,9 +217,10 @@ func vcrReadyCondition(vcr *unstructured.Unstructured) (status, reason string, o
 }
 
 // volumeCaptureArtifact extracts the durable artifact reference from the VolumeCaptureRequest's single
-// status.dataRef. wave1 collapsed the VCR to one target per request (singular status.dataRef), so there
-// is no list to match by targetUID. It validates the artifact kind matches what the chosen mode must
-// produce and carries the artifact uid through into DataArtifactReference.
+// status.data object. The VCR carries exactly one target per request (hence status.data is a single
+// object and not a list), so there is no list to match by targetUID. It validates the artifact kind
+// matches what the chosen mode must produce and carries the artifact uid through into
+// DataArtifactReference.
 func volumeCaptureArtifact(vcr *unstructured.Unstructured, expectedKind string) (*dev1alpha1.DataArtifactReference, error) {
 	dataRef, found, err := unstructured.NestedMap(vcr.Object, "status", "data")
 	if err != nil || !found || len(dataRef) == 0 {

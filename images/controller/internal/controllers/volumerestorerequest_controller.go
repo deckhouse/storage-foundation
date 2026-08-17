@@ -53,7 +53,7 @@ const (
 //  3. Observes result (target PVC created by external-provisioner and Bound)
 //  4. Finalizes VRR status
 //
-// IMPORTANT ARCHITECTURAL DECISIONS (per ADR):
+// IMPORTANT ARCHITECTURAL DECISIONS:
 // - VolumeSnapshot objects MUST NOT be created for restore operations
 // - external-provisioner (patched) handles restore directly:
 //   - Watches VolumeRestoreRequest
@@ -226,7 +226,7 @@ func (r *VolumeRestoreRequestController) ensureObjectKeeper(
 
 // processVolumeSnapshotContentRestore handles restore from VolumeSnapshotContent
 //
-// According to ADR, VRR is a service-request, not an orchestrator.
+// VRR is a service-request, not an orchestrator.
 // VRR controller:
 //  1. Validates that source VSC exists and is ReadyToUse
 //  2. Creates ObjectKeeper (ownership anchor)
@@ -318,7 +318,7 @@ func (r *VolumeRestoreRequestController) processVolumeSnapshotContentRestore(
 
 // processPersistentVolumeRestore handles restore from PersistentVolume
 //
-// According to ADR, VRR is a service-request, not an orchestrator.
+// VRR is a service-request, not an orchestrator.
 // VRR controller:
 //  1. Validates that source PV exists
 //  2. Creates ObjectKeeper (ownership anchor)

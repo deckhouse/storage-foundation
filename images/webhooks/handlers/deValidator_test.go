@@ -40,7 +40,7 @@ func makeAdmissionReview(op model.AdmissionReviewOp) *model.AdmissionReview {
 	}
 }
 
-// makeDataExport builds a DataExport with the specified GroupKind targetRef (C6).
+// makeDataExport builds a DataExport with the specified GroupKind targetRef.
 func makeDataExport(group, kind, name string) *dev1alpha1.DataExport {
 	return &dev1alpha1.DataExport{
 		ObjectMeta: metav1.ObjectMeta{

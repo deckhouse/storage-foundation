@@ -5,6 +5,50 @@ Applied to `kubernetes-csi/external-snapshotter` v8.5.0 in glob order —
 was generated on top of it and overlaps in `pkg/common-controller/snapshot_controller.go`
 (the historical build order was fork-branch content first, then the numbered patches).
 
+## Verifying an edit locally
+
+Editing a patch is verifiable without a build: the whole chain applies to a throwaway
+copy of the upstream tag in about a minute. Take the version from `oss.yaml` (entry
+`id: snapshot-controller`); the upstream repository is public
+(<https://github.com/kubernetes-csi/external-snapshotter>), so a fresh shallow clone of the
+tag is the simplest source. If you reuse an existing local checkout instead, export the tag
+into a temp dir with `git archive` (then `git init` there) — never `git worktree`, and never
+switch branches in that checkout, because work in progress may be sitting in it. Then replay
+the chain the way `werf.inc.yaml` does (cwd = upstream root, plain `git apply`, glob order),
+checking each patch against the state the previous ones produced:
+
+```bash
+tmp=$(mktemp -d)
+git clone -q --depth 1 --branch v8.5.0 https://github.com/kubernetes-csi/external-snapshotter.git "$tmp"
+cd "$tmp"
+for p in <this-dir>/*.patch; do
+  git apply --check "$p" && git apply "$p" && echo "ok $p" || { echo "FAILED $p"; break; }
+done
+```
+
+After editing the body of a patch, two kinds of metadata go stale and must be recomputed:
+the hunk headers (`@@ -a,b +c,d @@` counts, plus the new-side start of every later hunk in
+the same file) and the `index <pre>..<post>` blob hashes (`git hash-object` on the produced
+file; the pre-image hash is a free check that the computation is right). Recounting headers
+by hand catches most mistakes but not all — for them `git apply --check` is the ground
+truth.
+
+The recomputed post-image hash has no automatic gate. Nothing in the apply path reads it: a
+falsified one passes both `git apply --check` and `git apply --3way --check` with exit 0 and
+identical output. It still matters — it is the half of the line an edit changes — so confirm
+it the only way that works, by comparing `git hash-object` on the produced file against what
+the line records. Run `git apply --3way --check` anyway, but for what it does validate: it
+needs the recorded *pre*-image blob to exist, so it confirms the pre-image hash and that the
+tree is the one the patch was generated against. Apply the preceding patches and `git add -A`
+first so those blobs are in the temp repo. Expect `repository lacks the necessary blob` and a
+fallback to direct application for the `pkg/common-controller/` files, whose recorded
+pre-images predate this tree — that is expected and the command still succeeds.
+
+To type-check the result, run `go build -mod=vendor ./...` on the tag plus
+`000-vsc-only-mode.patch` and `003-volumesnapshot-dataimport-fork.patch` only. The CVE
+patches bump `go.mod` without re-vendoring (the build re-runs `go mod vendor` afterwards),
+so with them applied `-mod=vendor` refuses to run.
+
 ## 000-vsc-only-mode.patch
 
 Deckhouse fork: VSC-only snapshot content mode (`pkg/vscmode` + sidecar/common
@@ -49,7 +93,7 @@ applying on top of that pair (see the ordering note above).
   state-snapshotter `SnapshotContent`, alongside legacy
   `boundVolumeSnapshotContentName`) plus `status.data` — a self-contained data
   binding (`sourceRef` + `artifactRef` + volume metadata: `volumeMode` / `fsType` /
-  `accessModes` / `storageClassName` / `size`) whose JSON wire shape is
+  `storageClassName` / `size`) whose JSON wire shape is
   byte-identical to the state-snapshotter `SnapshotContent.status.data` and to
   the domain data leaves, so d8 resolves the captured-volume descriptor from the
   namespaced `VolumeSnapshot` alone (no cluster-scoped `SnapshotContent` read).

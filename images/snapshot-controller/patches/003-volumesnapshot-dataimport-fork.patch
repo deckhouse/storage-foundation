@@ -1,5 +1,5 @@
 diff --git a/client/apis/volumesnapshot/v1/types.go b/client/apis/volumesnapshot/v1/types.go
-index 36f60dc95..f45a6e148 100644
+index 36f60dc95..e2592e6a5 100644
 --- a/client/apis/volumesnapshot/v1/types.go
 +++ b/client/apis/volumesnapshot/v1/types.go
 @@ -93,16 +93,34 @@ type VolumeSnapshotSpec struct {
@@ -39,7 +39,7 @@ index 36f60dc95..f45a6e148 100644
  type VolumeSnapshotSource struct {
  	// persistentVolumeClaimName specifies the name of the PersistentVolumeClaim
  	// object representing the volume from which a snapshot should be created.
-@@ -124,6 +142,55 @@ type VolumeSnapshotSource struct {
+@@ -124,6 +142,52 @@ type VolumeSnapshotSource struct {
  	VolumeSnapshotContentName *string `json:"volumeSnapshotContentName,omitempty" protobuf:"bytes,2,opt,name=volumeSnapshotContentName"`
  }
  
@@ -59,9 +59,6 @@ index 36f60dc95..f45a6e148 100644
 +	// fsType records the source filesystem type (Filesystem volumes only).
 +	// +optional
 +	FsType string `json:"fsType,omitempty" protobuf:"bytes,4,opt,name=fsType"`
-+	// accessModes records the source PVC access modes (e.g. ReadWriteOnce).
-+	// +optional
-+	AccessModes []string `json:"accessModes,omitempty" protobuf:"bytes,5,rep,name=accessModes"`
 +	// storageClassName records the source StorageClass of the captured volume.
 +	// +optional
 +	StorageClassName string `json:"storageClassName,omitempty" protobuf:"bytes,6,opt,name=storageClassName"`
@@ -95,7 +92,7 @@ index 36f60dc95..f45a6e148 100644
  // VolumeSnapshotStatus is the status of the VolumeSnapshot
  // Note that CreationTime, RestoreSize, ReadyToUse, and Error are in both
  // VolumeSnapshotStatus and VolumeSnapshotContentStatus. Fields in VolumeSnapshotStatus
-@@ -194,6 +261,116 @@ type VolumeSnapshotStatus struct {
+@@ -194,6 +258,116 @@ type VolumeSnapshotStatus struct {
  	// VolumeSnapshot is a part of.
  	// +optional
  	VolumeGroupSnapshotName *string `json:"volumeGroupSnapshotName,omitempty" protobuf:"bytes,6,opt,name=volumeGroupSnapshotName"`
@@ -213,7 +210,7 @@ index 36f60dc95..f45a6e148 100644
  
  // +genclient
 diff --git a/client/apis/volumesnapshot/v1/zz_generated.deepcopy.go b/client/apis/volumesnapshot/v1/zz_generated.deepcopy.go
-index a590aef06..a2dca7f2d 100644
+index a590aef06..8c998541a 100644
 --- a/client/apis/volumesnapshot/v1/zz_generated.deepcopy.go
 +++ b/client/apis/volumesnapshot/v1/zz_generated.deepcopy.go
 @@ -23,6 +23,7 @@ package v1
@@ -224,7 +221,7 @@ index a590aef06..a2dca7f2d 100644
  	runtime "k8s.io/apimachinery/pkg/runtime"
  )
  
-@@ -427,9 +428,186 @@ func (in *VolumeSnapshotStatus) DeepCopyInto(out *VolumeSnapshotStatus) {
+@@ -427,9 +428,181 @@ func (in *VolumeSnapshotStatus) DeepCopyInto(out *VolumeSnapshotStatus) {
  		*out = new(string)
  		**out = **in
  	}
@@ -391,11 +388,6 @@ index a590aef06..a2dca7f2d 100644
 +// DeepCopyInto is a deepcopy function, copying the receiver, writing into out. in must be non-nil.
 +func (in *VolumeSnapshotDataBinding) DeepCopyInto(out *VolumeSnapshotDataBinding) {
 +	*out = *in
-+	if in.AccessModes != nil {
-+		in, out := &in.AccessModes, &out.AccessModes
-+		*out = make([]string, len(*in))
-+		copy(*out, *in)
-+	}
 +}
 +
 +// DeepCopy is a deepcopy function, copying the receiver, creating a new VolumeSnapshotDataBinding.
@@ -491,7 +483,7 @@ index a489b9241..972446a8f 100644
  		// been add/update/sync
  		newSnapshot, err := ctrl.checkAndUpdateSnapshotClass(snapshot)
 diff --git a/vendor/github.com/kubernetes-csi/external-snapshotter/client/v8/apis/volumesnapshot/v1/types.go b/vendor/github.com/kubernetes-csi/external-snapshotter/client/v8/apis/volumesnapshot/v1/types.go
-index 36f60dc95..f45a6e148 100644
+index 36f60dc95..e2592e6a5 100644
 --- a/vendor/github.com/kubernetes-csi/external-snapshotter/client/v8/apis/volumesnapshot/v1/types.go
 +++ b/vendor/github.com/kubernetes-csi/external-snapshotter/client/v8/apis/volumesnapshot/v1/types.go
 @@ -93,16 +93,34 @@ type VolumeSnapshotSpec struct {
@@ -531,7 +523,7 @@ index 36f60dc95..f45a6e148 100644
  type VolumeSnapshotSource struct {
  	// persistentVolumeClaimName specifies the name of the PersistentVolumeClaim
  	// object representing the volume from which a snapshot should be created.
-@@ -124,6 +142,55 @@ type VolumeSnapshotSource struct {
+@@ -124,6 +142,52 @@ type VolumeSnapshotSource struct {
  	VolumeSnapshotContentName *string `json:"volumeSnapshotContentName,omitempty" protobuf:"bytes,2,opt,name=volumeSnapshotContentName"`
  }
  
@@ -551,9 +543,6 @@ index 36f60dc95..f45a6e148 100644
 +	// fsType records the source filesystem type (Filesystem volumes only).
 +	// +optional
 +	FsType string `json:"fsType,omitempty" protobuf:"bytes,4,opt,name=fsType"`
-+	// accessModes records the source PVC access modes (e.g. ReadWriteOnce).
-+	// +optional
-+	AccessModes []string `json:"accessModes,omitempty" protobuf:"bytes,5,rep,name=accessModes"`
 +	// storageClassName records the source StorageClass of the captured volume.
 +	// +optional
 +	StorageClassName string `json:"storageClassName,omitempty" protobuf:"bytes,6,opt,name=storageClassName"`
@@ -587,7 +576,7 @@ index 36f60dc95..f45a6e148 100644
  // VolumeSnapshotStatus is the status of the VolumeSnapshot
  // Note that CreationTime, RestoreSize, ReadyToUse, and Error are in both
  // VolumeSnapshotStatus and VolumeSnapshotContentStatus. Fields in VolumeSnapshotStatus
-@@ -194,6 +261,116 @@ type VolumeSnapshotStatus struct {
+@@ -194,6 +258,116 @@ type VolumeSnapshotStatus struct {
  	// VolumeSnapshot is a part of.
  	// +optional
  	VolumeGroupSnapshotName *string `json:"volumeGroupSnapshotName,omitempty" protobuf:"bytes,6,opt,name=volumeGroupSnapshotName"`
@@ -705,7 +694,7 @@ index 36f60dc95..f45a6e148 100644
  
  // +genclient
 diff --git a/vendor/github.com/kubernetes-csi/external-snapshotter/client/v8/apis/volumesnapshot/v1/zz_generated.deepcopy.go b/vendor/github.com/kubernetes-csi/external-snapshotter/client/v8/apis/volumesnapshot/v1/zz_generated.deepcopy.go
-index a590aef06..a2dca7f2d 100644
+index a590aef06..8c998541a 100644
 --- a/vendor/github.com/kubernetes-csi/external-snapshotter/client/v8/apis/volumesnapshot/v1/zz_generated.deepcopy.go
 +++ b/vendor/github.com/kubernetes-csi/external-snapshotter/client/v8/apis/volumesnapshot/v1/zz_generated.deepcopy.go
 @@ -23,6 +23,7 @@ package v1
@@ -716,7 +705,7 @@ index a590aef06..a2dca7f2d 100644
  	runtime "k8s.io/apimachinery/pkg/runtime"
  )
  
-@@ -427,9 +428,186 @@ func (in *VolumeSnapshotStatus) DeepCopyInto(out *VolumeSnapshotStatus) {
+@@ -427,9 +428,181 @@ func (in *VolumeSnapshotStatus) DeepCopyInto(out *VolumeSnapshotStatus) {
  		*out = new(string)
  		**out = **in
  	}
@@ -883,11 +872,6 @@ index a590aef06..a2dca7f2d 100644
 +// DeepCopyInto is a deepcopy function, copying the receiver, writing into out. in must be non-nil.
 +func (in *VolumeSnapshotDataBinding) DeepCopyInto(out *VolumeSnapshotDataBinding) {
 +	*out = *in
-+	if in.AccessModes != nil {
-+		in, out := &in.AccessModes, &out.AccessModes
-+		*out = make([]string, len(*in))
-+		copy(*out, *in)
-+	}
 +}
 +
 +// DeepCopy is a deepcopy function, copying the receiver, creating a new VolumeSnapshotDataBinding.

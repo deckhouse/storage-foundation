@@ -92,7 +92,7 @@ rules:
       - watch
       - update
   # DataImport produces durable data artifacts by creating VolumeCaptureRequests (storage-foundation);
-  # DataExport (C6) restores a snapshot's durable artifact into the export PVC via VolumeRestoreRequest.
+  # DataExport restores a snapshot's durable artifact into the export PVC via VolumeRestoreRequest.
   - apiGroups:
       - storage-foundation.deckhouse.io
     resources:
@@ -105,7 +105,7 @@ rules:
       - get
       - watch
       - update
-  # DataExport (C6) resolves the snapshot leaf's bound SnapshotContent (cluster-scoped) to read the
+  # DataExport resolves the snapshot leaf's bound SnapshotContent (cluster-scoped) to read the
   # trusted data artifact reference (status.dataRef) for the VolumeRestoreRequest source. Read-only.
   # SnapshotContent is owned by state-snapshotter, hence its own API group here.
   - apiGroups:

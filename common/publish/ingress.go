@@ -41,12 +41,21 @@ const (
 	ConsoleSubdomain = "console"
 
 	// Nginx Ingress annotations
-	AnnotationBackendProtocol  = "nginx.ingress.kubernetes.io/backend-protocol"
-	AnnotationEnableCORS       = "nginx.ingress.kubernetes.io/enable-cors"
-	AnnotationCORSAllowMethods = "nginx.ingress.kubernetes.io/cors-allow-methods"
-	AnnotationCORSAllowOrigin  = "nginx.ingress.kubernetes.io/cors-allow-origin"
-	AnnotationProxyBodySize    = "nginx.ingress.kubernetes.io/proxy-body-size"
+	AnnotationBackendProtocol   = "nginx.ingress.kubernetes.io/backend-protocol"
+	AnnotationEnableCORS        = "nginx.ingress.kubernetes.io/enable-cors"
+	AnnotationCORSAllowMethods  = "nginx.ingress.kubernetes.io/cors-allow-methods"
+	AnnotationCORSAllowOrigin   = "nginx.ingress.kubernetes.io/cors-allow-origin"
+	AnnotationCORSAllowHeaders  = "nginx.ingress.kubernetes.io/cors-allow-headers"
+	AnnotationCORSExposeHeaders = "nginx.ingress.kubernetes.io/cors-expose-headers"
+	AnnotationProxyBodySize     = "nginx.ingress.kubernetes.io/proxy-body-size"
 )
+
+// CORSStandardAllowHeaders is the baseline request-header list every cors-allow-headers value must
+// re-state. The annotation REPLACES the ingress-nginx default instead of extending it, so a value
+// built only from the protocol-specific X-* headers would silently revoke the ordinary ones and the
+// browser would fail the preflight (never sending the actual request) on Authorization alone. The
+// list mirrors the controller default, minus its X-CustomHeader placeholder which nothing sends.
+const CORSStandardAllowHeaders = "DNT,Keep-Alive,User-Agent,X-Requested-With,If-Modified-Since,Cache-Control,Content-Type,Range,Authorization"
 
 type IngressCfg struct {
 	IngressName      types.NamespacedName // Where to create/update the Ingress
@@ -55,6 +64,19 @@ type IngressCfg struct {
 	TargetSecretName string               // Secret name (in Ingress namespace) to create/update for TLS
 	Path             string               // Public URL path
 	CorsAllowMethods string               // CORS allowed methods (e.g., "GET, HEAD, OPTIONS")
+	// CorsAllowHeaders, when non-empty, sets nginx.ingress.kubernetes.io/cors-allow-headers, i.e. the
+	// Access-Control-Allow-Headers of the preflight response. Everything the browser client sends
+	// beyond the CORS-safelisted request headers must be enumerated here (see
+	// CORSStandardAllowHeaders for why the standard names have to be repeated), otherwise the browser
+	// never issues the real request and the exporter never sees it.
+	CorsAllowHeaders string
+	// CorsExposeHeaders, when non-empty, sets nginx.ingress.kubernetes.io/cors-expose-headers, i.e.
+	// Access-Control-Expose-Headers. Cross-origin JS can read only the CORS-safelisted response
+	// headers (Cache-Control, Content-Language, Content-Length, Content-Type, Expires,
+	// Last-Modified, Pragma) plus the ones listed here; an unexposed header is not merely hidden, it
+	// is indistinguishable from absent, so any header carrying protocol state (a resume offset, an
+	// attachment filename) must be listed.
+	CorsExposeHeaders string
 	// ProxyBodySize, when non-empty, sets nginx.ingress.kubernetes.io/proxy-body-size (nginx
 	// client_max_body_size) on the Ingress. Empty leaves the controller default (1m), which suits
 	// download-only ingresses (DataExport). Upload ingresses (DataImport PUT) must raise it, otherwise
@@ -183,11 +205,21 @@ func makeIngress(cfg IngressCfg, host, path string, pathType *networkingv1.PathT
 		AnnotationBackendProtocol: "HTTPS",
 	}
 
+	// CorsAllowMethods is what switches CORS on, so the header lists are nested here: without
+	// enable-cors nginx ignores them anyway, and emitting them alone would only suggest a CORS setup
+	// that does not exist. Each list stays opt-in — an empty annotation value makes nginx send an
+	// empty header rather than fall back to its default, which is strictly worse than not annotating.
 	if cfg.CorsAllowMethods != "" {
 		corsOrigin := fmt.Sprintf("https://%s.%s", ConsoleSubdomain, publicDomain)
 		annotations[AnnotationEnableCORS] = "true"
 		annotations[AnnotationCORSAllowMethods] = cfg.CorsAllowMethods
 		annotations[AnnotationCORSAllowOrigin] = corsOrigin
+		if cfg.CorsAllowHeaders != "" {
+			annotations[AnnotationCORSAllowHeaders] = cfg.CorsAllowHeaders
+		}
+		if cfg.CorsExposeHeaders != "" {
+			annotations[AnnotationCORSExposeHeaders] = cfg.CorsExposeHeaders
+		}
 	}
 
 	if cfg.ProxyBodySize != "" {

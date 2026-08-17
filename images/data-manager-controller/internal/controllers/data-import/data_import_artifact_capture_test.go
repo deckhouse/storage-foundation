@@ -47,6 +47,17 @@ const (
 	captureTestImportName = "imp-1"
 	captureTestImportUID  = types.UID("di-uid")
 	captureTestVSCName    = "vsc-1"
+	captureTestDriver     = "csi.example.com"
+
+	// captureTestScratchPVName is the PersistentVolume the scratch PVC is bound to.
+	captureTestScratchPVName = "pv-scratch-1"
+	// captureTestPVFSType is the filesystem type that PV records (spec.csi.fsType) — the only factual
+	// source. captureTestClassFSType is what the StorageClass parameters advertise instead. The two differ
+	// on purpose: status.data.fsType has to be OBSERVED on the volume, so a value derived from the class
+	// (which can be edited or recreated after provisioning) shows up as the wrong string in every test that
+	// asserts on the field, including the ones that expect it empty.
+	captureTestPVFSType    = "xfs"
+	captureTestClassFSType = "ext4"
 )
 
 // artifactCaptureScheme carries every typed API group ensureDataArtifact's real dependencies touch:
@@ -101,35 +112,70 @@ func readyObjectKeeper(name string, di *dev1alpha1.DataImport) *unstructured.Uns
 	return keeper
 }
 
-// newArtifactCaptureReconciler builds a DataImportReconciler wired for the PopulateData
-// snapshot-capture path: a snapshot-capable StorageClass, a bound+finalized scratch PVC, and a
-// Ready/Completed VolumeCaptureRequest + pre-existing ObjectKeeper served over the dynamic client — i.e.
-// everything ensureDataArtifact needs to run to completion in one call, without requeuing.
-//
-// Optional interceptorFuncs are layered onto the typed fake.Client so tests can inject failures (e.g. a
-// scratch-PVC Delete error) without duplicating the whole fixture.
+// artifactCaptureOptions shapes the scratch volume the capture fixture is built around — everything the
+// filesystem-type observation depends on. No field defaults: each test states the volume it means, so a
+// case like "Block" or "PV already gone" cannot be read as an omission.
+type artifactCaptureOptions struct {
+	// volumeMode of the scratch PVC. Always set: handleTargetStatus rejects a claim without one long before
+	// ensureDataArtifact is reached, so a nil mode here would describe a state the code never sees.
+	volumeMode corev1.PersistentVolumeMode
+	// pvFSType is what the scratch PersistentVolume records in spec.csi.fsType.
+	pvFSType string
+	// withoutPV binds the claim to captureTestScratchPVName while that PV does NOT exist — the lost race,
+	// where the volume is destroyed before its filesystem type could be observed.
+	withoutPV bool
+	// interceptors are layered onto the typed fake.Client so a test can inject failures or observe call
+	// order without duplicating the fixture.
+	interceptors []interceptor.Funcs
+}
+
+// newArtifactCaptureReconciler builds the ordinary PopulateData fixture: a bound Filesystem scratch volume
+// whose PV records captureTestPVFSType. Optional interceptorFuncs are layered onto the typed fake.Client so
+// tests can inject failures (e.g. a scratch-PVC Delete error) without duplicating the whole fixture.
 func newArtifactCaptureReconciler(t *testing.T, interceptorFuncs ...interceptor.Funcs) (*DataImportReconciler, *corev1.PersistentVolumeClaim) {
+	t.Helper()
+	return newArtifactCaptureReconcilerWith(t, artifactCaptureOptions{
+		volumeMode:   corev1.PersistentVolumeFilesystem,
+		pvFSType:     captureTestPVFSType,
+		interceptors: interceptorFuncs,
+	})
+}
+
+// newArtifactCaptureReconcilerWith builds a DataImportReconciler wired for the PopulateData
+// snapshot-capture path: a snapshot-capable StorageClass, a bound+finalized scratch PVC (with the
+// PersistentVolume it is bound to), and a Ready/Completed VolumeCaptureRequest + pre-existing ObjectKeeper
+// served over the dynamic client — i.e. everything ensureDataArtifact needs to run to completion in one
+// call, without requeuing.
+func newArtifactCaptureReconcilerWith(t *testing.T, opts artifactCaptureOptions) (*DataImportReconciler, *corev1.PersistentVolumeClaim) {
 	t.Helper()
 	scheme := artifactCaptureScheme(t)
 
 	di := &dev1alpha1.DataImport{
 		ObjectMeta: metav1.ObjectMeta{Name: captureTestImportName, Namespace: captureTestNamespace, UID: captureTestImportUID},
 		Spec: dev1alpha1.DataImportSpec{
-			Mode:          dev1alpha1.DataImportModePopulateData,
-			StorageParams: &dev1alpha1.StorageParamsSpec{StorageClassName: "fast", Size: "1Gi"},
+			Mode: dev1alpha1.DataImportModePopulateData,
+			StorageParams: &dev1alpha1.StorageParamsSpec{
+				StorageClassName: "fast",
+				Size:             "1Gi",
+				VolumeMode:       string(opts.volumeMode),
+			},
 		},
 	}
 
 	sc := &storagev1.StorageClass{
 		ObjectMeta:  metav1.ObjectMeta{Name: "fast", Annotations: map[string]string{storageClassVSCAnnotation: "fast-vsc"}},
-		Provisioner: "csi.example.com",
+		Provisioner: captureTestDriver,
+		// The class advertises captureTestClassFSType while the volume records captureTestPVFSType: a
+		// filesystem type predicted from the class instead of observed on the volume is visibly wrong.
+		Parameters: map[string]string{"csi.storage.k8s.io/fstype": captureTestClassFSType},
 	}
 	vsc := &snapv1.VolumeSnapshotClass{
 		ObjectMeta: metav1.ObjectMeta{Name: "fast-vsc"},
-		Driver:     "csi.example.com",
+		Driver:     captureTestDriver,
 	}
 
-	fs := corev1.PersistentVolumeFilesystem
+	volumeMode := opts.volumeMode
+	storageClassName := sc.Name
 	scratchPVC := &corev1.PersistentVolumeClaim{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:       captureTestImportName,
@@ -137,7 +183,14 @@ func newArtifactCaptureReconciler(t *testing.T, interceptorFuncs ...interceptor.
 			UID:        types.UID("pvc-uid"),
 			Finalizers: []string{dev1alpha1.StorageManagerFinalizerName},
 		},
-		Spec:   corev1.PersistentVolumeClaimSpec{VolumeMode: &fs},
+		// StorageClassName is set so the class — with its misleading fstype parameter — is reachable from the
+		// claim too: a filesystem type predicted from the class is then wrong in every test built on this
+		// fixture, including the ones that expect no value at all.
+		Spec: corev1.PersistentVolumeClaimSpec{
+			VolumeMode:       &volumeMode,
+			VolumeName:       captureTestScratchPVName,
+			StorageClassName: &storageClassName,
+		},
 		Status: corev1.PersistentVolumeClaimStatus{Phase: corev1.ClaimBound},
 	}
 
@@ -145,13 +198,33 @@ func newArtifactCaptureReconciler(t *testing.T, interceptorFuncs ...interceptor.
 		ObjectMeta: metav1.ObjectMeta{Name: captureTestVSCName},
 		Spec: snapv1.VolumeSnapshotContentSpec{
 			DeletionPolicy: snapv1.VolumeSnapshotContentDelete,
-			Driver:         "csi.example.com",
+			Driver:         captureTestDriver,
 			Source:         snapv1.VolumeSnapshotContentSource{VolumeHandle: new(string)},
 		},
 	}
 
-	builder := fake.NewClientBuilder().WithScheme(scheme).WithObjects(sc, vsc, scratchPVC, artifact)
-	for _, f := range interceptorFuncs {
+	objects := []client.Object{sc, vsc, scratchPVC, artifact}
+	if !opts.withoutPV {
+		objects = append(objects, &corev1.PersistentVolume{
+			ObjectMeta: metav1.ObjectMeta{Name: captureTestScratchPVName},
+			Spec: corev1.PersistentVolumeSpec{
+				VolumeMode: &volumeMode,
+				ClaimRef: &corev1.ObjectReference{
+					Kind: "PersistentVolumeClaim", Namespace: captureTestNamespace, Name: captureTestImportName,
+				},
+				PersistentVolumeSource: corev1.PersistentVolumeSource{
+					CSI: &corev1.CSIPersistentVolumeSource{
+						Driver:       captureTestDriver,
+						VolumeHandle: "vh-1",
+						FSType:       opts.pvFSType,
+					},
+				},
+			},
+		})
+	}
+
+	builder := fake.NewClientBuilder().WithScheme(scheme).WithObjects(objects...)
+	for _, f := range opts.interceptors {
 		builder = builder.WithInterceptorFuncs(f)
 	}
 	c := builder.Build()

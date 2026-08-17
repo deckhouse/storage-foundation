@@ -65,8 +65,8 @@ func TestIdleTimer_ExpiresWhenIdle(t *testing.T) {
 	wg.Wait()
 }
 
-// TestIdleTimer_DoesNotExpireWhileBytesFlow is the core of the plan's decision #1 (never interrupt an
-// active transfer): while bytes keep being written, each tick resets the last-request timestamp, so the
+// TestIdleTimer_DoesNotExpireWhileBytesFlow pins the core invariant — never interrupt an active
+// transfer: while bytes keep being written, each tick resets the last-request timestamp, so the
 // idle countdown never completes and ExpiredChan must NOT fire.
 func TestIdleTimer_DoesNotExpireWhileBytesFlow(t *testing.T) {
 	tm := fastIdleTimer(50*time.Millisecond, 10*time.Millisecond)

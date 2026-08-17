@@ -207,7 +207,7 @@ func createController(manager manager.Manager, cfgParams *config.Options) error 
 		return o.GetLabels()[dev1alpha1.LabelPVDataExporter] == "true"
 	})
 
-	// Both DataExport (snapshot generic resolver, C6) and DataImport talk to dependency-free CRDs
+	// Both DataExport (snapshot generic resolver) and DataImport talk to dependency-free CRDs
 	// (VolumeRestoreRequest/VolumeCaptureRequest/ObjectKeeper) and arbitrary snapshot leaves via a
 	// dynamic client + RESTMapper, instead of compiling in domain Go types.
 	dynamicClient, err := dynamic.NewForConfig(manager.GetConfig())

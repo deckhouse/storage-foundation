@@ -46,7 +46,9 @@ spec:
                     CA-сертификат в кодировке Base64 для TLS-подключения к экспортер-поду.
                 publicURL:
                   description: |
-                    Публичный URL для внешнего доступа (например, https://data-exporter.<public-domain>/<namespace>/<имя-DataExport>).
+                    Публичный URL для внешнего доступа (например, https://api.<public-domain>/<namespace>/<вид-таргета>/<имя-таргета>/).
+                    Здесь <вид-таргета> — краткий вид таргета экспорта: pvc, vd или snap (любой таргет на основе снимка),
+                    а <имя-таргета> — значение spec.targetRef.name.
                 accessTimestamp:
                   description: |
                     Временная метка последнего доступа к экспортированным данным.

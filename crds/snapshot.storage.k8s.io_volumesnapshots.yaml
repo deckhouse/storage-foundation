@@ -390,11 +390,6 @@ spec:
                   resolves the captured-volume descriptor from this namespaced VolumeSnapshot
                   alone. Written by the state-snapshotter common controller. Deckhouse extension.
                 properties:
-                  accessModes:
-                    description: Source PVC access modes (e.g. ReadWriteOnce).
-                    items:
-                      type: string
-                    type: array
                   artifactRef:
                     description: Durable data artifact (a VolumeSnapshotContent).
                     properties:

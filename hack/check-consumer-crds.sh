@@ -15,9 +15,20 @@
 # limitations under the License.
 
 # check-consumer-crds.sh — guard against CRD drift between storage-foundation (the source of truth)
-# and the deprecated consumer modules that ship byte-for-byte copies of its CRDs during the
-# handover: snapshot-controller (the three snapshot.storage.k8s.io CRDs) and
-# storage-volume-data-manager (dataexports/dataimports.storage-foundation.deckhouse.io).
+# and the other modules that ship byte-for-byte copies of the same CRDs. There are two such modules,
+# and they are checked for DIFFERENT reasons:
+#
+#   snapshot-controller is deprecated and hands its snapshot API over to storage-foundation. Until it
+#   is retired it keeps shipping copies of the three snapshot.storage.k8s.io CRDs (plus the Russian
+#   description mirrors), and those copies must stay identical to this repo's.
+#
+#   storage-volume-data-manager is NOT deprecated: it stays enabled alongside storage-foundation and
+#   keeps serving its OWN DataExport/DataImport under its own API group. Its data CRDs are therefore
+#   expected to differ from storage-foundation's, and comparing them would raise a false alarm by
+#   construction — so they are deliberately left out. What IS compared for it is the single CRD the
+#   two modules genuinely share: the vendored upstream volumepopulators.yaml, which both install
+#   cluster-wide under the same name. Should those copies drift apart, the two modules would
+#   overwrite that one CRD with different content on every converge, flip-flopping it in the cluster.
 #
 # For each consumer it takes the consumer's LATEST git tag and diffs that tag's crds/<file> against
 # storage-foundation's CURRENT crds/<file>. A mismatch means storage-foundation moved a CRD ahead
@@ -30,11 +41,12 @@
 #
 # In CI the two repos are shallow-clones created just before invoking this script; locally they are
 # the workspace checkouts. A consumer with no matching tag yet, or an unset *_REPO, is skipped with
-# a notice (the handover releases may not exist yet).
+# a notice (the snapshot handover release may not exist yet).
 #
-# NOTE: until a consumer has RELEASED its handover version (snapshot-controller v0.2.0, svdm v0.2.0)
-# its latest tag still carries the pre-handover CRDs and this check will report a mismatch by
-# design. Wire it as a BLOCKING gate only after those releases; before that, run it report-only.
+# NOTE: until snapshot-controller has RELEASED its handover version (v0.2.0) its latest tag still
+# carries the pre-handover CRDs, so its section reports a mismatch by design and a non-zero exit here
+# does not by itself mean something broke. Wire this as a BLOCKING gate only after that release;
+# before that, run it report-only.
 set -euo pipefail
 
 SF_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -93,15 +105,14 @@ snapshot_crds=(
   doc-ru-snapshot.storage.k8s.io_volumesnapshotcontents.yaml
   doc-ru-snapshot.storage.k8s.io_volumesnapshotclasses.yaml
 )
-data_crds=(
-  dataexports.yaml
-  dataimports.yaml
-  doc-ru-dataexports.yaml
-  doc-ru-dataimports.yaml
+# Only the CRD both modules genuinely share; their DataExport/DataImport CRDs live in different API
+# groups on purpose and are not comparable. Paths are relative to crds/.
+svdm_crds=(
+  vendor/volumepopulators.yaml
 )
 
 check_consumer "snapshot-controller" "${SNAPSHOT_CONTROLLER_REPO:-}" "${snapshot_crds[@]}" || rc=1
-check_consumer "storage-volume-data-manager" "${SVDM_REPO:-}" "${data_crds[@]}" || rc=1
+check_consumer "storage-volume-data-manager" "${SVDM_REPO:-}" "${svdm_crds[@]}" || rc=1
 
 if [[ ${rc} -ne 0 ]]; then
   echo
