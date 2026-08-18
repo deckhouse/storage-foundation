@@ -6,6 +6,7 @@ config:
       - MODULES_MODULE_TAG
       - WERF_DISABLE_META_TAGS
       - GOPROXY
+      - FOX_GO_TOKEN
       - SOURCE_REPO
       - MODULE_EDITION
       - SVACE_ENABLED
