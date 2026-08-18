@@ -27,20 +27,18 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/deckhouse/sds-common-lib/fs/mockfs"
 	"github.com/stretchr/testify/assert"
 	"go.uber.org/mock/gomock"
 
+	"github.com/deckhouse/sds-common-lib/fs/failer"
+	"github.com/deckhouse/sds-common-lib/fs/fake"
 	"github.com/deckhouse/storage-foundation/common"
 	"github.com/deckhouse/storage-foundation/images/data-exporter/internal/authorization"
 	"github.com/deckhouse/storage-foundation/images/data-exporter/internal/config"
 	"github.com/deckhouse/storage-foundation/images/data-exporter/internal/mock"
-	"github.com/deckhouse/storage-foundation/images/data-exporter/internal/test"
 )
 
-func createFsFuzzTest(t assert.TestingT) *mockfs.MockFS {
-	fsys, _ := mockfs.NewFsMock()
-
+func createFsFuzzTest(t assert.TestingT) *fake.OS {
 	// FS mock
 	// /
 	// ├── block
@@ -55,59 +53,39 @@ func createFsFuzzTest(t assert.TestingT) *mockfs.MockFS {
 	// ├── outer_dir
 	// │   └── file
 	// └── outer_file
-
-	const gid uint32 = 123
-	const uid uint32 = 456
-
-	fsys.DefaultSys.Gid = gid
-	fsys.DefaultSys.Uid = uid
-
-	var err error
-
-	block, err := fsys.CreateFile("/block", os.ModeDevice)
-	assert.NoError(t, err)
-	test.SetContent(block, "fake_device_content")
-
-	_, err = fsys.CreateFile("/sharedir", os.ModeDir)
-	assert.NoError(t, err)
-
-	_, err = fsys.CreateFile("/sharedir/dir", os.ModeDir)
+	fsys, err := fake.NewBuilder("/").
+		WithFileAtPath("block", os.ModeDevice, fake.RWContentFromString("fake_device_content")).
+		WithFileAtPath("sharedir", os.ModeDir).
+		WithFileAtPath("sharedir/dir", os.ModeDir).
+		WithFileAtPath("sharedir/dir/nested_dir", os.ModeDir|0o750).
+		WithFileAtPath("sharedir/dir/nested_file", os.FileMode(0o664), fake.RWContentFromString("nested_file")).
+		WithFileAtPath("sharedir/dir/nested_link", os.ModeSymlink|0o664, fake.LinkReader{Target: "../file"}).
+		WithFileAtPath("sharedir/dir_link", os.ModeSymlink, fake.LinkReader{Target: "/outer_dir"}).
+		WithFileAtPath("sharedir/file", os.FileMode(0o664), fake.RWContentFromString("file")).
+		WithFileAtPath("sharedir/file_link", os.ModeSymlink, fake.LinkReader{Target: "/foo/bar"}).
+		WithFileAtPath("outer_dir", os.ModeDir).
+		WithFileAtPath("outer_dir/file", os.FileMode(0o664)).
+		WithFileAtPath("outer_file", os.FileMode(0o664)).
+		Build()
 	assert.NoError(t, err)
 
-	_, err = fsys.CreateFile("/sharedir/dir/nested_dir", os.ModeDir|0o750)
-	assert.NoError(t, err)
-
-	nestedFile, err := fsys.CreateFile("/sharedir/dir/nested_file", 0o664)
-	assert.NoError(t, err)
-	test.SetContent(nestedFile, "nested_file")
-
-	nestedLink, err := fsys.CreateFile("/sharedir/dir/nested_link", os.ModeSymlink|0o664)
-	assert.NoError(t, err)
-	nestedLink.LinkSource = "../file"
-
-	dirLink, err := fsys.CreateFile("/sharedir/dir_link", os.ModeSymlink)
-	assert.NoError(t, err)
-	dirLink.LinkSource = "/outer_dir"
-
-	file, err := fsys.CreateFile("/sharedir/file", 0o664)
-	assert.NoError(t, err)
-	test.SetContent(file, "file")
-
-	fileLink, err := fsys.CreateFile("/sharedir/file_link", os.ModeSymlink)
-	assert.NoError(t, err)
-	fileLink.LinkSource = "/foo/bar"
-
-	_, err = fsys.CreateFile("/outer_dir", os.ModeDir)
-	assert.NoError(t, err)
-
-	_, err = fsys.CreateFile("/outer_dir/file", 0o664)
-	assert.NoError(t, err)
-
-	_, err = fsys.CreateFile("/outer_file", 0o664)
-	assert.NoError(t, err)
+	// The old mock applied one DefaultSys to every file; ownership is per entry now.
+	for _, path := range []string{
+		"block",
+		"sharedir", "sharedir/dir", "sharedir/dir/nested_dir", "sharedir/dir/nested_file",
+		"sharedir/dir/nested_link", "sharedir/dir_link", "sharedir/file", "sharedir/file_link",
+		"outer_dir", "outer_dir/file", "outer_file",
+	} {
+		assert.NoError(t, fsys.Chown(path, fuzzUID, fuzzGID))
+	}
 
 	return fsys
 }
+
+const (
+	fuzzUID = 456
+	fuzzGID = 123
+)
 
 func createRequest(
 	t *testing.T,
@@ -210,16 +188,23 @@ func FuzzHandler(f *testing.F) {
 	fsys := createFsFuzzTest(f)
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 
-	exportFS, err := NewExporterHandler(fsys, "/sharedir", config.VolumeModeFilesystem, logger)
-	assert.NoError(f, err)
-
-	exportBlock, err := NewExporterHandler(fsys, "/block", config.VolumeModeBlock, logger)
-	assert.NoError(f, err)
-
 	f.Fuzz(func(t *testing.T, authType string, basicCreds string, bearerToken string, wrongAuth string, rawURL string, methodIdx int, body []byte, failSeed int64, failProb byte) {
-		// Configure failure injection
+		// Failure injection is a decorator around the filesystem now, not a field on the
+		// mock, so the handlers are constructed per iteration on top of the wrapped one.
+		// Construction itself touches the filesystem, so an injected failure there is a
+		// legitimate outcome and ends the iteration rather than failing the test.
 		probability := float64(failProb) / 255.0
-		fsys.Failer = mockfs.NewProbabilityFailer(failSeed, probability)
+		failing := failer.NewOS(fsys, failer.NewProbabilityFailer(failSeed, probability))
+
+		exportFS, err := NewExporterHandler(failing, "/sharedir", config.VolumeModeFilesystem, logger)
+		if err != nil {
+			return
+		}
+
+		exportBlock, err := NewExporterHandler(failing, "/block", config.VolumeModeBlock, logger)
+		if err != nil {
+			return
+		}
 
 		ctrl := gomock.NewController(t)
 		k8sClient := mock.NewMockUserAuthorizer(ctrl)

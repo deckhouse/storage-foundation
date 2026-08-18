@@ -29,8 +29,7 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/deckhouse/sds-common-lib/fs/realfs"
-
+	"github.com/deckhouse/sds-common-lib/fs/real"
 	"github.com/deckhouse/storage-foundation/common"
 	"github.com/deckhouse/storage-foundation/images/data-exporter/internal/authorization"
 	"github.com/deckhouse/storage-foundation/images/data-exporter/internal/certutil"
@@ -59,7 +58,7 @@ func main() {
 		return
 	}
 
-	fsys := realfs.GetFS()
+	fsys := real.GetOS()
 
 	logger.Info("Start main()")
 

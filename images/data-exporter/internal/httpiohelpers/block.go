@@ -20,10 +20,10 @@ import (
 	"io"
 	"os"
 
-	"github.com/deckhouse/sds-common-lib/fs/fsext"
+	"github.com/deckhouse/sds-common-lib/fs"
 )
 
-func IsBlockDevice(fsys fsext.FS, path string) (bool, error) {
+func IsBlockDevice(fsys fs.OS, path string) (bool, error) {
 	fileInfo, err := fsys.Stat(path)
 	if err != nil {
 		return false, err

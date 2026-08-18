@@ -28,8 +28,7 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/deckhouse/sds-common-lib/fs/fsext"
-
+	"github.com/deckhouse/sds-common-lib/fs"
 	"github.com/deckhouse/storage-foundation/common"
 	"github.com/deckhouse/storage-foundation/images/data-exporter/internal/config"
 	"github.com/deckhouse/storage-foundation/images/data-exporter/internal/httpiohelpers"
@@ -46,7 +45,7 @@ const (
 )
 
 type ImportFilesystemHandler struct {
-	fs           fsext.FS
+	fs           fs.OS
 	path         string
 	logger       *slog.Logger
 	mu           *sync.Mutex
@@ -57,7 +56,7 @@ type ImportFilesystemHandler struct {
 	isServiceOff bool
 }
 
-func NewImportFilesystemHandler(fsys fsext.FS, path string, logger *slog.Logger, client *repository.Client, cfg *config.Config, repository *repository.Client) (*ImportFilesystemHandler, error) {
+func NewImportFilesystemHandler(fsys fs.OS, path string, logger *slog.Logger, client *repository.Client, cfg *config.Config, repository *repository.Client) (*ImportFilesystemHandler, error) {
 	isServiceOff, err := client.CheckIsServiceAvailable(context.Background(), cfg.URLOpt.DataManagerNamespace, cfg.DataManagerName)
 	if err != nil {
 		logger.Error("failed to check if service is available", "error", err)
@@ -306,7 +305,7 @@ func (h *ImportFilesystemHandler) HeadFile(w http.ResponseWriter, r *http.Reques
 	w.WriteHeader(http.StatusOK)
 }
 
-func checkIsDir(fsys fsext.FS, path string) error {
+func checkIsDir(fsys fs.OS, path string) error {
 	fi, err := fsys.Lstat(path)
 	if err != nil {
 		return err

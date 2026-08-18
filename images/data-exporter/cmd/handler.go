@@ -21,8 +21,7 @@ import (
 	"log/slog"
 	"net/http"
 
-	"github.com/deckhouse/sds-common-lib/fs/fsext"
-
+	"github.com/deckhouse/sds-common-lib/fs"
 	"github.com/deckhouse/storage-foundation/common"
 	"github.com/deckhouse/storage-foundation/images/data-exporter/internal/config"
 	"github.com/deckhouse/storage-foundation/images/data-exporter/internal/export_block"
@@ -32,7 +31,7 @@ import (
 	"github.com/deckhouse/storage-foundation/images/data-exporter/internal/repository"
 )
 
-func NewExporterHandler(fsys fsext.FS, path string, mode config.VolumeMode, logger *slog.Logger) (http.Handler, error) {
+func NewExporterHandler(fsys fs.OS, path string, mode config.VolumeMode, logger *slog.Logger) (http.Handler, error) {
 	switch mode {
 	case config.VolumeModeBlock:
 		return export_block.NewBlockExporter(fsys, path, logger)
@@ -43,7 +42,7 @@ func NewExporterHandler(fsys fsext.FS, path string, mode config.VolumeMode, logg
 	}
 }
 
-func NewImportHandler(fsys fsext.FS, path string, mode config.VolumeMode, logger *slog.Logger, client *repository.Client, cfg *config.Config, repository *repository.Client) (http.Handler, error) {
+func NewImportHandler(fsys fs.OS, path string, mode config.VolumeMode, logger *slog.Logger, client *repository.Client, cfg *config.Config, repository *repository.Client) (http.Handler, error) {
 	switch mode {
 	case config.VolumeModeBlock:
 		return importblock.NewImportBlockHandler(fsys, path, logger, client, cfg, repository)

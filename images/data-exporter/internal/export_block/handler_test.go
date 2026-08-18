@@ -24,40 +24,34 @@ import (
 	"os"
 	"testing"
 
-	"github.com/deckhouse/sds-common-lib/fs/mockfs"
 	"github.com/stretchr/testify/assert"
 
+	"github.com/deckhouse/sds-common-lib/fs/fake"
 	"github.com/deckhouse/storage-foundation/images/data-exporter/internal/export_block"
 	"github.com/deckhouse/storage-foundation/images/data-exporter/internal/test"
 )
 
-func createTestFs(t *testing.T) *mockfs.MockFS {
-	fsys, _ := mockfs.NewFsMock()
-
+func createTestFs(t *testing.T) *fake.OS {
 	// /
 	// ├── good (char device)
 	// ├── dir (directory)
 	//     └── good_nested (char device)
 	// └── bad  (regular file)
-
-	good, err := fsys.CreateFile("/good", os.ModeDevice)
-	assert.NoError(t, err)
-	test.SetContent(good, "good_device_content")
-
-	_, err = fsys.CreateFile("/bad", 0o664)
-	assert.NoError(t, err)
-
-	_, err = fsys.CreateFile("/dir", os.ModeDir)
-	assert.NoError(t, err)
-
-	goodNested, err := fsys.CreateFile("/dir/good_nested", os.ModeDevice)
-	test.SetContent(goodNested, "good_nested_device_content")
+	//
+	// The fake filesystem is described up front and built once: unlike the old mock
+	// there is no way to attach content to a file after the fact.
+	fsys, err := fake.NewBuilder("/").
+		WithFileAtPath("good", os.ModeDevice, fake.RWContentFromString("good_device_content")).
+		WithFileAtPath("bad", os.FileMode(0o664)).
+		WithFileAtPath("dir", os.ModeDir).
+		WithFileAtPath("dir/good_nested", os.ModeDevice, fake.RWContentFromString("good_nested_device_content")).
+		Build()
 	assert.NoError(t, err)
 
 	return fsys
 }
 
-func newBlockHandler(fsys *mockfs.MockFS, path string, logger *slog.Logger) (*http.ServeMux, error) {
+func newBlockHandler(fsys *fake.OS, path string, logger *slog.Logger) (*http.ServeMux, error) {
 	blockExporter, err := export_block.NewBlockExporter(fsys, path, logger)
 	if err != nil {
 		return nil, err
@@ -80,14 +74,14 @@ func newBlockHandler(fsys *mockfs.MockFS, path string, logger *slog.Logger) (*ht
 	return mux, nil
 }
 
-func serve(t *testing.T, fsys *mockfs.MockFS, w http.ResponseWriter, r *http.Request) {
+func serve(t *testing.T, fsys *fake.OS, w http.ResponseWriter, r *http.Request) {
 	logger := newLogger()
 	e, err := newBlockHandler(fsys, "/good", logger)
 	assert.NoError(t, err)
 	e.ServeHTTP(w, r)
 }
 
-func serveNested(t *testing.T, fsys *mockfs.MockFS, w http.ResponseWriter, r *http.Request) {
+func serveNested(t *testing.T, fsys *fake.OS, w http.ResponseWriter, r *http.Request) {
 	logger := newLogger()
 	e, err := newBlockHandler(fsys, "/dir/good_nested", logger)
 	assert.NoError(t, err)
@@ -156,8 +150,9 @@ func TestHeadOK(t *testing.T) {
 	res := rr.Result()
 	assert.Equal(t, http.StatusOK, res.StatusCode)
 
-	good, _ := fsys.GetFile("/good")
-	assertCommonHeaders(t, res, good.Size)
+	good, err := fsys.Stat("/good")
+	assert.NoError(t, err)
+	assertCommonHeaders(t, res, good.Size())
 }
 
 func TestNestedHeadOK(t *testing.T) {
@@ -171,8 +166,9 @@ func TestNestedHeadOK(t *testing.T) {
 	res := rr.Result()
 	assert.Equal(t, http.StatusOK, res.StatusCode)
 
-	good, _ := fsys.GetFile("/dir/good_nested")
-	assertCommonHeaders(t, res, good.Size)
+	good, err := fsys.Stat("/dir/good_nested")
+	assert.NoError(t, err)
+	assertCommonHeaders(t, res, good.Size())
 }
 
 func TestNestedGetOK(t *testing.T) {
@@ -186,8 +182,9 @@ func TestNestedGetOK(t *testing.T) {
 	res := rr.Result()
 	assert.Equal(t, http.StatusOK, res.StatusCode)
 
-	good, _ := fsys.GetFile("/dir/good_nested")
-	assertCommonHeaders(t, res, good.Size)
+	good, err := fsys.Stat("/dir/good_nested")
+	assert.NoError(t, err)
+	assertCommonHeaders(t, res, good.Size())
 }
 func TestGetOK(t *testing.T) {
 	fsys := createTestFs(t)
@@ -200,8 +197,9 @@ func TestGetOK(t *testing.T) {
 	res := rr.Result()
 	assert.Equal(t, http.StatusOK, res.StatusCode)
 
-	good, _ := fsys.GetFile("/good")
-	assertCommonHeaders(t, res, good.Size)
+	good, err := fsys.Stat("/good")
+	assert.NoError(t, err)
+	assertCommonHeaders(t, res, good.Size())
 }
 
 func TestHeadWrongPath(t *testing.T) {

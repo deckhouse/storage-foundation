@@ -23,7 +23,6 @@ import (
 	"net/http"
 	"testing"
 
-	"github.com/deckhouse/sds-common-lib/fs/mockfs"
 	"github.com/stretchr/testify/assert"
 )
 
@@ -58,9 +57,4 @@ func AssertFileContent(t *testing.T, reader io.ReadCloser, expected []byte) {
 	if !bytes.Equal(buf[:n], expected) {
 		t.Error("Invalid buffer content")
 	}
-}
-
-func SetContent(file *mockfs.MockFile, content string) {
-	rw := mockfs.RWContentFromBytes([]byte(content))
-	rw.SetupFile(file)
 }

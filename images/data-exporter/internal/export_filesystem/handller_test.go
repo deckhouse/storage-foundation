@@ -25,20 +25,19 @@ import (
 	"net/http/httptest"
 	"os"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
-	"github.com/deckhouse/sds-common-lib/fs/fsext"
-	"github.com/deckhouse/sds-common-lib/fs/mockfs"
 	"github.com/stretchr/testify/assert"
 
+	d8fs "github.com/deckhouse/sds-common-lib/fs"
+	"github.com/deckhouse/sds-common-lib/fs/fake"
 	"github.com/deckhouse/storage-foundation/images/data-exporter/internal/export_filesystem"
 	"github.com/deckhouse/storage-foundation/images/data-exporter/internal/test"
 )
 
-func createTestFs(t *testing.T) *mockfs.MockFS {
-	fsys, _ := mockfs.NewFsMock()
-
+func createTestFs(t *testing.T) *fake.OS {
 	// FS mock
 	// /
 	// ├── sharedir <- share this
@@ -52,59 +51,66 @@ func createTestFs(t *testing.T) *mockfs.MockFS {
 	// ├── outer_dir
 	// │   └── file
 	// └── outer_file
-
-	const gid uint32 = 123
-	const uid uint32 = 456
-
-	fsys.DefaultSys.Gid = gid
-	fsys.DefaultSys.Uid = uid
-
-	var err error
-	_, err = fsys.CreateFile("/sharedir", os.ModeDir)
+	//
+	// The whole tree is declared up front: the fake filesystem takes content, mode and
+	// link target as arguments and has no way to attach them after the fact.
+	fsys, err := fake.NewBuilder("/").
+		WithFileAtPath("sharedir", os.ModeDir).
+		WithFileAtPath("sharedir/dir", os.ModeDir).
+		WithFileAtPath("sharedir/dir/nested_dir", os.ModeDir|0o750).
+		WithFileAtPath("sharedir/dir/nested_file", os.FileMode(0o664), fake.RWContentFromString("nested_file")).
+		WithFileAtPath("sharedir/dir/nested_link", os.ModeSymlink|0o664, fake.LinkReader{Target: "../file"}).
+		WithFileAtPath("sharedir/dir_link", os.ModeSymlink, fake.LinkReader{Target: "/outer_dir"}).
+		WithFileAtPath("sharedir/file", os.FileMode(0o664), fake.RWContentFromString("file")).
+		WithFileAtPath("sharedir/file_link", os.ModeSymlink, fake.LinkReader{Target: "/foo/bar"}).
+		WithFileAtPath("outer_dir", os.ModeDir).
+		WithFileAtPath("outer_dir/file", os.FileMode(0o664)).
+		WithFileAtPath("outer_file", os.FileMode(0o664)).
+		Build()
 	assert.NoError(t, err)
 
-	_, err = fsys.CreateFile("/sharedir/dir", os.ModeDir)
-	assert.NoError(t, err)
-
-	_, err = fsys.CreateFile("/sharedir/dir/nested_dir", os.ModeDir|0o750)
-	assert.NoError(t, err)
-
-	nestedFile, err := fsys.CreateFile("/sharedir/dir/nested_file", 0o664)
-	assert.NoError(t, err)
-	test.SetContent(nestedFile, "nested_file")
-
-	nestedLink, err := fsys.CreateFile("/sharedir/dir/nested_link", os.ModeSymlink|0o664)
-	assert.NoError(t, err)
-	nestedLink.LinkSource = "../file"
-
-	dirLink, err := fsys.CreateFile("/sharedir/dir_link", os.ModeSymlink)
-	assert.NoError(t, err)
-	dirLink.LinkSource = "/outer_dir"
-
-	file, err := fsys.CreateFile("/sharedir/file", 0o664)
-	assert.NoError(t, err)
-	test.SetContent(file, "file")
-
-	fileLink, err := fsys.CreateFile("/sharedir/file_link", os.ModeSymlink)
-	assert.NoError(t, err)
-	fileLink.LinkSource = "/foo/bar"
-
-	_, err = fsys.CreateFile("/outer_dir", os.ModeDir)
-	assert.NoError(t, err)
-
-	_, err = fsys.CreateFile("/outer_dir/file", 0o664)
-	assert.NoError(t, err)
-
-	_, err = fsys.CreateFile("/outer_file", 0o664)
-	assert.NoError(t, err)
+	// The old mock had a DefaultSys applied to every new file; the fake one carries
+	// ownership per entry, so set it explicitly on the entries the tests read.
+	chownAll(t, fsys, testUID, testGID,
+		"sharedir",
+		"sharedir/dir",
+		"sharedir/dir/nested_dir",
+		"sharedir/dir/nested_file",
+		"sharedir/dir/nested_link",
+		"sharedir/dir_link",
+		"sharedir/file",
+		"sharedir/file_link",
+		"outer_dir",
+		"outer_dir/file",
+		"outer_file",
+	)
 
 	return fsys
 }
 
-func getExpectedDirectoryList(fsys *mockfs.MockFS) []export_filesystem.Item {
-	nestedDir, _ := fsys.GetFile("/sharedir/dir/nested_dir")
-	nestedFile, _ := fsys.GetFile("/sharedir/dir/nested_file")
-	nestedLink, _ := fsys.GetFile("/sharedir/dir/nested_link")
+const (
+	testUID = 456
+	testGID = 123
+)
+
+func chownAll(t *testing.T, fsys *fake.OS, uid, gid int, paths ...string) {
+	t.Helper()
+	for _, p := range paths {
+		assert.NoError(t, fsys.Chown(p, uid, gid))
+	}
+}
+
+func statOwner(t *testing.T, info os.FileInfo) *syscall.Stat_t {
+	t.Helper()
+	sys, ok := info.Sys().(*syscall.Stat_t)
+	assert.True(t, ok, "fake filesystem must expose a *syscall.Stat_t")
+	return sys
+}
+
+func getExpectedDirectoryList(t *testing.T, fsys *fake.OS) []export_filesystem.Item {
+	nestedDir := lstat(t, fsys, "/sharedir/dir/nested_dir")
+	nestedFile := lstat(t, fsys, "/sharedir/dir/nested_file")
+	nestedLink := lstat(t, fsys, "/sharedir/dir/nested_link")
 
 	return []export_filesystem.Item{
 		{
@@ -112,10 +118,10 @@ func getExpectedDirectoryList(fsys *mockfs.MockFS) []export_filesystem.Item {
 			Type: "dir",
 			URI:  "dir/nested_dir/",
 			Attributes: map[string]any{
-				"modtime":     nestedDir.ModTime.Format(time.RFC3339),
+				"modtime":     nestedDir.ModTime().Format(time.RFC3339),
 				"gid":         float64(123), // go unmarshals number to  the interface value as float64
 				"uid":         float64(456),
-				"permissions": fmt.Sprintf("%#o", uint32(nestedDir.Mode.Perm())),
+				"permissions": fmt.Sprintf("%#o", uint32(nestedDir.Mode().Perm())),
 			},
 		},
 		{
@@ -123,11 +129,11 @@ func getExpectedDirectoryList(fsys *mockfs.MockFS) []export_filesystem.Item {
 			Type: "file",
 			URI:  "dir/nested_file",
 			Attributes: map[string]any{
-				"modtime":     nestedFile.ModTime.Format(time.RFC3339),
-				"size":        float64(nestedFile.Size),
+				"modtime":     nestedFile.ModTime().Format(time.RFC3339),
+				"size":        float64(nestedFile.Size()),
 				"gid":         float64(123),
 				"uid":         float64(456),
-				"permissions": fmt.Sprintf("%#o", uint32(nestedFile.Mode.Perm())),
+				"permissions": fmt.Sprintf("%#o", uint32(nestedFile.Mode().Perm())),
 			},
 		},
 		{
@@ -136,28 +142,37 @@ func getExpectedDirectoryList(fsys *mockfs.MockFS) []export_filesystem.Item {
 			URI:        "dir/nested_link",
 			TargetPath: "../file",
 			Attributes: map[string]any{
-				"modtime":     nestedLink.ModTime.Format(time.RFC3339),
+				"modtime":     nestedLink.ModTime().Format(time.RFC3339),
 				"gid":         float64(123),
 				"uid":         float64(456),
-				"permissions": fmt.Sprintf("%#o", uint32(nestedLink.Mode.Perm())),
+				"permissions": fmt.Sprintf("%#o", uint32(nestedLink.Mode().Perm())),
 			},
 		},
 	}
 }
 
-func assertFileAttributes(t *testing.T, response *http.Response, fsys *mockfs.MockFS, path string) *mockfs.MockFile {
-	file, err := fsys.GetFile(path)
-	assert.NoError(t, err)
+func assertFileAttributes(t *testing.T, response *http.Response, fsys *fake.OS, path string) os.FileInfo {
+	file := lstat(t, fsys, path)
+	owner := statOwner(t, file)
 
-	test.AssertHeader(t, response, "X-Attribute-Modtime", file.ModTime.Format(time.RFC3339))
-	test.AssertHeader(t, response, "X-Attribute-Gid", fmt.Sprint(file.Sys.Gid))
-	test.AssertHeader(t, response, "X-Attribute-Uid", fmt.Sprint(file.Sys.Uid))
-	test.AssertHeader(t, response, "X-Attribute-Permissions", fmt.Sprintf("%#o", uint32(file.Mode.Perm()))) // octal format
+	test.AssertHeader(t, response, "X-Attribute-Modtime", file.ModTime().Format(time.RFC3339))
+	test.AssertHeader(t, response, "X-Attribute-Gid", fmt.Sprint(owner.Gid))
+	test.AssertHeader(t, response, "X-Attribute-Uid", fmt.Sprint(owner.Uid))
+	test.AssertHeader(t, response, "X-Attribute-Permissions", fmt.Sprintf("%#o", uint32(file.Mode().Perm()))) // octal format
 
 	return file
 }
 
-func serve(t *testing.T, fsys fsext.FS, w http.ResponseWriter, r *http.Request) {
+// lstat is the replacement for the old mock's GetFile: it must not follow symlinks,
+// because several tests assert on the link entry itself.
+func lstat(t *testing.T, fsys *fake.OS, path string) os.FileInfo {
+	t.Helper()
+	info, err := fsys.Lstat(path)
+	assert.NoError(t, err)
+	return info
+}
+
+func serve(t *testing.T, fsys d8fs.OS, w http.ResponseWriter, r *http.Request) {
 	logger := slog.New(slog.NewTextHandler(os.Stdout, nil))
 	d, err := export_filesystem.NewFilesystemExporter(fsys, "/sharedir", logger)
 	assert.NoError(t, err)
@@ -241,7 +256,7 @@ func TestHeadFile(t *testing.T) {
 
 	assert.Equal(t, http.StatusOK, result.StatusCode)
 	file := assertFileAttributes(t, result, fsys, "/sharedir/file")
-	test.AssertHeader(t, result, "Content-Length", fmt.Sprint(file.Size))
+	test.AssertHeader(t, result, "Content-Length", fmt.Sprint(file.Size()))
 	test.AssertHeader(t, result, "Content-Type", "application/octet-stream")
 	test.AssertHeader(t, result, "Content-Disposition", "attachment; filename=file")
 	test.AssertHeader(t, result, "X-Type", "file")
@@ -266,7 +281,7 @@ func TestGetFile(t *testing.T) {
 
 	assert.Equal(t, http.StatusOK, result.StatusCode)
 	file := assertFileAttributes(t, result, fsys, "/sharedir/file")
-	test.AssertHeader(t, result, "Content-Length", fmt.Sprint(file.Size))
+	test.AssertHeader(t, result, "Content-Length", fmt.Sprint(file.Size()))
 	test.AssertHeader(t, result, "Content-Type", "application/octet-stream")
 	test.AssertHeader(t, result, "Content-Disposition", "attachment; filename=file")
 	test.AssertHeader(t, result, "X-Type", "file")
@@ -293,7 +308,7 @@ func TestGetNestedFile(t *testing.T) {
 
 	assert.Equal(t, http.StatusOK, result.StatusCode)
 	file := assertFileAttributes(t, result, fsys, "/sharedir/dir/nested_file")
-	test.AssertHeader(t, result, "Content-Length", fmt.Sprint(file.Size))
+	test.AssertHeader(t, result, "Content-Length", fmt.Sprint(file.Size()))
 	test.AssertHeader(t, result, "Content-Type", "application/octet-stream")
 	test.AssertHeader(t, result, "Content-Disposition", "attachment; filename=nested_file")
 	test.AssertHeader(t, result, "X-Type", "file")
@@ -320,7 +335,7 @@ func TestHeadFileMd5(t *testing.T) {
 
 	assert.Equal(t, http.StatusOK, result.StatusCode)
 	file := assertFileAttributes(t, result, fsys, "/sharedir/file")
-	test.AssertHeader(t, result, "Content-Length", fmt.Sprint(file.Size))
+	test.AssertHeader(t, result, "Content-Length", fmt.Sprint(file.Size()))
 	test.AssertHeader(t, result, "Content-Type", "application/octet-stream")
 	test.AssertHeader(t, result, "Content-Disposition", "attachment; filename=file")
 	test.AssertHeader(t, result, "X-Type", "file")
@@ -381,7 +396,7 @@ func TestGetDirectory(t *testing.T) {
 	req := httptest.NewRequest(http.MethodGet, "/dir/", body)
 	rr := httptest.NewRecorder()
 
-	expectedDir := getExpectedDirectoryList(fsys)
+	expectedDir := getExpectedDirectoryList(t, fsys)
 
 	// Run
 	serve(t, fsys, rr, req)
@@ -411,7 +426,7 @@ func TestHeadDirectoryMd5(t *testing.T) {
 	req := httptest.NewRequest(http.MethodGet, "/dir/?attribute=hash.md5", body)
 	rr := httptest.NewRecorder()
 
-	expectedDir := getExpectedDirectoryList(fsys)
+	expectedDir := getExpectedDirectoryList(t, fsys)
 	// Add md5 attribute to regular file
 	expectedDir[1].Attributes["hash.md5"] = "0d7fcc1470cce86180a7d050c95f57e1" // echo -n "nested_file" | md5sum
 
@@ -559,22 +574,16 @@ func TestHeadFileSymlinkInPath(t *testing.T) {
 // not as "dir". Before the fix, the default branch in resolveItem used Type: directory,
 // causing d8 to treat sockets as directories and fail with 400 on recursive descent.
 func TestGetDirectoryWithSocketReturnsOtherType(t *testing.T) {
-	fsys, _ := mockfs.NewFsMock()
-	fsys.DefaultSys.Gid = 999
-	fsys.DefaultSys.Uid = 0
-
-	_, err := fsys.CreateFile("/sharedir", os.ModeDir)
+	fsys, err := fake.NewBuilder("/").
+		WithFileAtPath("sharedir", os.ModeDir).
+		WithFileAtPath("sharedir/dir_with_special", os.ModeDir).
+		WithFileAtPath("sharedir/dir_with_special/execq", os.ModeSocket|0o660).
+		WithFileAtPath("sharedir/dir_with_special/regular.txt", os.FileMode(0o664), fake.RWContentFromString("data")).
+		Build()
 	assert.NoError(t, err)
-
-	_, err = fsys.CreateFile("/sharedir/dir_with_special", os.ModeDir)
-	assert.NoError(t, err)
-
-	socket, err := fsys.CreateFile("/sharedir/dir_with_special/execq", os.ModeSocket|0o660)
-	assert.NoError(t, err)
-
-	regularFile, err := fsys.CreateFile("/sharedir/dir_with_special/regular.txt", 0o664)
-	assert.NoError(t, err)
-	test.SetContent(regularFile, "data")
+	chownAll(t, fsys, 0, 999,
+		"sharedir", "sharedir/dir_with_special",
+		"sharedir/dir_with_special/execq", "sharedir/dir_with_special/regular.txt")
 
 	// HTTP mock
 	body := strings.NewReader("")
@@ -602,7 +611,8 @@ func TestGetDirectoryWithSocketReturnsOtherType(t *testing.T) {
 	assert.Equal(t, "execq", execq.Name)
 	assert.Equal(t, "other", execq.Type, "socket must be reported as 'other', not 'dir'")
 	assert.NotEqual(t, "dir", execq.Type, "regression: socket must not be reported as 'dir'")
-	assert.Equal(t, fmt.Sprintf("%#o", uint32(socket.Mode.Perm())), execq.Attributes["permissions"])
+	socket := lstat(t, fsys, "sharedir/dir_with_special/execq")
+	assert.Equal(t, fmt.Sprintf("%#o", uint32(socket.Mode().Perm())), execq.Attributes["permissions"])
 
 	// Regular file must still be "file"
 	reg := resp.Items[1]
@@ -613,12 +623,10 @@ func TestGetDirectoryWithSocketReturnsOtherType(t *testing.T) {
 // Regression: direct GET/HEAD request to a socket must return 400,
 // not attempt to stream it or treat it as a directory.
 func TestGetSocketDirectlyReturns400(t *testing.T) {
-	fsys, _ := mockfs.NewFsMock()
-
-	_, err := fsys.CreateFile("/sharedir", os.ModeDir)
-	assert.NoError(t, err)
-
-	_, err = fsys.CreateFile("/sharedir/execq", os.ModeSocket|0o660)
+	fsys, err := fake.NewBuilder("/").
+		WithFileAtPath("sharedir", os.ModeDir).
+		WithFileAtPath("sharedir/execq", os.ModeSocket|0o660).
+		Build()
 	assert.NoError(t, err)
 
 	for _, method := range []string{http.MethodGet, http.MethodHead} {
@@ -636,15 +644,11 @@ func TestGetSocketDirectlyReturns400(t *testing.T) {
 
 // Regression: FIFO (named pipe) must also be reported as "other" in directory listing.
 func TestGetDirectoryWithFIFOReturnsOtherType(t *testing.T) {
-	fsys, _ := mockfs.NewFsMock()
-
-	_, err := fsys.CreateFile("/sharedir", os.ModeDir)
-	assert.NoError(t, err)
-
-	_, err = fsys.CreateFile("/sharedir/alerts", os.ModeDir)
-	assert.NoError(t, err)
-
-	_, err = fsys.CreateFile("/sharedir/alerts/cfgarq", os.ModeNamedPipe|0o660)
+	fsys, err := fake.NewBuilder("/").
+		WithFileAtPath("sharedir", os.ModeDir).
+		WithFileAtPath("sharedir/alerts", os.ModeDir).
+		WithFileAtPath("sharedir/alerts/cfgarq", os.ModeNamedPipe|0o660).
+		Build()
 	assert.NoError(t, err)
 
 	body := strings.NewReader("")

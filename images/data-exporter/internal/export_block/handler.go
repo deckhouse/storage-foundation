@@ -22,18 +22,17 @@ import (
 	"log/slog"
 	"net/http"
 
-	"github.com/deckhouse/sds-common-lib/fs/fsext"
-
+	"github.com/deckhouse/sds-common-lib/fs"
 	"github.com/deckhouse/storage-foundation/images/data-exporter/internal/httpiohelpers"
 )
 
 type BlockExporter struct {
-	fs     fsext.FS
+	fs     fs.OS
 	path   string
 	logger *slog.Logger
 }
 
-func NewBlockExporter(fsys fsext.FS, path string, logger *slog.Logger) (*BlockExporter, error) {
+func NewBlockExporter(fsys fs.OS, path string, logger *slog.Logger) (*BlockExporter, error) {
 	isBlock, err := httpiohelpers.IsBlockDevice(fsys, path)
 	if err != nil {
 		logger.Error("Failed to get type of the file", "error", err)

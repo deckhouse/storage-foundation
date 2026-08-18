@@ -32,8 +32,7 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/deckhouse/sds-common-lib/fs/fsext"
-
+	d8fs "github.com/deckhouse/sds-common-lib/fs"
 	"github.com/deckhouse/storage-foundation/images/data-exporter/internal/httpiohelpers"
 )
 
@@ -79,11 +78,11 @@ type attributesMask struct {
 
 type FilesystemExporter struct {
 	Root   string
-	fs     fsext.FS
+	fs     d8fs.OS
 	logger *slog.Logger
 }
 
-func NewFilesystemExporter(fsys fsext.FS, root string, logger *slog.Logger) (*FilesystemExporter, error) {
+func NewFilesystemExporter(fsys d8fs.OS, root string, logger *slog.Logger) (*FilesystemExporter, error) {
 	err := checkIsDir(fsys, root)
 	if err != nil {
 		logger.Error("Failed to initialize file system exporter", "error", err)
@@ -93,7 +92,7 @@ func NewFilesystemExporter(fsys fsext.FS, root string, logger *slog.Logger) (*Fi
 	return &FilesystemExporter{root, fsys, logger}, nil
 }
 
-func checkIsDir(fsys fsext.FS, path string) error {
+func checkIsDir(fsys d8fs.OS, path string) error {
 	fi, err := fsys.Lstat(path)
 	if err != nil {
 		return err
