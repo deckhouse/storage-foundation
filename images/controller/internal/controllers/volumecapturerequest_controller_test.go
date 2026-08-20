@@ -371,13 +371,11 @@ var _ = Describe("VolumeCaptureRequest Controller", func() {
 				// Simulate external-snapshotter setting ReadyToUse=true
 				vsc := &snapshotv1.VolumeSnapshotContent{}
 				Expect(client.Get(ctx, types.NamespacedName{Name: csiVSCName}, vsc)).To(Succeed())
-				// The managed VSC must appear in the API already delete-protected: the marker is part of the
-				// CREATE payload, never a post-create patch — Create and a follow-up Patch have no guaranteed
-				// ordering, so a patch would leave a window in which the artifact is deletable. We assert it
-				// on the very first read, before any status/ownerRef workaround touches the object.
-				Expect(ssstoragev1alpha1.IsDeleteProtected(vsc)).To(BeTrue(),
-					"created managed VSC must carry %s=%s in the CREATE payload",
-					ssstoragev1alpha1.LabelDeleteProtected, ssstoragev1alpha1.LabelDeleteProtectedValue)
+				// The managed VSC is cluster-scoped and therefore carries no delete-protection marker: its
+				// lifecycle is held by the owning tree node, not by admission. This controller stamps the
+				// marker nowhere at all.
+				Expect(ssstoragev1alpha1.IsDeleteProtected(vsc)).To(BeFalse(),
+					"created managed VSC must not carry %s", ssstoragev1alpha1.LabelDeleteProtected)
 				// The fake client does not assign a UID on Create; set one so we can assert it propagates
 				// into status.dataRef.artifact.uid (a real apiserver always assigns a UID).
 				if vsc.UID == "" {

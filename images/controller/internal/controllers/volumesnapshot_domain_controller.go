@@ -24,7 +24,9 @@ import (
 	snapshotv1 "github.com/kubernetes-csi/external-snapshotter/client/v8/apis/volumesnapshot/v1"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	apiruntime "k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/util/retry"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -39,15 +41,8 @@ import (
 )
 
 const (
-	// labelForkProcessed is stamped by the patched external-snapshotter fork (syncUnreadySnapshot) on
-	// every VolumeSnapshot it newly reconciles. Its presence is the discriminator that separates NEW,
-	// module-managed VolumeSnapshots (adopt as a state-snapshotter domain snapshot) from pre-existing /
-	// legacy ones created before this module (never carry the label — left entirely untouched). Import-mode
-	// VolumeSnapshots never reach syncUnreadySnapshot and are never labeled.
-	labelForkProcessed = "storage-foundation.deckhouse.io/processed"
-
-	// labelSnapshotManaged latches the adoption outcome of the exclude veto, evaluated ONCE on the source
-	// PVC at adoption time. "true" => domain-captured (MCR + protocol); "false" => vetoed
+	// labelSnapshotManaged latches the outcome of the exclude veto, evaluated ONCE on the source PVC when
+	// this reconciler first takes the snapshot in. "true" => domain-captured (MCR + protocol); "false" => vetoed
 	// (a plain CSI snapshot is still created by the fork, but no domain capture happens). It is
 	// deliberately scoped to the state-snapshotter group so it does not collide with the storage-foundation
 	// "managed" ANNOTATION (snapshotmeta.AnnDeckhouseManaged), which has unrelated CSI-skip semantics.
@@ -66,7 +61,7 @@ const (
 )
 
 // VolumeSnapshotDomainReconciler drives state-snapshotter DOMAIN planning for module-managed CSI
-// VolumeSnapshots: source-PVC resolution, the exclude-veto adoption latch, the per-snapshot manifest
+// VolumeSnapshots: source-PVC resolution, the exclude-veto management latch, the per-snapshot manifest
 // capture (MCR over the source PVC), sourceRef publication, and the planning barrier. All Kubernetes
 // transport (MCR, owner references, optimistic-locked status patches, the barrier phase) is delegated to
 // the snapshot SDK (pkg/snapshotsdk). It never touches the cluster-scoped SnapshotContent (owned by the
@@ -141,9 +136,19 @@ func (r *VolumeSnapshotDomainReconciler) Reconcile(ctx context.Context, req ctrl
 		return ctrl.Result{}, nil
 	}
 
-	// (1) Fork-label discriminator: only NEW, module-managed VolumeSnapshots are domain objects.
-	if vs.Labels[labelForkProcessed] == "" {
-		logger.V(1).Info("skip: VolumeSnapshot is not fork-managed (no processed label)")
+	// (1) The only gate on who gets domain capture: a snapshot another controller owns is left alone.
+	// Everything else is planned here regardless of who created it, because being exportable is not a reward
+	// for having been created by this module — a user's own snapshot deserves a manifest leg and a content
+	// node just as much as one this module made. What origin does decide is data ownership, and that is
+	// settled elsewhere (the core binds the content to the artifact instead of adopting the artifact); this
+	// path writes only the snapshot's own capture state.
+	//
+	// The veto only forbids and never permits: the absence of a foreign controller says nothing about who
+	// created the object, so nothing downstream may read "passed the gate" as "ours". The label the patched
+	// external-snapshotter fork stamps on snapshots it reconciles is deliberately NOT consulted: it records
+	// that the CSI controller saw the object, which says nothing about ownership either.
+	if hasForeignControllerOwner(vs) {
+		logger.V(1).Info("skip: VolumeSnapshot is controlled by another controller")
 		return ctrl.Result{}, nil
 	}
 
@@ -162,7 +167,7 @@ func (r *VolumeSnapshotDomainReconciler) Reconcile(ctx context.Context, req ctrl
 		return ctrl.Result{}, nil
 	}
 
-	// (4) Adoption veto latch: evaluate the exclude veto on the source PVC exactly once and record the
+	// (4) Management veto latch: evaluate the exclude veto on the source PVC exactly once and record the
 	// outcome. A vetoed snapshot stays a plain CSI snapshot with no domain capture.
 	managed, err := r.ensureManagedLatch(ctx, vs, *pvcName)
 	if err != nil {
@@ -184,14 +189,25 @@ func (r *VolumeSnapshotDomainReconciler) Reconcile(ctx context.Context, req ctrl
 	}
 
 	// Plan the manifest leg only until its immutable MCR name is published. Once published, the live PVC is
-	// no longer needed by this domain reconcile: the core owns capture progress and terminal Ready. This
-	// prevents a source deletion after Planned from regressing into an endless Planning requeue.
-	if snapshotsdk.ManifestCaptureNeeded(adapter) {
+	// no longer needed for planning: the core owns capture progress and terminal Ready. This prevents a
+	// source deletion after Planned from regressing into an endless Planning requeue.
+	//
+	// The source reference is republished whenever it is absent, which is NOT the same window. Both are
+	// derived from the live PVC, but they differ in what a loss costs: the MCR name is immutable once
+	// published, while `status.sourceRef` is an ordinary status field that another writer of this object's
+	// status can drop — external-snapshotter replaces the status wholesale from its own model, which knows
+	// nothing about this field. Writing it inside the planning window only would make that loss permanent,
+	// and it is not a cosmetic one: the core withholds the native-CSI data leg until the source is named, so
+	// the content stays DataCapturePending and the whole tree wedges below its root with nothing in any log
+	// to say why. Republishing is a no-op once the value is equal, so the steady state stays write-free.
+	needManifestCapture := snapshotsdk.ManifestCaptureNeeded(adapter)
+	if needManifestCapture || adapter.GetSnapshotSource() == nil {
 		pvc := &corev1.PersistentVolumeClaim{}
-		if getErr := r.Client.Get(ctx, types.NamespacedName{Namespace: vs.Namespace, Name: *pvcName}, pvc); getErr != nil {
-			if !apierrors.IsNotFound(getErr) {
-				return ctrl.Result{}, getErr
-			}
+		switch getErr := r.Client.Get(ctx, types.NamespacedName{Namespace: vs.Namespace, Name: *pvcName}, pvc); {
+		case getErr != nil && !apierrors.IsNotFound(getErr):
+			return ctrl.Result{}, getErr
+
+		case getErr != nil && needManifestCapture:
 			// A source that has not appeared yet is recoverable. Keep the domain in Planning and schedule the
 			// retry explicitly; DomainCaptureStatus never owns scheduling and never writes Ready.
 			if perr := sdk.DomainCaptureStatus(adapter).
@@ -201,29 +217,37 @@ func (r *VolumeSnapshotDomainReconciler) Reconcile(ctx context.Context, req ctrl
 				return ctrl.Result{}, perr
 			}
 			return ctrl.Result{RequeueAfter: volumeSnapshotDomainArtifactRequeueAfter}, nil
-		}
 
-		// Publish the captured source PVC's full reference (top-level status.sourceRef) so d8-cli can
-		// rebuild the import-mode source. Not part of the readiness formula.
-		if err := sdk.PublishSnapshotSource(ctx, adapter, snapshotsdk.SnapshotSource{
-			APIVersion: corev1.SchemeGroupVersion.String(),
-			Kind:       "PersistentVolumeClaim",
-			Name:       pvc.Name,
-			Namespace:  pvc.Namespace,
-			UID:        pvc.UID,
-		}); err != nil {
-			return ctrl.Result{}, err
-		}
+		case getErr != nil:
+			// Planning is already done and only the source reference is missing, so the deleted PVC is the
+			// one thing this repair needed. There is nothing left to publish and nothing to wait for: fall
+			// through to the barriers rather than dragging a planned snapshot back into Planning.
 
-		// Manifest leg: capture the source PVC object. The data leg is the native CSI
-		// VolumeSnapshotContent (observed and latched by the core), so there is no
-		// EnsureVolumeCapture / VolumeCaptureRequest here.
-		if err := sdk.EnsureManifestCapture(ctx, adapter, snapshotsdk.ManifestCaptureSpec{Targets: []snapshotsdk.ManifestTarget{{
-			APIVersion: corev1.SchemeGroupVersion.String(),
-			Kind:       "PersistentVolumeClaim",
-			Name:       pvc.Name,
-		}}}); err != nil {
-			return ctrl.Result{}, err
+		default:
+			// Publish the captured source PVC's full reference (top-level status.sourceRef) so d8-cli can
+			// rebuild the import-mode source. Not part of the readiness formula.
+			if err := sdk.PublishSnapshotSource(ctx, adapter, snapshotsdk.SnapshotSource{
+				APIVersion: corev1.SchemeGroupVersion.String(),
+				Kind:       "PersistentVolumeClaim",
+				Name:       pvc.Name,
+				Namespace:  pvc.Namespace,
+				UID:        pvc.UID,
+			}); err != nil {
+				return ctrl.Result{}, err
+			}
+
+			// Manifest leg: capture the source PVC object. The data leg is the native CSI
+			// VolumeSnapshotContent (observed and latched by the core), so there is no
+			// EnsureVolumeCapture / VolumeCaptureRequest here.
+			if needManifestCapture {
+				if err := sdk.EnsureManifestCapture(ctx, adapter, snapshotsdk.ManifestCaptureSpec{Targets: []snapshotsdk.ManifestTarget{{
+					APIVersion: corev1.SchemeGroupVersion.String(),
+					Kind:       "PersistentVolumeClaim",
+					Name:       pvc.Name,
+				}}}); err != nil {
+					return ctrl.Result{}, err
+				}
+			}
 		}
 	}
 
@@ -246,9 +270,37 @@ func (r *VolumeSnapshotDomainReconciler) Reconcile(ctx context.Context, req ctrl
 	}
 }
 
+// hasForeignControllerOwner reports whether obj is controlled by a controller outside the state-snapshotter
+// API group — a virtualization VirtualDiskSnapshot, for example. Such a snapshot belongs to that
+// controller's own lifecycle, which is exactly what this module must not step into, so it gets no domain
+// capture at all.
+//
+// A malformed apiVersion is treated as foreign: an owner this code cannot parse is one it cannot claim to
+// understand, and refusing capture is the outcome that changes nothing about the object.
+//
+// This is a veto and only a veto. Passing it means "no other controller owns this", never "this module
+// created it" — the two questions have different answers for every user-created snapshot, and conflating
+// them is what once made the module take over snapshots it merely observed. It is also not an authorization
+// boundary: ownerReferences are writable by anyone who can create the object, and enforcement against a
+// deliberate forgery would have to come from admission or RBAC. At most one ownerReference can be the
+// controller, so the first one found decides.
+func hasForeignControllerOwner(obj metav1.Object) bool {
+	for _, ref := range obj.GetOwnerReferences() {
+		if ref.Controller == nil || !*ref.Controller {
+			continue
+		}
+		gv, err := schema.ParseGroupVersion(ref.APIVersion)
+		if err != nil {
+			return true
+		}
+		return gv.Group != storagev1alpha1.APIGroup
+	}
+	return false
+}
+
 // ensureManagedLatch returns whether the VolumeSnapshot is domain-managed, latching the exclude-veto
-// outcome on first observation. The veto is checked on the SOURCE PVC's exclude label. A missing PVC at
-// adoption cannot be vetoed by an absent label, so it latches managed=true and lets the capture leg
+// outcome on first observation. The veto is checked on the SOURCE PVC's exclude label. A missing PVC cannot
+// be vetoed by an absent label, so it latches managed=true and lets the capture leg
 // surface a recoverable ArtifactMissing instead. The latch is monotonic (evaluated exactly once).
 func (r *VolumeSnapshotDomainReconciler) ensureManagedLatch(ctx context.Context, vs *sfsnapv1.VolumeSnapshot, pvcName string) (bool, error) {
 	if v, ok := vs.Labels[labelSnapshotManaged]; ok {
@@ -299,15 +351,11 @@ func (r *VolumeSnapshotDomainReconciler) latchManagedLabel(ctx context.Context, 
 			cur.Labels = map[string]string{}
 		}
 		cur.Labels[labelSnapshotManaged] = desired
-		// A VolumeSnapshot adopted as a domain-managed node (managed=true) is a protected tree node: stamp
-		// the authoritative delete-protection state in the SAME patch that latches adoption, i.e. before any
-		// graph edge is published — a tree node must never be reachable from the tree while still deletable. A
-		// vetoed (managed=false) VolumeSnapshot is a plain CSI snapshot, not a tree node, and MUST NOT be
-		// protected. Both halves are guarded by TestLatchManagedTrueStampsDeleteProtected and
-		// TestLatchManagedFalseDoesNotStampDeleteProtected.
-		if desired == managedValueTrue {
-			storagev1alpha1.StampDeleteProtected(cur)
-		}
+		// Delete protection is deliberately NOT written here. It states that the object is a node of a
+		// snapshot tree, which is a property of how the object was created, so its creator stamps it into the
+		// CREATE payload — a snapshot this reconciler may manage is already protected when it first sees it.
+		// Deriving protection from an observation is exactly how a foreign object ends up protected, which is
+		// what TestLatchNeverStampsDeleteProtected guards on both latch outcomes.
 		if err := r.SnapClient.Patch(ctx, cur, client.MergeFrom(base)); err != nil {
 			return err
 		}

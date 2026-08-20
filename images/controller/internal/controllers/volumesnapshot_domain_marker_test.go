@@ -41,54 +41,97 @@ func newDomainMarkerReconciler(t *testing.T, vs *sfsnapv1.VolumeSnapshot) *Volum
 	return &VolumeSnapshotDomainReconciler{SnapClient: snapClient}
 }
 
-// TestLatchManagedTrueStampsDeleteProtected asserts a VolumeSnapshot adopted as a managed tree node
-// (managed=true) is stamped with the authoritative delete-protection marker in the SAME latch patch,
-// i.e. before any graph edge is published: the node must never be reachable from the tree while it is
-// still deletable.
-func TestLatchManagedTrueStampsDeleteProtected(t *testing.T) {
-	ctx := context.Background()
-	vs := &sfsnapv1.VolumeSnapshot{ObjectMeta: metav1.ObjectMeta{Name: "vs-managed", Namespace: "ns"}}
-	r := newDomainMarkerReconciler(t, vs)
+// TestLatchNeverStampsDeleteProtected asserts the latch writes its own outcome and nothing else, on BOTH
+// outcomes. Protection says the object is a node of a snapshot tree, which its creator knows and an
+// observer does not: a reconciler that stamps it while latching turns "I have seen this object" into "I own
+// this object", and that is how a foreign snapshot became undeletable. A snapshot this reconciler may
+// legitimately manage is already protected when it first observes it, so nothing is lost by removing the stamp.
+func TestLatchNeverStampsDeleteProtected(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		desired string
+	}{
+		{name: "managed", desired: managedValueTrue},
+		{name: "vetoed", desired: managedValueFalse},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := context.Background()
+			vs := &sfsnapv1.VolumeSnapshot{ObjectMeta: metav1.ObjectMeta{Name: "vs-" + tc.name, Namespace: "ns"}}
+			r := newDomainMarkerReconciler(t, vs)
 
-	got, err := r.latchManagedLabel(ctx, client.ObjectKeyFromObject(vs), managedValueTrue)
-	if err != nil {
-		t.Fatalf("latchManagedLabel: %v", err)
-	}
-	if got != managedValueTrue {
-		t.Fatalf("effective managed = %q, want %q", got, managedValueTrue)
-	}
+			got, err := r.latchManagedLabel(ctx, client.ObjectKeyFromObject(vs), tc.desired)
+			if err != nil {
+				t.Fatalf("latchManagedLabel: %v", err)
+			}
+			if got != tc.desired {
+				t.Fatalf("effective managed = %q, want %q", got, tc.desired)
+			}
 
-	cur := &sfsnapv1.VolumeSnapshot{}
-	if err := r.SnapClient.Get(ctx, client.ObjectKeyFromObject(vs), cur); err != nil {
-		t.Fatalf("get vs: %v", err)
-	}
-	if cur.Labels[labelSnapshotManaged] != managedValueTrue {
-		t.Fatalf("managed label = %q, want %q", cur.Labels[labelSnapshotManaged], managedValueTrue)
-	}
-	if !ssstoragev1alpha1.IsDeleteProtected(cur) {
-		t.Fatalf("managed VS must be delete-protected, labels=%#v", cur.Labels)
+			cur := &sfsnapv1.VolumeSnapshot{}
+			if err := r.SnapClient.Get(ctx, client.ObjectKeyFromObject(vs), cur); err != nil {
+				t.Fatalf("get vs: %v", err)
+			}
+			if cur.Labels[labelSnapshotManaged] != tc.desired {
+				t.Fatalf("managed label = %q, want %q", cur.Labels[labelSnapshotManaged], tc.desired)
+			}
+			if ssstoragev1alpha1.IsDeleteProtected(cur) {
+				t.Fatalf("the latch must not write protection, labels=%#v", cur.Labels)
+			}
+		})
 	}
 }
 
-// TestLatchManagedFalseDoesNotStampDeleteProtected asserts a vetoed (managed=false) VolumeSnapshot is a
-// plain CSI snapshot, NOT a tree node, and therefore MUST NOT be delete-protected.
-func TestLatchManagedFalseDoesNotStampDeleteProtected(t *testing.T) {
-	ctx := context.Background()
-	vs := &sfsnapv1.VolumeSnapshot{ObjectMeta: metav1.ObjectMeta{Name: "vs-vetoed", Namespace: "ns"}}
-	r := newDomainMarkerReconciler(t, vs)
+// TestHasForeignControllerOwner enumerates the owner shapes the domain gate has to tell apart. Only one row
+// is vetoed — a controller from another API group — and the interesting rows are the ones that are not: a
+// snapshot with no owner is a user's own snapshot and gets domain capture like any other, and a foreign
+// reference that is not the controller belongs to somebody's bookkeeping, not to a lifecycle.
+func TestHasForeignControllerOwner(t *testing.T) {
+	controller := true
+	notController := false
+	ourAPIVersion := ssstoragev1alpha1.APIGroup + "/" + ssstoragev1alpha1.APIVersion
 
-	if _, err := r.latchManagedLabel(ctx, client.ObjectKeyFromObject(vs), managedValueFalse); err != nil {
-		t.Fatalf("latchManagedLabel: %v", err)
+	cases := []struct {
+		name  string
+		owner []metav1.OwnerReference
+		want  bool
+	}{
+		{
+			name:  "a foreign controller",
+			owner: []metav1.OwnerReference{{APIVersion: "virtualization.deckhouse.io/v1alpha2", Kind: "VirtualDiskSnapshot", Name: "vds", Controller: &controller}},
+			want:  true,
+		},
+		{
+			name:  "an unparsable owner apiVersion",
+			owner: []metav1.OwnerReference{{APIVersion: "a/b/c", Kind: "Whatever", Name: "x", Controller: &controller}},
+			want:  true,
+		},
+		{
+			name:  "our Snapshot as controller",
+			owner: []metav1.OwnerReference{{APIVersion: ourAPIVersion, Kind: ssstoragev1alpha1.SnapshotKind, Name: "root", UID: "root-uid", Controller: &controller}},
+			want:  false,
+		},
+		{
+			name:  "our Snapshot at a future version",
+			owner: []metav1.OwnerReference{{APIVersion: ssstoragev1alpha1.APIGroup + "/v1", Kind: ssstoragev1alpha1.SnapshotKind, Name: "root", Controller: &controller}},
+			want:  false,
+		},
+		{
+			name:  "no owner at all",
+			owner: nil,
+			want:  false,
+		},
+		{
+			name:  "a foreign owner that is not the controller",
+			owner: []metav1.OwnerReference{{APIVersion: "virtualization.deckhouse.io/v1alpha2", Kind: "VirtualDiskSnapshot", Name: "vds", Controller: &notController}},
+			want:  false,
+		},
 	}
-
-	cur := &sfsnapv1.VolumeSnapshot{}
-	if err := r.SnapClient.Get(ctx, client.ObjectKeyFromObject(vs), cur); err != nil {
-		t.Fatalf("get vs: %v", err)
-	}
-	if cur.Labels[labelSnapshotManaged] != managedValueFalse {
-		t.Fatalf("managed label = %q, want %q", cur.Labels[labelSnapshotManaged], managedValueFalse)
-	}
-	if ssstoragev1alpha1.IsDeleteProtected(cur) {
-		t.Fatalf("vetoed VS must NOT be delete-protected, labels=%#v", cur.Labels)
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			vs := &sfsnapv1.VolumeSnapshot{ObjectMeta: metav1.ObjectMeta{Name: "vs", Namespace: "ns", OwnerReferences: tc.owner}}
+			if got := hasForeignControllerOwner(vs); got != tc.want {
+				t.Fatalf("hasForeignControllerOwner(%s) = %v, want %v", tc.name, got, tc.want)
+			}
+		})
 	}
 }
