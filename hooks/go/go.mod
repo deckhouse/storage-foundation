@@ -3,7 +3,7 @@ module github.com/deckhouse/storage-foundation/hooks/go
 go 1.26.6
 
 require (
-	github.com/deckhouse/sds-common-lib v0.9.0
+	github.com/deckhouse/sds-common-lib v0.10.0
 	github.com/deckhouse/deckhouse/pkg/log v0.0.0-20250814094423-e9f108b41a1a
 	github.com/deckhouse/module-sdk v0.7.0
 	github.com/kubernetes-csi/external-snapshotter/client/v8 v8.2.0
