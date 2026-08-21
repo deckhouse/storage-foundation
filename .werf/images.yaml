@@ -50,8 +50,13 @@
   {{- $_ := set $ctx "ModuleNamePrefix" "" }}
   {{- $_ := set $ctx "ModuleDir" "/" }}
   {{- $_ := set $ctx "GOPROXY" (env "GOPROXY" "https://proxy.golang.org,direct") }}
-  {{- /* Token for the private fox Go modules; see "auth for private go modules". */}}
-  {{- $_ := set $ctx "GO_PRIVATE_TOKEN" (env "CI_JOB_TOKEN" "") }}
+  {{- /* Token for the private fox Go modules; see "auth for private go modules"
+         for what it is used for and why the order is FOX_GO_TOKEN first,
+         CI_JOB_TOKEN second. An empty or unset FOX_GO_TOKEN falls through to the
+         job token, so the two behave like the shell's ${FOX_GO_TOKEN:-...}.
+         Both names have to stay in allowEnvVariables of werf-giterminism.yaml,
+         or werf refuses to read them at all. */}}
+  {{- $_ := set $ctx "GO_PRIVATE_TOKEN" (env "FOX_GO_TOKEN" "" | default (env "CI_JOB_TOKEN" "")) }}
   {{- $_ := set $ctx "Commit" $Root.Commit }}
   {{- $_ := set $ctx "ProjectName" (printf "%s/%s" $ctx.SVACE_PROJECT_PREFIX $ctx.ImageName ) }}
   {{- $_ := set $ctx "Files" $.Files }}

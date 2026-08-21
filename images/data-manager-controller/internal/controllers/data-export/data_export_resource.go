@@ -480,7 +480,7 @@ func (r *DataexportReconciler) updateDataExport(ctx context.Context, dataExportO
 			merged := statusCopy.DeepCopy()
 			// Preserve the pod-owned status fields from the latest server-side object; the controller owns
 			// everything else (the Ready condition, phase, completionTimestamp, publicURL, volumeMode).
-			merged.Url = fresh.Status.Url
+			merged.URL = fresh.Status.URL
 			merged.CA = fresh.Status.CA
 			merged.AccessTimestamp = fresh.Status.AccessTimestamp
 			merged.ServerState = fresh.Status.ServerState
@@ -498,7 +498,7 @@ func (r *DataexportReconciler) updateDataExport(ctx context.Context, dataExportO
 }
 
 func (r *DataexportReconciler) implementDataExportProviding(ctx context.Context, dataExport *dev1alpha1.DataExport, generatedNames Names) error {
-	log.Printf("Start realizing DE for resource %s, userPVC: %s, ttl: %s", dataExport.Name, dataExport.Spec.TargetRef.Name, dataExport.Spec.Ttl)
+	log.Printf("Start realizing DE for resource %s, userPVC: %s, ttl: %s", dataExport.Name, dataExport.Spec.TargetRef.Name, dataExport.Spec.TTL)
 
 	var exportPVC *corev1.PersistentVolumeClaim
 	// pv is fetched once during exportPVC creation and passed through to ensureExportPVReady
@@ -1472,7 +1472,7 @@ func (r *DataexportReconciler) createDeployment(ctx context.Context, dataExport 
 				dev1alpha1.AnnotationStorageManagerNameKey:      dataExport.Name,
 			},
 		},
-		Spec: makeExportDeploySpec(exportPVC.Spec.VolumeMode, dataExport, dataExportPodImageName, dataExport.Spec.Ttl, r.Config.ControllerNamespace, generatedNames),
+		Spec: makeExportDeploySpec(exportPVC.Spec.VolumeMode, dataExport, dataExportPodImageName, dataExport.Spec.TTL, r.Config.ControllerNamespace, generatedNames),
 	}
 
 	err = r.Client.Create(ctx, &exportDeploy)

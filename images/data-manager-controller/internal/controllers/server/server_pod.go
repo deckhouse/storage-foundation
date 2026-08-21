@@ -84,8 +84,8 @@ func (r *PodReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.R
 
 			url := fmt.Sprintf("https://%s:%d/", pod.Status.PodIP, common.FileServerPort)
 			status := dataManager.GetStatus()
-			if status.Url != url {
-				status.Url = url
+			if status.URL != url {
+				status.URL = url
 				err = r.Client.Status().Update(ctx, dataManager)
 				if err != nil {
 					return ctrl.Result{}, fmt.Errorf("failed update URL for DataManager pod for DataManager resource %s, %s: %w", dataExportNamespacedName.Namespace, dataExportNamespacedName.Name, err)

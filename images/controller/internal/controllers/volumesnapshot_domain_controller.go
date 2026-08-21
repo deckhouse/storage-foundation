@@ -136,17 +136,20 @@ func (r *VolumeSnapshotDomainReconciler) Reconcile(ctx context.Context, req ctrl
 		return ctrl.Result{}, nil
 	}
 
-	// (1) The only gate on who gets domain capture: a snapshot another controller owns is left alone.
-	// Everything else is planned here regardless of who created it, because being exportable is not a reward
-	// for having been created by this module — a user's own snapshot deserves a manifest leg and a content
-	// node just as much as one this module made. What origin does decide is data ownership, and that is
-	// settled elsewhere (the core binds the content to the artifact instead of adopting the artifact); this
-	// path writes only the snapshot's own capture state.
+	// (1) Ownership veto: a snapshot another controller owns is left alone. WHO CREATED the object is a
+	// different question with a different answer, and it is asked separately below; this gate asks only
+	// whether somebody else is already driving the object's lifecycle. It forbids and never permits — the
+	// absence of a foreign controller says nothing about origin, so nothing downstream may read "passed the
+	// gate" as "ours".
 	//
-	// The veto only forbids and never permits: the absence of a foreign controller says nothing about who
-	// created the object, so nothing downstream may read "passed the gate" as "ours". The label the patched
-	// external-snapshotter fork stamps on snapshots it reconciles is deliberately NOT consulted: it records
-	// that the CSI controller saw the object, which says nothing about ownership either.
+	// Being exportable is not a reward for having been created by this module: a user's own snapshot
+	// deserves a manifest leg and a content node just as much as one this module made. What origin does
+	// decide is data ownership, and that is settled elsewhere (the core binds the content to the artifact
+	// instead of adopting the artifact); this path writes only the snapshot's own capture state.
+	//
+	// The label the patched external-snapshotter fork stamps on snapshots it reconciles is deliberately NOT
+	// consulted here either: it records that the CSI controller saw the object, which says nothing about
+	// ownership or about origin.
 	if hasForeignControllerOwner(vs) {
 		logger.V(1).Info("skip: VolumeSnapshot is controlled by another controller")
 		return ctrl.Result{}, nil
@@ -167,7 +170,29 @@ func (r *VolumeSnapshotDomainReconciler) Reconcile(ctx context.Context, req ctrl
 		return ctrl.Result{}, nil
 	}
 
-	// (4) Management veto latch: evaluate the exclude veto on the source PVC exactly once and record the
+	// (4) Origin gate: a VolumeSnapshot this stack never saw being created is left alone. The origin label is
+	// written once, into the CREATE payload, by whoever is present at the birth — the unified snapshot
+	// write-path for a tree node, the module's own mutating admission for a snapshot a client creates
+	// directly. An object carrying no origin key at all was therefore created before any of that was in the
+	// cluster, and taking it in would mean the module adopting every snapshot it found on the day it was
+	// installed. That is the owner's rule, and it is the one thing an installed module must never do.
+	//
+	// The key is read for PRESENCE only. Its VALUE says who created the object, and that question is settled
+	// elsewhere: a snapshot a user took is captured here like any other and merely never owned (the core
+	// binds its content to its own artifact). Presence answers the only question this gate asks — was this
+	// stack there when the object came into being.
+	//
+	// It sits BELOW the import-mode and pre-provisioned gates, and moving it above them would be wrong rather
+	// than merely different: the mutating admission is scoped to VolumeSnapshots with a PVC source, so an
+	// import-mode or pre-provisioned snapshot structurally never carries the key however recently it was
+	// created. Judged by this gate they would all report as predating the module. They are already answered
+	// above, on what they are, which is the honest ground for skipping them.
+	if _, stated := vs.Labels[storagev1alpha1.LabelProvenance]; !stated {
+		logger.V(1).Info("skip: VolumeSnapshot carries no origin label, so it predates this module")
+		return ctrl.Result{}, nil
+	}
+
+	// (5) Management veto latch: evaluate the exclude veto on the source PVC exactly once and record the
 	// outcome. A vetoed snapshot stays a plain CSI snapshot with no domain capture.
 	managed, err := r.ensureManagedLatch(ctx, vs, *pvcName)
 	if err != nil {
@@ -178,7 +203,7 @@ func (r *VolumeSnapshotDomainReconciler) Reconcile(ctx context.Context, req ctrl
 		return ctrl.Result{}, nil
 	}
 
-	// (5) Capture protocol (manifest leg only; data leg is the native CSI VolumeSnapshotContent).
+	// (6) Capture protocol (manifest leg only; data leg is the native CSI VolumeSnapshotContent).
 	adapter := volumeSnapshotAdapter{snap: vs}
 	sdk := r.capture()
 

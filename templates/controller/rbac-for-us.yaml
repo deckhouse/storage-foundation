@@ -103,6 +103,32 @@ rules:
   resources: ["events"]
   verbs: ["create", "patch"]
 
+# SnapshotContent (cluster-scoped, get only) - read by the aggregated API server, not by a reconciler.
+# Every one of the three VolumeSnapshot subresources resolves the addressed VolumeSnapshot's
+# status.boundSnapshotContentName and then reads that SnapshotContent to verify its spec.snapshotRef points
+# back at the very VolumeSnapshot that named it. status.boundSnapshotContentName is user-writable, so
+# without this read the anti-spoofing handshake cannot run at all and all three subresources fail closed.
+# The manifest-with-data-restoration path also takes this object's status.data (the PVC -> data artifact
+# binding) as the input that lets a restored PVC be pointed at the VolumeSnapshot carrying its data.
+# get only: never list, watch or mutate - the content is owned by the snapshot core.
+- apiGroups: ["state-snapshotter.deckhouse.io"]
+  resources: ["snapshotcontents"]
+  verbs: ["get"]
+
+# Aggregated content-layer subresources of the snapshot core, addressed cluster-scoped by the resolved
+# SnapshotContent name. They are how the aggregated API server obtains and stores manifest BYTES: the
+# download backs both the manifests-download proxy and the restore base fetch, the upload is where the
+# import facade forwards a node's own manifests. It writes nothing to the addressed VolumeSnapshot itself:
+# the only thing that layer would own on it is the child list, and a VolumeSnapshot is a data leaf whose
+# list is empty by definition. Requests travel through the kube-apiserver aggregation layer under this
+# ServiceAccount, so they are authorized here and not by any capability role.
+- apiGroups: ["subresources.state-snapshotter.deckhouse.io"]
+  resources: ["snapshotcontents/manifests-download"]
+  verbs: ["get"]
+- apiGroups: ["subresources.state-snapshotter.deckhouse.io"]
+  resources: ["snapshotcontents/manifests-upload"]
+  verbs: ["create"]
+
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
@@ -149,3 +175,94 @@ subjects:
   - kind: ServiceAccount
     name: controller
     namespace: d8-{{ .Chart.Name }}
+
+---
+# The aggregated API server verifies the kube-apiserver front-proxy client certificate against the
+# cluster-managed requestheader CA, and reads the allowed client names next to it, from
+# kube-system/extension-apiserver-authentication. Without a bind to the built-in reader Role, delegated
+# authentication cannot start at all and NO aggregated request authenticates — the failure is total, not
+# per-subresource, which is why this binding is part of the canonical aggregated-apiserver setup rather
+# than an optimization.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: d8:{{ .Chart.Name }}:controller-auth-reader
+  namespace: kube-system
+  {{- include "helm_lib_module_labels" (list . (dict "app" "controller")) | nindent 2 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: extension-apiserver-authentication-reader
+subjects:
+  - kind: ServiceAccount
+    name: controller
+    namespace: d8-{{ .Chart.Name }}
+
+---
+# Delegated authentication resolves a bearer token by TokenReview and delegated authorization decides
+# every aggregated request by SubjectAccessReview. Both verbs come from the built-in
+# system:auth-delegator ClusterRole; without this binding the server can neither identify a caller nor
+# ask whether the caller is allowed, so every aggregated request fails closed.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: d8:{{ .Chart.Name }}:controller:auth-delegator
+  {{- include "helm_lib_module_labels" (list . (dict "app" "controller")) | nindent 2 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: system:auth-delegator
+subjects:
+  - kind: ServiceAccount
+    name: controller
+    namespace: d8-{{ .Chart.Name }}
+
+---
+# Access GRANTED BY this module TO the snapshot core, on the aggregated subresource the core calls back
+# into.
+#
+# When a snapshot tree contains a VolumeSnapshot, the core's restore compiler does not compile that node
+# itself: it stops at the boundary and asks the owner of the kind — this module's aggregated API server —
+# for the already apply-ready manifests, then splices the answer. That request is authorized like any
+# other aggregated request, against the group in its path, so the core's ServiceAccount needs an explicit
+# get here or the whole restore fails closed with 403 while every component is healthy.
+#
+# The grant lives in THIS chart, and that is the rule rather than an exception: the core's own static
+# roles deliberately name no group of any module that extends it — a module publishes access to its own
+# aggregated subresources itself, in its own chart, because only it knows the group name. Mechanically
+# deriving the group from the CR's group would give the wrong answer for this kind anyway (the CR lives in
+# the CSI group, the subresources group is named after this module).
+#
+# Scope is deliberately narrow, and the narrowness is what keeps it correct over time: the verb is on the
+# RESOURCE volumesnapshots/manifests-with-data-restoration and not on the group, so subresources of this
+# module's own CRDs — which will join this very group later — are not granted along with it. Only the
+# restore subresource is listed: manifests-download and manifests-and-children-refs-upload are addressed
+# by end-user clients, never by the core.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: d8:{{ .Chart.Name }}:snapshot-core-restore-delegation
+  {{- include "helm_lib_module_labels" (list . (dict "app" "controller")) | nindent 2 }}
+rules:
+- apiGroups: ["subresources.storage-foundation.deckhouse.io"]
+  resources: ["volumesnapshots/manifests-with-data-restoration"]
+  verbs: ["get"]
+
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: d8:{{ .Chart.Name }}:snapshot-core-restore-delegation
+  {{- include "helm_lib_module_labels" (list . (dict "app" "controller")) | nindent 2 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: d8:{{ .Chart.Name }}:snapshot-core-restore-delegation
+subjects:
+  # The snapshot core controller's ServiceAccount. It is the ONLY subject: this is a delegation channel
+  # between two controllers, not a user-facing capability, and adding a human or another component here
+  # would hand out cross-namespace restore output that the user-facing roles gate separately. The
+  # namespace and name are those of the other module's controller and cannot be derived from this chart.
+  - kind: ServiceAccount
+    name: controller
+    namespace: d8-state-snapshotter

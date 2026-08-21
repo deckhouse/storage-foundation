@@ -35,6 +35,7 @@ import (
 
 	v1alpha1 "github.com/deckhouse/storage-foundation/api/v1alpha1"
 	"github.com/deckhouse/storage-foundation/images/controller/internal/controllers"
+	"github.com/deckhouse/storage-foundation/images/controller/internal/domainapi"
 	"github.com/deckhouse/storage-foundation/images/controller/pkg/config"
 	"github.com/deckhouse/storage-foundation/images/controller/pkg/kubutils"
 	"github.com/deckhouse/storage-foundation/images/controller/pkg/logger"
@@ -145,6 +146,14 @@ func main() {
 		os.Exit(1)
 	}
 	log.Info("VolumeSnapshotDomainController added to manager")
+
+	// Add the aggregated API server that serves the VolumeSnapshot subresources. It runs on EVERY
+	// replica, not only the leader: the Service in front of it load-balances across all ready pods.
+	if err = domainapi.AddToManager(mgr, cfgParams, log.GetLogger()); err != nil {
+		log.Error(err, "unable to add the aggregated API server to manager")
+		os.Exit(1)
+	}
+	log.Info("aggregated API server added to manager")
 
 	if err = mgr.AddHealthzCheck("healthz", healthz.Ping); err != nil {
 		log.Error(err, "[main] unable to mgr.AddHealthzCheck")

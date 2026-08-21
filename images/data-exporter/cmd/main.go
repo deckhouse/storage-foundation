@@ -25,16 +25,15 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
 
 	"github.com/deckhouse/sds-common-lib/fs/real"
 	"github.com/deckhouse/storage-foundation/common"
-	"github.com/deckhouse/storage-foundation/images/data-exporter/internal/authorization"
 	"github.com/deckhouse/storage-foundation/images/data-exporter/internal/certutil"
 	"github.com/deckhouse/storage-foundation/images/data-exporter/internal/config"
-	"github.com/deckhouse/storage-foundation/images/data-exporter/internal/middleware"
 	"github.com/deckhouse/storage-foundation/images/data-exporter/internal/repository"
 	"github.com/deckhouse/storage-foundation/images/data-exporter/internal/ttl_control"
 )
@@ -142,41 +141,27 @@ func main() {
 	wg := sync.WaitGroup{}
 	mux := http.NewServeMux()
 
-	middlewares := []func(http.Handler) http.Handler{
-		func(next http.Handler) http.Handler {
-			return authorization.Authorize(next, k8sClient, cfg.Operation, cfg.URLOpt.DataManagerNamespace)
-		},
-	}
-	// TODO refactor this later
-	if cfg.Operation == common.OperationImport {
-		middlewares = append(middlewares, middleware.CheckRequiredHeaders)
-	}
+	ttlControl.Start(ctx, &wg)
 
-	chainedHandler := middleware.Chain(mainHTTPHandler, middlewares...)
-
-	mainHandler := ttlControl.Start(
-		ctx,
-		chainedHandler,
-		&wg,
+	// ttlControl.Wrap is handed to the assembly rather than applied here: where the transfer accounting sits
+	// in the chain decides what counts as activity, and that decision lives with the chain.
+	mainHandler, err := NewDataServerHandler(
+		mux,
+		cfg,
+		mainHTTPHandler,
+		NewFinishedHandler(k8sClient, cfg, logger),
+		k8sClient,
+		ttlControl.Wrap,
+		logger,
 	)
-
-	switch cfg.Mode {
-	case config.VolumeModeBlock:
-		MuxAddBlockHandler(mux, cfg.URLOpt, mainHandler, logger)
-	case config.VolumeModeFilesystem:
-		MuxAddFSHandler(mux, cfg.URLOpt, mainHandler, logger)
-	default:
-		logger.Error("Invalid program argument, mode", "mode", cfg.Mode)
+	if err != nil {
+		logger.Error("Failed to assemble HTTP handler", "error", err)
 		os.Exit(1)
-	}
-
-	if cfg.Operation == common.OperationImport {
-		MuxAddFinishedHandler(mux, cfg.URLOpt, k8sClient, cfg, logger)
 	}
 
 	server := &http.Server{
 		Addr:    cfg.Port,
-		Handler: logRequest(mux, *logger),
+		Handler: logRequest(mainHandler, *logger),
 		// ReadHeaderTimeout (not ReadTimeout) guards against slowloris on the request line/headers.
 		// ReadTimeout caps the entire request including the body, which would abort large streaming
 		// block/filesystem uploads mid-flight (io.Copy(dev, r.Body)) once the device write is slower
@@ -221,8 +206,10 @@ func main() {
 	// pod's only readiness signal to the controller, which turns it into the Ready condition/phase. The
 	// pod is the sole writer of serverState and SetServerState is monotonic (Ready is set only from the
 	// unset state), so on a restart over an already-terminal object (Finished/IdleExpired) this is a
-	// no-op. A failed write exits so the Deployment restarts the pod and republishes — matching the CA
-	// step and the plan's "pod died -> Deployment recreates" fault-tolerance model.
+	// no-op. A failed write exits rather than continuing without the signal: this pod is disposable and its
+	// Deployment recreates it, so dying and republishing on the next start is the recovery, whereas a server
+	// that listens while the controller still sees no readiness is a transfer nobody can begin. The CA step
+	// above exits for the same reason.
 	err = k8sClient.SetServerState(ctx, cfg.Operation, cfg.URLOpt.DataManagerNamespace, cfg.DataManagerName, common.ServerStateReady)
 	if err != nil {
 		logger.Error("Set DataManager serverState Ready", "failed", err.Error())
@@ -250,6 +237,11 @@ func main() {
 
 func logRequest(handler http.Handler, logger slog.Logger) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// The limit of the withholding below: the request line is logged whole, and requestUri includes the
+		// query string. That is safe only because of a property of the protocol, not because of anything this
+		// function does — no endpoint here takes a credential as a query parameter. An endpoint that ever
+		// does will leak it into the pod log by this line, whatever the header handling further down decides,
+		// so such a parameter needs withholding here first.
 		logger.Info("received request",
 			"method", r.Method,
 			"path", r.URL.Path,
@@ -260,9 +252,103 @@ func logRequest(handler http.Handler, logger slog.Logger) http.Handler {
 		)
 
 		for name, value := range r.Header {
-			logger.Info("request header", "name", name, "value", value)
+			logHeader(&logger, name, value)
 		}
 
 		handler.ServeHTTP(w, r)
 	})
+}
+
+// loggableHeaders is the allow-list of request headers whose VALUE may be written to the log. A header that
+// is not here is logged by name only.
+//
+// The default has to be this way round. A deny-list of the names known to carry credentials leaks the moment
+// somebody introduces a header this file has never heard of, it leaks silently, and it leaks into a place
+// where the damage lasts: pod logs are readable by more people than the credential ever was and outlive the
+// transfer the credential was minted for. An allow-list fails the other way — a new header shows up in the
+// log without its value, somebody notices, and the fix is one line here.
+//
+// The list is deliberately NOT built from the required-upload-header set in internal/middleware. That set
+// says what a write must carry; if it ever grows a name that carries a credential, the growth must not widen
+// what this function prints.
+var loggableHeaders = map[string]bool{
+	// The upload protocol: these are what a person debugging a rejected or resumed transfer reads.
+	"X-Content-Length":        true,
+	"X-Offset":                true,
+	"X-Attribute-Permissions": true,
+	"X-Attribute-Uid":         true,
+	"X-Attribute-Gid":         true,
+	// Transport and content negotiation.
+	"Accept":          true,
+	"Accept-Encoding": true,
+	"Connection":      true,
+	"Content-Length":  true,
+	"Content-Type":    true,
+	"Expect":          true,
+	"Range":           true,
+	"User-Agent":      true,
+	// Enough of the CORS preflight to tell a browser-side failure from a server-side one.
+	"Origin":                         true,
+	"Access-Control-Request-Method":  true,
+	"Access-Control-Request-Headers": true,
+}
+
+// hiddenValue is what a withheld header value is logged as. It is the whole value: a prefix of a token is
+// still token material, so there is no truncated form of this that would be safe to print.
+const hiddenValue = "<hidden>"
+
+// schemeHeaders name their authentication scheme in the first word of the value. For those the scheme is
+// logged next to the hidden value, because "Authorization arrived and it was a Bearer" is what someone
+// debugging a refused transfer actually needs, and the scheme name is not the secret. Cookie is absent on
+// purpose: it has no scheme word, and every byte of it is credential material.
+var schemeHeaders = map[string]bool{
+	"Authorization":       true,
+	"Proxy-Authorization": true,
+}
+
+// knownSchemes are the scheme names that may be logged, mapped from their lowercase form to the spelling
+// used in the log. Only a name from this set is printed. Anything else is reported as unrecognized rather
+// than echoed — a value with no scheme word at all, a bare token pasted into the header, would otherwise be
+// printed as if it were the scheme name, which is precisely the leak this is here to prevent.
+var knownSchemes = map[string]string{
+	"bearer":    "Bearer",
+	"basic":     "Basic",
+	"negotiate": "Negotiate",
+}
+
+const unrecognizedScheme = "unrecognized"
+
+// logHeader writes one request header to the log: its name always, its value only if the name is
+// allow-listed. Keeping the name is what makes the log useful — the presence of a header is diagnostics,
+// its value is a secret we have no business copying anywhere.
+//
+// Guard: TestLogRequestHidesCredentialHeaderValues.
+func logHeader(logger *slog.Logger, name string, values []string) {
+	canonical := http.CanonicalHeaderKey(name)
+
+	switch {
+	case loggableHeaders[canonical]:
+		logger.Info("request header", "name", name, "value", values)
+	case schemeHeaders[canonical]:
+		logger.Info("request header", "name", name, "value", hiddenValue, "scheme", authScheme(values))
+	default:
+		logger.Info("request header", "name", name, "value", hiddenValue)
+	}
+}
+
+func authScheme(values []string) string {
+	if len(values) == 0 {
+		return unrecognizedScheme
+	}
+
+	scheme, _, found := strings.Cut(values[0], " ")
+	if !found {
+		return unrecognizedScheme
+	}
+
+	if logged, ok := knownSchemes[strings.ToLower(scheme)]; ok {
+		return logged
+	}
+
+	return unrecognizedScheme
 }

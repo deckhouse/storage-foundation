@@ -28,7 +28,7 @@ The data server is built on the standard Go file server and supports both filesy
 
 ### Key parameters
 
-- `ttl`: Time-to-live duration after the last server access (file download or directory listing). When the TTL expires, the exporter pod is automatically deleted and the PVC is released back to the original PV. The `DataExport` resource's `Ready` condition is set to `false` with reason `Expired`.
+- `ttl`: Time-to-live duration after the last data transfer. The window is an idle one and it counts both directions: it is moved forward by a download (a file being read or a directory being listed) and by an upload while its bytes keep arriving, so a transfer that takes longer than the TTL is not interrupted — only an idle server is. When the TTL expires, the server pod is automatically deleted along with the rest of the server-side infrastructure, and the resource's `Ready` condition is set to `false` with reason `Expired`. For a `DataExport` the PVC is then released back to the original PV; a `DataImport` that expires before its upload has finished produces nothing, and a new `DataImport` has to be created to try again.
 
 - `publish`: When set to `true`, enables external cluster access to the exporter pod. A public URL is generated in the resource's `status.publicURL` field with the format: `https://api.<public-domain>/<namespace>/<kindShort>/<name>/`.
 

@@ -211,7 +211,42 @@ This method involves creating a separate ServiceAccount with appropriate access 
 d8 k -n $NAMESPACE create serviceaccount data-exporter-test
 ```
 
-Create a ClusterRole by executing the following command:
+Create a token by running the commands:
+
+```bash
+export TOKEN=$(d8 k -n $NAMESPACE create token data-exporter-test --duration=24h)
+echo $TOKEN
+```
+
+Requests to the data endpoints of a running export or import — `/api/v1/files…` and `/api/v1/block…`, via the short path as well as the full one — are authorized by a `SubjectAccessReview` for the `create` verb on a **`download` subresource** in the `storage-foundation.deckhouse.io` API group: `dataexports/download` when reading data out of a volume, and `dataimports/download` when writing data into one. Note that the import direction is authorized by the same `download` subresource, not by an `upload` one — an `upload` subresource does not exist, so a role granting it gives no access at all.
+
+Grant the permissions to the ServiceAccount in one of the two ways below.
+
+##### Binding the built-in role (preferred)
+
+The module ships the `d8:use:capability:module:storage-foundation:transfer_volume_data` ClusterRole. It grants `create` on both `download` subresources, and it also allows creating, reading and deleting the `DataExport` and `DataImport` resources themselves, which is what a client needs to run a transfer on its own. The role is not aggregated into any of the cluster-wide access levels, so it takes effect only where it is bound:
+
+```bash
+d8 k create -f - <<EOF
+kind: RoleBinding
+apiVersion: rbac.authorization.k8s.io/v1
+metadata:
+  name: data-exporter-test-transfer-binding
+  namespace: ${NAMESPACE}
+subjects:
+- kind: ServiceAccount
+  name: data-exporter-test
+  namespace: ${NAMESPACE}
+roleRef:
+  kind: ClusterRole
+  name: d8:use:capability:module:storage-foundation:transfer_volume_data
+  apiGroup: rbac.authorization.k8s.io
+EOF
+```
+
+##### Defining a role manually
+
+If the built-in role allows more than you want to grant, define your own ClusterRole with just the subresources you need. The one below permits downloading exported data and nothing else; add `dataimports/download` to `resources` to permit uploading data into a volume as well:
 
 ```bash
 d8 k create -f - <<EOF
@@ -226,12 +261,7 @@ rules:
 EOF
 ```
 
-Create a token by running the commands:
-
-```bash
-export TOKEN=$(d8 k -n $NAMESPACE create token data-exporter-test --duration=24h)
-echo $TOKEN
-```
+A role defined this way covers the HTTP requests only: the `DataExport` and `DataImport` resources themselves have to be created by someone holding a separate permission for them.
 
 Create a RoleBinding by applying the manifest:
 
@@ -253,7 +283,9 @@ roleRef:
 EOF
 ```
 
-Check the contents of the target PVC by executing the request:
+##### Checking access
+
+Whichever of the two roles you bound, check the contents of the target PVC by executing the request:
 
 ```bash
 curl -H "Authorization: Bearer $TOKEN" \

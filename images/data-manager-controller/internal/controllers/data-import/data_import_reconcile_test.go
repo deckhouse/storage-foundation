@@ -68,7 +68,7 @@ func createPVCImport(name string, serverState common.ServerState) *dev1alpha1.Da
 		Spec: dev1alpha1.DataImportSpec{
 			Mode:        dev1alpha1.DataImportModeCreatePVC,
 			Publish:     false,
-			Ttl:         "30m",
+			TTL:         "30m",
 			PvcTemplate: &dev1alpha1.PersistentVolumeClaimTemplateSpec{PersistentVolumeClaimTemplateMetadata: dev1alpha1.PersistentVolumeClaimTemplateMetadata{Name: name}},
 		},
 	}
@@ -218,7 +218,7 @@ func TestReconcile_DI_TerminalErrorZeroResult(t *testing.T) {
 	// before any dynamic-client (VCR) call.
 	di := &dev1alpha1.DataImport{
 		ObjectMeta: metav1.ObjectMeta{Name: "bad-imp", Namespace: "ns"},
-		Spec:       dev1alpha1.DataImportSpec{Mode: dev1alpha1.DataImportModePopulateData, Ttl: "30m"},
+		Spec:       dev1alpha1.DataImportSpec{Mode: dev1alpha1.DataImportModePopulateData, TTL: "30m"},
 	}
 	c := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(di).WithObjects(di).Build()
 	r := &DataImportReconciler{Client: c, Reader: c, Config: &config.Options{ControllerNamespace: "d8"}, Now: func() metav1.Time { return fixedNow }}

@@ -22,6 +22,7 @@ import (
 	"encoding/base64"
 	"fmt"
 	"os"
+	"slices"
 	"time"
 
 	authv1 "k8s.io/api/authentication/v1"
@@ -42,6 +43,55 @@ import (
 
 type Client struct {
 	client.Client
+}
+
+// Attributes of the SubjectAccessReview that AuthorizeUser puts to the API server, and therefore the
+// exact permission a client of a running transfer must hold. They are exported because a ClusterRole
+// shipped with this module has to grant precisely them, and
+// TestTransferVolumeDataRoleGrantsAuthorizedSubresources builds the expected rules of that role from
+// these values instead of restating them: rename a subresource here and the role goes red in CI,
+// rather than the cluster silently answering 403 to every request.
+//
+// Note that BOTH directions are authorized by the same "download" subresource, the import one
+// included even though it writes data in. There is no "upload" subresource, so a role granting one
+// grants nothing.
+const (
+	AuthzAPIGroup    = "storage-foundation.deckhouse.io"
+	AuthzAPIVersion  = "v1alpha1"
+	AuthzVerb        = "create"
+	AuthzSubresource = "download"
+
+	AuthzResourceExport = "dataexports"
+	AuthzResourceImport = "dataimports"
+)
+
+// authzResourceByOperation pairs a transfer direction with the API resource whose AuthzSubresource
+// authorizes it. Single source for that pairing: both the SubjectAccessReview built by AuthorizeUser
+// and the guard test over the shipped ClusterRole read it, so a direction added here reaches both.
+var authzResourceByOperation = map[common.Operation]string{
+	common.OperationExport: AuthzResourceExport,
+	common.OperationImport: AuthzResourceImport,
+}
+
+// AuthzResourceForOperation returns the API resource whose AuthzSubresource authorizes operation,
+// and reports whether operation is a known transfer direction.
+func AuthzResourceForOperation(operation common.Operation) (string, bool) {
+	resource, ok := authzResourceByOperation[operation]
+
+	return resource, ok
+}
+
+// AuthzResources returns, sorted, the API resource of every transfer direction. A caller that has to
+// cover all of them — the guard test over the shipped ClusterRole — enumerates them from here, so a
+// direction added later cannot be missed by a hand-written list.
+func AuthzResources() []string {
+	resources := make([]string, 0, len(authzResourceByOperation))
+	for _, resource := range authzResourceByOperation {
+		resources = append(resources, resource)
+	}
+	slices.Sort(resources)
+
+	return resources
 }
 
 func NewK8sClient() (*Client, error) {
@@ -172,13 +222,8 @@ func (c *Client) AuthenticateUserByToken(_ context.Context, token string) (authe
 }
 
 func (c *Client) AuthorizeUser(_ context.Context, operation common.Operation, namespace, username string, groups []string) (allowed bool, reason string, err error) {
-	var resource string
-	switch operation {
-	case common.OperationExport:
-		resource = "dataexports"
-	case common.OperationImport:
-		resource = "dataimports"
-	default:
+	resource, ok := AuthzResourceForOperation(operation)
+	if !ok {
 		return false, "", fmt.Errorf("unknown operation: %s", operation)
 	}
 
@@ -188,11 +233,11 @@ func (c *Client) AuthorizeUser(_ context.Context, operation common.Operation, na
 			Groups: groups,
 			ResourceAttributes: &authzv1.ResourceAttributes{
 				Namespace:   namespace,
-				Verb:        "create",
-				Group:       "storage-foundation.deckhouse.io",
-				Version:     "v1alpha1",
+				Verb:        AuthzVerb,
+				Group:       AuthzAPIGroup,
+				Version:     AuthzAPIVersion,
 				Resource:    resource,
-				Subresource: "download",
+				Subresource: AuthzSubresource,
 			},
 		},
 	}
@@ -201,6 +246,27 @@ func (c *Client) AuthorizeUser(_ context.Context, operation common.Operation, na
 	return sar.Status.Allowed, sar.Status.Reason, err
 }
 
+// UpdateAccessTimestamp publishes the last-activity heartbeat into status.accessTimestamp. The pod is the
+// only component that assigns that field — the controller keeps the value it finds there when it writes
+// status fields of its own — and the timestamps the pod publishes come from one sequential loop, so the
+// field never moves backwards and needs no monotonicity guard of its own.
+//
+// The write is retried on conflict because its FIRST publication happens right after the data server
+// starts — precisely while the controller is writing phase and conditions of the same object — and losing
+// that race is not one missed heartbeat: the next publication only happens on a tick that saw bytes move,
+// so on a transfer nobody ever connects to there is no second attempt and the field stays empty for the
+// whole life of the object. RetryOnConflict with the re-read INSIDE the closure is what makes the write
+// both durable and non-destructive: a retry that reuses the object fetched before the failed attempt
+// would carry the stale resourceVersion and conflict forever, and it would also overwrite whatever the
+// other writer has just stored. DefaultBackoff (not DefaultRetry) is the backoff client-go recommends for
+// exactly this shape — an unrelated modification to a resource under active management by a controller —
+// and is what the CA write below uses.
+//
+// An exhausted retry is returned rather than swallowed: the caller logs it, and a silently dropped
+// conflict is indistinguishable from a published timestamp while the field says otherwise.
+//
+// Guards: TestUpdateAccessTimestamp_SurvivesLostRaceWithConcurrentStatusWrite and
+// TestUpdateAccessTimestamp_ReportsConflictThatNeverClears.
 func (c *Client) UpdateAccessTimestamp(ctx context.Context, operation common.Operation, dataManagerNamespace, dataManagerName string, timestamp time.Time,
 ) error {
 	dataManagerNamespacedName := types.NamespacedName{
@@ -208,17 +274,16 @@ func (c *Client) UpdateAccessTimestamp(ctx context.Context, operation common.Ope
 		Name:      dataManagerName,
 	}
 
-	dataManager, err := common.GetDataManager(ctx, c.Client, dataManagerNamespacedName, operation)
-	if err != nil {
-		return err
-	}
+	return retry.RetryOnConflict(retry.DefaultBackoff, func() error {
+		dataManager, err := common.GetDataManager(ctx, c.Client, dataManagerNamespacedName, operation)
+		if err != nil {
+			return err
+		}
 
-	dataManager.GetStatus().AccessTimestamp = metav1.NewTime(timestamp)
-	if err := c.Status().Update(ctx, dataManager); err != nil {
-		return err
-	}
+		dataManager.GetStatus().AccessTimestamp = metav1.NewTime(timestamp)
 
-	return nil
+		return c.Status().Update(ctx, dataManager)
+	})
 }
 
 func (c *Client) UpdateDataManagerCA(ctx context.Context, operation common.Operation, dataManagerNamespace, dataManagerName string, caCertPEM []byte) error {

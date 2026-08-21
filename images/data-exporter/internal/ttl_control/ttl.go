@@ -67,8 +67,6 @@ func NewTTLControl(
 		return nil, err
 	}
 
-	idleTimer := NewIdleTimer(ttl, logger)
-
 	return &TTLControl{
 		tsUpdater:         tsUpdater,
 		serverStateSetter: serverStateSetter,
@@ -77,15 +75,26 @@ func NewTTLControl(
 		name:              name,
 		ttl:               ttl,
 		logger:            logger,
-		idleTimer:         &idleTimer,
+		idleTimer:         NewIdleTimer(ttl, logger),
 	}, nil
 }
 
-func (t *TTLControl) Start(ctx context.Context, handler http.Handler, wg *sync.WaitGroup) http.Handler {
+// Start launches the three goroutines that run the idle window: the timer itself, the accessTimestamp
+// refresh and the expiry publisher. Call it once — a second call starts a second set of them, all reading
+// the same timer.
+//
+// Starting the window and wrapping a handler in the accounting that feeds it are separate calls on purpose.
+// Where the accounting sits in the middleware chain decides what counts as activity (see RequestNotifier),
+// so it is the caller assembling the chain that places it, and placing it must not be the same act as
+// spawning goroutines.
+func (t *TTLControl) Start(ctx context.Context, wg *sync.WaitGroup) {
 	wg.Add(3)
 	go t.idleTimer.Run(ctx, wg)
 	go UpdateDataManagerAccessTimestamp(ctx, t.operation, t.tsUpdater, t.namespace, t.name, t.idleTimer.TickerChan, t.logger, wg)
 	go SetDataManagerServerStateIdleExpired(ctx, t.operation, t.serverStateSetter, t.namespace, t.name, t.idleTimer.ExpiredChan, t.logger, wg)
+}
 
-	return RequestNotifier(handler, t.idleTimer.RequestNotifierChan)
+// Wrap returns handler with the transfer accounting around it, reporting to this window's timer.
+func (t *TTLControl) Wrap(handler http.Handler) http.Handler {
+	return RequestNotifier(handler, t.idleTimer)
 }

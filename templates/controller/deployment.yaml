@@ -1,6 +1,13 @@
+{{/*
+  The controller Pod runs the reconcilers AND the module's aggregated API server (see apiservice.yaml) in
+  one process. The API server half adds a resident cost the reconcilers alone do not have: delegated
+  authentication and authorization keep TokenReview/SubjectAccessReview caches and an informer on
+  kube-system/extension-apiserver-authentication. The floor below therefore covers both halves, and the
+  VPA ceiling further down is sized against a reference controller with the same process composition.
+*/}}
 {{- define "controller_resources" }}
 cpu: 10m
-memory: 25Mi
+memory: 50Mi
 {{- end }}
 
 {{- if (include "helm_lib_api_version_exists" (list . "autoscaling.k8s.io/v1/VerticalPodAutoscaler")) }}
@@ -25,7 +32,11 @@ spec:
         {{- include "controller_resources" . | nindent 8 }}
       maxAllowed:
         cpu: 200m
-        memory: 100Mi
+        # Twice the ceiling of a reference controller that runs reconcilers and an aggregated API server
+        # with delegated authn/authz in one process, so the added server half has headroom instead of
+        # being capped at a number measured without it. Lowering it back risks an OOMKill under the
+        # three subresources; raising it further is only justified by a measurement of actual peak RSS.
+        memory: 200Mi
 {{- end }}
 ---
 apiVersion: policy/v1
@@ -54,6 +65,10 @@ spec:
       app: controller
   template:
     metadata:
+      annotations:
+        # Roll the Pod when the aggregated API server's CA changes, so the certificate it presents and the
+        # caBundle the APIServices advertise are never a rotation apart.
+        checksum/aggregation-api-ca: {{ .Values.storageFoundation.internal.aggregationApiCert.ca | sha256sum | quote }}
       labels:
         app: controller
     spec:
@@ -70,6 +85,17 @@ spec:
           {{- include "helm_lib_module_container_security_context_pss_restricted_flexible" (dict "ro" true "seccompProfile" true) | nindent 10 }}
           image: {{ include "helm_lib_module_image" (list . "controller") }}
           imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 8443
+              name: https
+              protocol: TCP
+            - containerPort: 8081
+              name: health
+              protocol: TCP
+          volumeMounts:
+            - name: aggregation-api-certs
+              mountPath: /etc/aggregation-api-certs
+              readOnly: true
           readinessProbe:
             httpGet:
               path: /readyz
@@ -108,3 +134,16 @@ spec:
               valueFrom:
                 fieldRef:
                   fieldPath: metadata.namespace
+            # Listen address and serving pair of the aggregated API server. Set explicitly (the binary
+            # defaults to the same values) so the port published above, the mount path of the certificate
+            # Secret and what the process opens are all visible in one place.
+            - name: AGGREGATION_API_ADDR
+              value: ":8443"
+            - name: AGGREGATION_API_TLS_CERT_FILE
+              value: "/etc/aggregation-api-certs/tls.crt"
+            - name: AGGREGATION_API_TLS_KEY_FILE
+              value: "/etc/aggregation-api-certs/tls.key"
+      volumes:
+        - name: aggregation-api-certs
+          secret:
+            secretName: controller-https-certs

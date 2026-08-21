@@ -70,3 +70,13 @@ import:
 imageSpec:
   config:
     entrypoint: ["/{{ $.ImageName }}"]
+
+{{- /*
+Attach an OpenVEX attestation to the controller image so trivy suppresses the unfixable
+golang.org/x/crypto/openpgp advisory (GO-2026-5932) reported against the controller binary.
+The dependency arrives with the module's aggregated API server; nothing else in this binary
+uses golang.org/x/crypto. Predicate: /images/controller/known_vulnerabilities.vex (per the
+"vex mitigation" template) — the root predicate is attached to the bundle image, which does
+not carry this binary.
+*/ -}}
+{{- include "vex mitigation" (list $ $.ImageName) }}

@@ -82,11 +82,18 @@ func rootSnapshotOwner() metav1.OwnerReference {
 	}
 }
 
-// userVolumeSnapshot is a CSI VolumeSnapshot this module did not create: no provenance, no owner of ours.
-// It deliberately carries the label the patched external-snapshotter fork stamps on every snapshot it
-// reconciles — that label is what the reconciler used to adopt on, and pinning it here keeps it from
-// becoming a discriminator again.
-func userVolumeSnapshot(name, pvcName string) *sfsnapv1.VolumeSnapshot {
+// provenanceUserInCluster is the origin value the module's admission stamps into the CREATE payload of a
+// VolumeSnapshot an ordinary client of the cluster API creates. It is transcribed rather than imported
+// because it belongs to the state-snapshotter label vocabulary; the reconciler reads the KEY and never the
+// value, so the fixtures carry the real value only to stay faithful to what a live cluster produces.
+const provenanceUserInCluster = "user-in-cluster"
+
+// preexistingVolumeSnapshot is a CSI VolumeSnapshot that carries NO origin label at all — the shape of a
+// snapshot that was already in the cluster before the module was installed, since nothing was there to
+// state where it came from. It deliberately carries the label the patched external-snapshotter fork stamps
+// on every snapshot it reconciles — that label is what the reconciler used to adopt on, and pinning it here
+// keeps it from becoming a discriminator again.
+func preexistingVolumeSnapshot(name, pvcName string) *sfsnapv1.VolumeSnapshot {
 	return &sfsnapv1.VolumeSnapshot{
 		TypeMeta: metav1.TypeMeta{
 			APIVersion: sfsnapv1.SchemeGroupVersion.String(),
@@ -102,6 +109,15 @@ func userVolumeSnapshot(name, pvcName string) *sfsnapv1.VolumeSnapshot {
 			Source: sfsnapv1.VolumeSnapshotSource{PersistentVolumeClaimName: &pvcName},
 		},
 	}
+}
+
+// userVolumeSnapshot is a CSI VolumeSnapshot this module did not create but DID see created: a client made
+// it while the module was running, so admission stamped the user origin into its CREATE payload. That is
+// the ordinary user snapshot of a live cluster, and it is captured like any other.
+func userVolumeSnapshot(name, pvcName string) *sfsnapv1.VolumeSnapshot {
+	vs := preexistingVolumeSnapshot(name, pvcName)
+	vs.Labels[storagev1alpha1.LabelProvenance] = provenanceUserInCluster
+	return vs
 }
 
 func managedCaptureVolumeSnapshot(name, pvcName string) *sfsnapv1.VolumeSnapshot {
@@ -157,13 +173,15 @@ func assertVolumeSnapshotUnwritten(t *testing.T, r *VolumeSnapshotDomainReconcil
 }
 
 // TestVolumeSnapshotDomainCapturesAUserSnapshot pins the half of the model that is easy to lose while
-// fixing the other one: a snapshot nobody owns is a user's own snapshot, and it gets the full domain
-// capture — the managed latch, the manifest request, the published source. Being exportable is not a reward
-// for having been created by this module.
+// fixing the other one: a snapshot nobody owns, created while the module was there to see it, is a user's
+// own snapshot, and it gets the full domain capture — the managed latch, the manifest request, the
+// published source. Being exportable is not a reward for having been created by this module.
 //
-// What it must NOT get is protection. The original bug was not "the module looked at a user's snapshot", it
-// was "the module made a user's snapshot undeletable"; the two are separable, and this test holds them apart
-// on the same object.
+// Two things it must NOT get, and they are separate. Protection: the original bug was not "the module
+// looked at a user's snapshot", it was "the module made a user's snapshot undeletable". And our own origin:
+// the object arrives stating that a client created it, and capture must leave that statement alone rather
+// than upgrade it into authorship — the data of this snapshot belongs to whoever made it, and the core
+// decides that by exactly this value.
 func TestVolumeSnapshotDomainCapturesAUserSnapshot(t *testing.T) {
 	vs := userVolumeSnapshot("snapshot-user", "source-pvc")
 	pvc := &corev1.PersistentVolumeClaim{
@@ -182,6 +200,9 @@ func TestVolumeSnapshotDomainCapturesAUserSnapshot(t *testing.T) {
 	}
 	if storagev1alpha1.HasProvenance(got) {
 		t.Fatalf("capture must not claim authorship of a snapshot it did not create, labels=%#v", got.Labels)
+	}
+	if got.Labels[storagev1alpha1.LabelProvenance] != provenanceUserInCluster {
+		t.Fatalf("the origin stated at creation must survive capture untouched, labels=%#v", got.Labels)
 	}
 	if state := (volumeSnapshotAdapter{snap: got}).GetDomainCaptureState(); state.ManifestCaptureRequestName == "" {
 		t.Fatalf("manifestCaptureRequestName must be published for a user snapshot too, state=%#v", state)
@@ -413,4 +434,79 @@ func TestVolumeSnapshotDomainStopsOnCoreFailureAfterPlannedWithoutLivePVC(t *tes
 	if state.Reason != "" || state.Message != "" {
 		t.Fatalf("domain reason/message = %q/%q, want core failure left solely in Ready", state.Reason, state.Message)
 	}
+}
+
+// TestVolumeSnapshotDomainSkipsASnapshotItNeverSawCreated is the gate for snapshots a cluster already had.
+// Origin is stated once, into the CREATE payload, by whoever is present at the birth — the write-path for a
+// tree node, the module's admission for a client's own snapshot — so an object with no origin key at all is
+// one that was created before any of that existed. Managing it would mean the module taking over every
+// snapshot found in the cluster the day it was installed.
+//
+// The fixture gives the reconcile every reason to act: the source PVC exists, nothing owns the snapshot,
+// nothing vetoes it. Only the missing origin stops it, and the assertion is that NOTHING was written —
+// not even the managed latch, which is the first write the reconcile would make.
+func TestVolumeSnapshotDomainSkipsASnapshotItNeverSawCreated(t *testing.T) {
+	vs := preexistingVolumeSnapshot("snapshot-preexisting", "source-pvc")
+	pvc := &corev1.PersistentVolumeClaim{
+		ObjectMeta: metav1.ObjectMeta{Name: "source-pvc", Namespace: "test", UID: "pvc-uid"},
+	}
+	r := newVolumeSnapshotDomainLifecycleReconciler(t, vs, pvc)
+	before := getDomainVolumeSnapshot(t, r, vs.Name)
+
+	if result := reconcileVolumeSnapshot(t, r, vs.Name); result.Requeue || result.RequeueAfter != 0 {
+		t.Fatalf("result = %#v, want no requeue", result)
+	}
+	assertVolumeSnapshotUnwritten(t, r, before)
+}
+
+// TestVolumeSnapshotDomainSkipsImportModeAndPreProvisioned covers the two gates that answer a snapshot on
+// WHAT IT IS rather than on where it came from: an import-mode snapshot has no live source to capture (the
+// core materializes its content from uploaded manifests), and a pre-provisioned one names no source claim at
+// all. Both fixtures carry an origin, so the gate under test is the only thing that can stop them —
+// otherwise the reconcile would run the managed latch and plan a capture over a source that is not there.
+//
+// These two are also why the origin gate is placed BELOW them. The mutating admission that states an origin
+// is scoped to VolumeSnapshots with a PVC source, so neither of these shapes can ever carry the key, however
+// recently it was created; judged by origin they would every one of them report as predating the module.
+// The outcome would be the same skip, which is exactly why the placement cannot be pinned by a test: what
+// changes is the reason the module gives for it, and a reason that is false is what makes the next change to
+// this function reason from the wrong premise.
+func TestVolumeSnapshotDomainSkipsImportModeAndPreProvisioned(t *testing.T) {
+	pvc := &corev1.PersistentVolumeClaim{
+		ObjectMeta: metav1.ObjectMeta{Name: "source-pvc", Namespace: "test", UID: "pvc-uid"},
+	}
+
+	cases := []struct {
+		name    string
+		prepare func(vs *sfsnapv1.VolumeSnapshot)
+	}{
+		{
+			name: "import mode",
+			prepare: func(vs *sfsnapv1.VolumeSnapshot) {
+				vs.Spec.Mode = sfsnapv1.VolumeSnapshotModeImport
+			},
+		},
+		{
+			name: "pre-provisioned (no source claim)",
+			prepare: func(vs *sfsnapv1.VolumeSnapshot) {
+				empty := ""
+				vs.Spec.Source.PersistentVolumeClaimName = &empty
+			},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			vs := userVolumeSnapshot("snapshot-"+strings.ReplaceAll(tc.name, " ", "-"), "source-pvc")
+			tc.prepare(vs)
+			r := newVolumeSnapshotDomainLifecycleReconciler(t, vs, pvc)
+			before := getDomainVolumeSnapshot(t, r, vs.Name)
+
+			if result := reconcileVolumeSnapshot(t, r, vs.Name); result.Requeue || result.RequeueAfter != 0 {
+				t.Fatalf("result = %#v, want no requeue", result)
+			}
+			assertVolumeSnapshotUnwritten(t, r, before)
+		})
+	}
+	t.Logf("checked %d snapshot shapes that carry no live source", len(cases))
 }

@@ -33,3 +33,4 @@ oss.yaml
 .dmtlint.yaml
 .namespace
 .werf
+base_images.yml

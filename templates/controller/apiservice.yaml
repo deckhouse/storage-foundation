@@ -1,0 +1,64 @@
+{{- if .Values.storageFoundation.internal.aggregationApiCert.ca }}
+---
+# The module's aggregated subresources group. It serves a VIRTUAL `volumesnapshots` resource — no storage,
+# no list/get on the resource itself — whose only members are the three connector subresources
+# (manifests-download, manifests-with-data-restoration, manifests-and-children-refs-upload) of the CSI
+# VolumeSnapshot this module owns.
+#
+# The group is named after the MODULE, not after the kind: it is deliberately distinct from the CSI CRD
+# group snapshot.storage.k8s.io (where the real VolumeSnapshot/VolumeSnapshotContent objects live), so this
+# APIService cannot intercept those CRDs. The version follows the version of the resource's main group
+# (the CSI VolumeSnapshot is v1), not the version of this module's own CRDs.
+apiVersion: apiregistration.k8s.io/v1
+kind: APIService
+metadata:
+  name: v1.subresources.storage-foundation.deckhouse.io
+  {{- include "helm_lib_module_labels" (list . (dict "app" "controller")) | nindent 2 }}
+spec:
+  caBundle: {{ .Values.storageFoundation.internal.aggregationApiCert.ca | b64enc | quote }}
+  group: subresources.storage-foundation.deckhouse.io
+  {{/*
+    A group priority below the CRD default (1000) keeps this module's main CRD group
+    (storage-foundation.deckhouse.io) preferred in discovery. Every APIService of this subresources group
+    has to carry the SAME groupPriorityMinimum and DIFFERENT versionPriority values, so when subresources
+    of this module's own CRDs arrive under a second version of this group they only have to pick a free
+    versionPriority.
+  */}}
+  groupPriorityMinimum: 999
+  service:
+    name: controller
+    namespace: d8-{{ .Chart.Name }}
+    port: 443
+  version: v1
+  versionPriority: 15
+---
+# DEPRECATED alias of the group above, served by the same pod, the same routes and the same handlers. It
+# exists only so clients released on a different schedule keep working across the rename: a client that
+# still addresses this group gets a byte-identical answer plus a `Warning` header naming the group to move
+# to. Discovery of this group reports its own name, so a client reading discovery is never told it is
+# talking to the other group.
+#
+# It is removed once every released client addresses subresources.storage-foundation.deckhouse.io. Removal
+# is this block plus the alias route registration in the server, and nothing else: the two groups share
+# one implementation, so nothing but the alias disappears. Note that removing it also requires dropping
+# the alias rules from the consuming module's user-facing roles — authorization is checked against the
+# group in the request path, so the alias needs its own RBAC rule for as long as it answers.
+apiVersion: apiregistration.k8s.io/v1
+kind: APIService
+metadata:
+  name: v1.subresources.snapshot.storage.k8s.io
+  {{- include "helm_lib_module_labels" (list . (dict "app" "controller")) | nindent 2 }}
+spec:
+  caBundle: {{ .Values.storageFoundation.internal.aggregationApiCert.ca | b64enc | quote }}
+  group: subresources.snapshot.storage.k8s.io
+  # Same numbers as the group above: there is no homonymous CRD group to lose to here either (the real CSI
+  # group snapshot.storage.k8s.io is a different group), so the exact value is not load-bearing — being
+  # identical to the primary group is what keeps the alias indistinguishable in discovery ordering.
+  groupPriorityMinimum: 999
+  service:
+    name: controller
+    namespace: d8-{{ .Chart.Name }}
+    port: 443
+  version: v1
+  versionPriority: 15
+{{- end }}

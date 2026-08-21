@@ -1,0 +1,43 @@
+# Permissions to move the contents of a volume in and out of the cluster over HTTP.
+#
+# The two `download` subresources are what the data-exporter pod actually authorizes every HTTP
+# request against: both directions use `download`, the import one included, so a role granting an
+# `upload` subresource would grant nothing. The pairing of resource and subresource is held by
+# TestTransferVolumeDataRoleGrantsAuthorizedSubresources, which builds the expected rules from the
+# very constants the authorization code passes to the SubjectAccessReview.
+#
+# Deliberately carries NO `rbac.deckhouse.io/aggregate-to-kubernetes-as` label, unlike the
+# neighbouring view/edit roles: with one, the right to read a volume out of the cluster and to write
+# one back in would silently reach every subject of the corresponding cluster-wide access level.
+# This role is meant to be granted to a named subject by an explicit RoleBinding, and it grants
+# nothing until that binding exists.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  labels:
+    heritage: deckhouse
+    module: storage-foundation
+    rbac.deckhouse.io/kind: use
+  name: d8:use:capability:module:storage-foundation:transfer_volume_data
+rules:
+  # The transfer objects themselves: the client creates them, waits for one to become ready and
+  # deletes it when the transfer is over.
+  - apiGroups:
+      - storage-foundation.deckhouse.io
+    resources:
+      - dataexports
+      - dataimports
+    verbs:
+      - create
+      - get
+      - list
+      - watch
+      - delete
+  # The HTTP endpoints of a running transfer.
+  - apiGroups:
+      - storage-foundation.deckhouse.io
+    resources:
+      - dataexports/download
+      - dataimports/download
+    verbs:
+      - create

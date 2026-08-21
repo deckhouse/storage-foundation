@@ -211,7 +211,42 @@ curl -v --cacert ca.pem ${POD_URL}api/v1/files/ --key client.key --cert client.c
 d8 k -n $NAMESPACE create serviceaccount data-exporter-test
 ```
 
-Создайте ClusterRole:
+Создайте токен:
+
+```bash
+export TOKEN=$(d8 k -n $NAMESPACE create token data-exporter-test --duration=24h)
+echo $TOKEN
+```
+
+Запросы к эндпоинтам данных запущенного экспорта или импорта — `/api/v1/files…` и `/api/v1/block…`, как по короткому пути, так и по полному — авторизуются через `SubjectAccessReview` на глагол `create` для **субресурса `download`** в API-группе `storage-foundation.deckhouse.io`: `dataexports/download` — при чтении данных из тома, `dataimports/download` — при записи данных в том. Обратите внимание: импорт авторизуется тем же субресурсом `download`, а не `upload` — субресурса `upload` не существует, поэтому роль, выдающая права на него, не даёт доступа вовсе.
+
+Выдайте права сервис-аккаунту одним из двух способов ниже.
+
+##### Привязка встроенной роли (предпочтительный способ)
+
+В составе модуля поставляется ClusterRole `d8:use:capability:module:storage-foundation:transfer_volume_data`. Она выдаёт `create` на оба субресурса `download`, а также позволяет создавать, читать и удалять сами ресурсы `DataExport` и `DataImport` — это то, что нужно клиенту, чтобы выполнить перенос самостоятельно. Роль не агрегируется ни в один из общекластерных уровней доступа, поэтому действует только там, где её привязали:
+
+```bash
+d8 k create -f - <<EOF
+kind: RoleBinding
+apiVersion: rbac.authorization.k8s.io/v1
+metadata:
+  name: data-exporter-test-transfer-binding
+  namespace: ${NAMESPACE}
+subjects:
+- kind: ServiceAccount
+  name: data-exporter-test
+  namespace: ${NAMESPACE}
+roleRef:
+  kind: ClusterRole
+  name: d8:use:capability:module:storage-foundation:transfer_volume_data
+  apiGroup: rbac.authorization.k8s.io
+EOF
+```
+
+##### Создание роли вручную
+
+Если встроенная роль разрешает больше, чем вы хотите выдать, создайте свою ClusterRole только с нужными субресурсами. Роль ниже разрешает скачивание экспортированных данных и ничего больше; добавьте `dataimports/download` в `resources`, чтобы разрешить ещё и загрузку данных в том:
 
 ```bash
 d8 k create -f - <<EOF
@@ -226,12 +261,7 @@ rules:
 EOF
 ```
 
-Создайте токен:
-
-```bash
-export TOKEN=$(d8 k -n $NAMESPACE create token data-exporter-test --duration=24h)
-echo $TOKEN
-```
+Такая роль покрывает только HTTP-запросы: сами ресурсы `DataExport` и `DataImport` должен создать тот, у кого есть отдельные права на них.
 
 Создайте RoleBinding:
 
@@ -253,7 +283,9 @@ roleRef:
 EOF
 ```
 
-Проверьте содержимое целевого PVC:
+##### Проверка доступа
+
+Какую бы из двух ролей вы ни привязали, проверьте содержимое целевого PVC:
 
 ```bash
 curl -H "Authorization: Bearer $TOKEN" \

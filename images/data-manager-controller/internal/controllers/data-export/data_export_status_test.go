@@ -158,7 +158,7 @@ func TestFinalizeDataExportStatus_NonTerminalNoTimestamp(t *testing.T) {
 func TestReconcile_DE_StripsLegacyExpiredCondition(t *testing.T) {
 	scheme := setupTestScheme()
 	de := createDataExport(dev1alpha1.DataExportSpec{
-		Ttl:       "1h",
+		TTL:       "1h",
 		Publish:   false,
 		TargetRef: dev1alpha1.DataExportTargetRefSpec{Kind: dev1alpha1.KindPVC, Name: "test-pvc"},
 	})
@@ -196,12 +196,12 @@ func TestUpdateDataExport_PreservesConcurrentPodFields(t *testing.T) {
 	scheme := setupTestScheme()
 	access := metav1.NewTime(time.Unix(7000, 0))
 	stored := createDataExport(dev1alpha1.DataExportSpec{
-		Ttl:       "1h",
+		TTL:       "1h",
 		TargetRef: dev1alpha1.DataExportTargetRefSpec{Kind: dev1alpha1.KindPVC, Name: "test-pvc"},
 	})
 	stored.Status.ServerState = string(common.ServerStateIdleExpired)
 	stored.Status.AccessTimestamp = access
-	stored.Status.Url = "https://10.0.0.7:8085/"
+	stored.Status.URL = "https://10.0.0.7:8085/"
 
 	fakeClient := newFakeClientWithStatus(t, scheme, stored)
 	r := createTestReconciler(fakeClient, fakeClient, createTestConfig())
@@ -218,7 +218,7 @@ func TestUpdateDataExport_PreservesConcurrentPodFields(t *testing.T) {
 	require.NoError(t, fakeClient.Get(context.Background(), types.NamespacedName{Name: "test-de", Namespace: "test-ns"}, got))
 	assert.Equal(t, string(common.ServerStateIdleExpired), got.Status.ServerState, "concurrent serverState=IdleExpired must survive")
 	assert.Equal(t, access, got.Status.AccessTimestamp)
-	assert.Equal(t, "https://10.0.0.7:8085/", got.Status.Url)
+	assert.Equal(t, "https://10.0.0.7:8085/", got.Status.URL)
 	ready := meta.FindStatusCondition(got.Status.Conditions, string(common.ConditionReady))
 	require.NotNil(t, ready)
 	assert.Equal(t, metav1.ConditionTrue, ready.Status)
@@ -310,7 +310,7 @@ func TestRecoverUserPVC_RemovesBothDataExportRequestAnnotations(t *testing.T) {
 func TestReconcilePodReadyResources_DetectsDeploymentDrift(t *testing.T) {
 	scheme := setupTestScheme()
 	de := createDataExport(dev1alpha1.DataExportSpec{
-		Ttl:       "1h",
+		TTL:       "1h",
 		TargetRef: dev1alpha1.DataExportTargetRefSpec{Kind: dev1alpha1.KindPVC, Name: "test-pvc"},
 	})
 	de.Generation = 1

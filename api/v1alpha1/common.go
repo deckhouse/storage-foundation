@@ -20,7 +20,7 @@ import metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 // +k8s:deepcopy-gen=true
 type DataExportImportStatus struct {
-	Url             string             `json:"url"`
+	URL             string             `json:"url"`
 	CA              string             `json:"ca,omitempty"`
 	PublicURL       string             `json:"publicURL"`
 	AccessTimestamp metav1.Time        `json:"accessTimestamp"`

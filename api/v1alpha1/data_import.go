@@ -66,7 +66,7 @@ const (
 //
 // +k8s:deepcopy-gen=true
 type DataImportSpec struct {
-	Ttl                  string `json:"ttl"`
+	TTL                  string `json:"ttl"`
 	Publish              bool   `json:"publish,omitempty"`
 	WaitForFirstConsumer bool   `json:"waitForFirstConsumer"`
 

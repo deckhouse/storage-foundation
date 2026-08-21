@@ -18,15 +18,19 @@ package repository
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
 	dev1alpha1 "github.com/deckhouse/storage-foundation/api/v1alpha1"
 	"github.com/deckhouse/storage-foundation/common"
@@ -74,9 +78,17 @@ func TestShouldSetServerState(t *testing.T) {
 
 func newRepoClient(t *testing.T, objs ...*dev1alpha1.DataImport) *Client {
 	t.Helper()
+	return newRepoClientWithInterceptors(t, interceptor.Funcs{}, objs...)
+}
+
+// newRepoClientWithInterceptors builds the same fake-backed Client as newRepoClient with funcs layered on
+// top, which is how a test injects an API-server answer the fake client would not produce on its own — a
+// conflict on a status write, for instance.
+func newRepoClientWithInterceptors(t *testing.T, funcs interceptor.Funcs, objs ...*dev1alpha1.DataImport) *Client {
+	t.Helper()
 	scheme := runtime.NewScheme()
 	require.NoError(t, dev1alpha1.AddToScheme(scheme))
-	b := fake.NewClientBuilder().WithScheme(scheme)
+	b := fake.NewClientBuilder().WithScheme(scheme).WithInterceptorFuncs(funcs)
 	for _, o := range objs {
 		b = b.WithStatusSubresource(o).WithObjects(o)
 	}
@@ -144,4 +156,73 @@ func TestUpdateAccessTimestamp(t *testing.T) {
 	require.NoError(t, c.UpdateAccessTimestamp(context.Background(), common.OperationImport, "ns", "imp", ts))
 
 	assert.Equal(t, metav1.NewTime(ts), getDI(t, c, "ns", "imp").Status.AccessTimestamp)
+}
+
+// TestUpdateAccessTimestamp_SurvivesLostRaceWithConcurrentStatusWrite covers the race the pod loses at
+// startup. The pod publishes the very first accessTimestamp right after the data server starts, which is
+// exactly when the controller is still writing phase and conditions of the same object, so the pod's
+// status update is answered 409 Conflict. That single conflict is not one lost heartbeat: the next
+// publication only happens on a tick that saw bytes move, so on a transfer nobody ever connects to there
+// is no second attempt at all and the field stays unset for the whole life of the object. The write must
+// therefore re-read the object and land, keeping the fields the other writer put there.
+func TestUpdateAccessTimestamp_SurvivesLostRaceWithConcurrentStatusWrite(t *testing.T) {
+	di := &dev1alpha1.DataImport{
+		ObjectMeta: metav1.ObjectMeta{Name: "imp", Namespace: "ns"},
+		Status:     dev1alpha1.DataExportImportStatus{ServerState: string(common.ServerStateReady)},
+	}
+
+	statusUpdates := 0
+	c := newRepoClientWithInterceptors(t, interceptor.Funcs{
+		SubResourceUpdate: func(ctx context.Context, inner client.Client, subResource string, obj client.Object, opts ...client.SubResourceUpdateOption) error {
+			statusUpdates++
+			if statusUpdates == 1 {
+				// The other writer lands first and bumps resourceVersion, so the write below is refused
+				// with a real conflict instead of a hand-made error.
+				concurrent := &dev1alpha1.DataImport{}
+				require.NoError(t, inner.Get(ctx, types.NamespacedName{Namespace: "ns", Name: "imp"}, concurrent))
+				concurrent.Status.Phase = string(common.PhaseReady)
+				require.NoError(t, inner.Status().Update(ctx, concurrent))
+			}
+			return inner.SubResource(subResource).Update(ctx, obj, opts...)
+		},
+	}, di)
+
+	ts := time.Unix(5000, 0)
+	require.NoError(t, c.UpdateAccessTimestamp(context.Background(), common.OperationImport, "ns", "imp", ts))
+
+	got := getDI(t, c, "ns", "imp")
+	assert.Greater(t, statusUpdates, 1, "the refused write must be attempted again, not dropped")
+	assert.Equal(t, metav1.NewTime(ts), got.Status.AccessTimestamp, "a lost race must not cost the timestamp")
+	assert.Equal(t, string(common.PhaseReady), got.Status.Phase,
+		"the retry must re-read the object, so the concurrent writer's field survives")
+}
+
+// TestUpdateAccessTimestamp_ReportsConflictThatNeverClears is the other half of the retry: when the
+// conflict does not clear, the failure has to come back to the caller, which logs it. A retry loop that
+// ends in a silent success would hide exactly the loss this write is retried for, and no other signal of
+// it exists — the field simply stays empty.
+func TestUpdateAccessTimestamp_ReportsConflictThatNeverClears(t *testing.T) {
+	di := &dev1alpha1.DataImport{
+		ObjectMeta: metav1.ObjectMeta{Name: "imp", Namespace: "ns"},
+		Status:     dev1alpha1.DataExportImportStatus{ServerState: string(common.ServerStateReady)},
+	}
+
+	statusUpdates := 0
+	c := newRepoClientWithInterceptors(t, interceptor.Funcs{
+		SubResourceUpdate: func(_ context.Context, _ client.Client, _ string, obj client.Object, _ ...client.SubResourceUpdateOption) error {
+			statusUpdates++
+			return apierrors.NewConflict(
+				dev1alpha1.GroupVersion.WithResource(AuthzResourceImport).GroupResource(),
+				obj.GetName(),
+				errors.New("the object has been modified"),
+			)
+		},
+	}, di)
+
+	err := c.UpdateAccessTimestamp(context.Background(), common.OperationImport, "ns", "imp", time.Unix(5000, 0))
+
+	require.Error(t, err, "an exhausted retry must not be reported as a successful publication")
+	assert.True(t, apierrors.IsConflict(err), "the caller logs what it gets, so the conflict itself must reach it: %v", err)
+	assert.Greater(t, statusUpdates, 1, "one conflict must not end the attempt")
+	assert.True(t, getDI(t, c, "ns", "imp").Status.AccessTimestamp.IsZero(), "nothing was written, so nothing must be stored")
 }

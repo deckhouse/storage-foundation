@@ -124,7 +124,7 @@ func TestReconcile_ValidationFailed(t *testing.T) {
 
 	// Create DataExport with VirtualDisk kind but without CRD
 	dataExport := createDataExport(dev1alpha1.DataExportSpec{
-		Ttl:     "1h",
+		TTL:     "1h",
 		Publish: false,
 		TargetRef: dev1alpha1.DataExportTargetRefSpec{
 			Group: virtualDisksGroup,
@@ -167,7 +167,7 @@ func TestReconcile_ResourceMarkedForDelete(t *testing.T) {
 
 	now := metav1.Now()
 	dataExport := createDataExport(dev1alpha1.DataExportSpec{
-		Ttl:     "1h",
+		TTL:     "1h",
 		Publish: false,
 		TargetRef: dev1alpha1.DataExportTargetRefSpec{
 			Kind: dev1alpha1.KindPVC,
@@ -211,7 +211,7 @@ func TestReconcile_TTLExpired(t *testing.T) {
 	scheme := setupTestScheme()
 
 	dataExport := createDataExport(dev1alpha1.DataExportSpec{
-		Ttl:     "1h",
+		TTL:     "1h",
 		Publish: false,
 		TargetRef: dev1alpha1.DataExportTargetRefSpec{
 			Kind: dev1alpha1.KindPVC,
@@ -268,7 +268,7 @@ func TestReconcile_NewlyCreatedResource(t *testing.T) {
 	scheme := setupTestScheme()
 
 	dataExport := createDataExport(dev1alpha1.DataExportSpec{
-		Ttl:     "1h",
+		TTL:     "1h",
 		Publish: false,
 		TargetRef: dev1alpha1.DataExportTargetRefSpec{
 			Kind: dev1alpha1.KindPVC,
@@ -316,7 +316,7 @@ func TestReconcile_ResourceNeedsImplementation(t *testing.T) {
 	scheme := setupTestScheme()
 
 	dataExport := createDataExport(dev1alpha1.DataExportSpec{
-		Ttl:     "1h",
+		TTL:     "1h",
 		Publish: false,
 		TargetRef: dev1alpha1.DataExportTargetRefSpec{
 			Kind: dev1alpha1.KindPVC,
@@ -390,7 +390,7 @@ func TestReconcile_ResourceAlreadyImplemented(t *testing.T) {
 	scheme := setupTestScheme()
 
 	dataExport := createDataExport(dev1alpha1.DataExportSpec{
-		Ttl:     "1h",
+		TTL:     "1h",
 		Publish: false,
 		TargetRef: dev1alpha1.DataExportTargetRefSpec{
 			Kind: dev1alpha1.KindPVC,
@@ -455,7 +455,7 @@ func TestReconcile_UpdateConditionError(t *testing.T) {
 	scheme := setupTestScheme()
 
 	dataExport := createDataExport(dev1alpha1.DataExportSpec{
-		Ttl:     "1h",
+		TTL:     "1h",
 		Publish: false,
 		TargetRef: dev1alpha1.DataExportTargetRefSpec{
 			Kind: dev1alpha1.KindPVC,
@@ -499,7 +499,7 @@ func TestReconcile_WithFinalizer(t *testing.T) {
 	scheme := setupTestScheme()
 
 	dataExport := createDataExport(dev1alpha1.DataExportSpec{
-		Ttl:     "1h",
+		TTL:     "1h",
 		Publish: false,
 		TargetRef: dev1alpha1.DataExportTargetRefSpec{
 			Kind: dev1alpha1.KindPVC,

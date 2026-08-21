@@ -7,10 +7,15 @@ git:
   - add: {{ .ModuleDir }}/hooks/go
     to: /usr/src/app/hooks/go
     stageDependencies:
-      install:
+      # Fetch and build in ONE stage. Splitting them puts the credentials this build
+      # needs into the earlier stage's layer, where they outlive the pipeline that
+      # issued them: the module cache lives on a mount and never survives the stage,
+      # so the build always reaches the network, and it reaches it with whatever
+      # token the cached layer was baked with. The three sibling images fetch and
+      # build in a single stage for the same reason.
+      beforeSetup:
         - '**/go.mod'
         - '**/go.sum'
-      beforeSetup:
         - '**/*.go'
 
 mount:
@@ -22,11 +27,10 @@ secrets:
 {{ include "secret for private go modules" . }}
 
 shell:
-  install:
+  beforeSetup:
     {{- include "auth for private go modules" . | nindent 4 }}
     - cd /usr/src/app/hooks/go
     - GOPROXY=$(cat /run/secrets/GOPROXY) go mod download
-  beforeSetup:
     - |
       cd /usr/src/app/hooks/go;
       export CGO_ENABLED=0

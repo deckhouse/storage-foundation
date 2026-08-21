@@ -23,6 +23,7 @@ import (
 	_ "github.com/deckhouse/storage-foundation/hooks/go/030-remove-finalizers-on-module-delete"
 	_ "github.com/deckhouse/storage-foundation/hooks/go/030-snapshot-validation-webhook-certs"
 	_ "github.com/deckhouse/storage-foundation/hooks/go/040-vrr-provisioner-rbac"
+	_ "github.com/deckhouse/storage-foundation/hooks/go/050-aggregation-api-certs"
 )
 
 func main() {

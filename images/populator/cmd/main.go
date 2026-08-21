@@ -271,7 +271,7 @@ func ensureDeployment(ctx context.Context, names common.Names, params populatorM
 		ResourceName:        dataImportName,
 		VolumeName:          volumeName,
 		VolumeMode:          *pvc.Spec.VolumeMode,
-		Ttl:                 dataImport.Spec.Ttl,
+		Ttl:                 dataImport.Spec.TTL,
 		ServerMode:          common.ServerModeImport,
 		ControllerNamespace: cfgParams.ControllerNamespace,
 		Names:               names,

@@ -1,0 +1,25 @@
+---
+# Service fronting the controller Pod. Its only consumer today is the aggregation layer: both APIServices
+# in apiservice.yaml point their spec.service here, and kube-apiserver proxies aggregated requests to
+# port 443 -> the controller's https port. The name MUST stay in sync with the certificate SANs
+# (consts.AggregationAPICertCn in hooks/go/consts), because the aggregation layer validates the presented
+# certificate against <name>.<namespace>.svc.
+apiVersion: v1
+kind: Service
+metadata:
+  name: controller
+  namespace: d8-{{ .Chart.Name }}
+  {{- include "helm_lib_module_labels" (list . (dict "app" "controller")) | nindent 2 }}
+spec:
+  type: ClusterIP
+  # Only the port the aggregation layer uses is published. The health endpoints are deliberately absent:
+  # the kubelet probes the container port directly and needs no Service, while publishing them would put
+  # unauthenticated /healthz and /readyz within reach of every pod in the cluster.
+  ports:
+    - port: 443
+      targetPort: https
+      protocol: TCP
+      name: https
+      appProtocol: https
+  selector:
+    app: controller

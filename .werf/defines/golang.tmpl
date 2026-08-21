@@ -10,23 +10,36 @@
 
 {{- /* Credentials for the private fox Go modules.
 
-       `api` and `images/controller` require
-       github.com/deckhouse/state-snapshotter/{api,pkg/snapshotsdk}, and
-       that project is private: the public module proxy cannot serve it, so the
-       fetch goes straight to GitLab over git and needs a token. Without one the
-       ?go-get=1 discovery yields nothing and the Go tool falls back to probing
-       path prefixes -- it ends up asking for the GROUP repository
+       Two fox projects under github.com/deckhouse are private, and the
+       builds that include this define reach one of them: state-snapshotter
+       ({api,pkg/snapshotsdk}, needed by controller) and sds-common-lib (needed by
+       go-hooks, data-exporter and webhooks). The public module proxy cannot serve
+       either, so the fetch goes straight to GitLab over git and needs a token.
+       Without one the ?go-get=1 discovery yields nothing and the Go tool falls back
+       to probing path prefixes -- it ends up asking for the GROUP repository
        (github.com/deckhouse.git) and fails with a confusing
        "could not read Username".
 
-       The token is the pipeline's CI_JOB_TOKEN, which needs storage-foundation on
-       state-snapshotter's job-token allowlist. netrc covers the discovery request,
-       url.insteadOf covers the git fetch, and GOPRIVATE keeps proxy.golang.org and
-       sum.golang.org out of the path for the prefix (go.sum still pins it).
+       The token is FOX_GO_TOKEN, scoped to the group that holds both projects, with
+       the pipeline's CI_JOB_TOKEN as the fallback. That order is not
+       interchangeable: a job token is accepted for git operations, but the
+       ?go-get=1 endpoint answers 404 for a private project, and Go reads an
+       explicit 404 as "no such module" instead of probing the repository with git.
+       So the fallback can only carry the git fetch, never the discovery that comes
+       first -- with nothing but a job token the build still fails as above, even
+       with this project on the other one's job-token allowlist.
 
-       An empty token is not an error here: builds that do not reach the private
-       module (every image except controller, and the vendored sidecars) keep
-       working, and a build that does reach it fails with the message above. */}}
+       netrc covers the discovery request, url.insteadOf covers the git fetch, and
+       GOPRIVATE keeps proxy.golang.org and sum.golang.org out of the path for the
+       prefix (go.sum still pins the modules). The netrc login stays
+       gitlab-ci-token: that name is what a job token requires, while a group token
+       is resolved by the token value and does not care about the login, so one line
+       serves both.
+
+       An empty token is not an error here: builds that do not include this define
+       reach nothing private -- they see the local modules through a filesystem
+       replace -- and keep working, and a build that does reach a private module
+       fails with the message above. */}}
 {{- define "secret for private go modules" }}
 - id: GO_PRIVATE_TOKEN
   value: {{ .GO_PRIVATE_TOKEN }}

@@ -40,7 +40,51 @@ import (
 const (
 	storageClassVolumeSnapshotAnnotationName = "storage.deckhouse.io/volumesnapshotclass"
 	storageClassManagedbyLabelName           = "storage-foundation.deckhouse.io/managed-by"
+
+	// provenanceLabelName records WHO created a VolumeSnapshot, and provenanceUserInCluster is the value for
+	// one an ordinary client of the cluster API made. Only somebody present at the creation can state that,
+	// which is why it is stated here and never derived later from an object that already exists: a
+	// reconciler looking at a snapshot has no way to tell one that was always in the cluster from one that
+	// appeared a second ago, and the consumers of this label separate exactly those two.
+	//
+	// The key belongs to the state-snapshotter label vocabulary and its owner is that repository. It is
+	// transcribed here rather than imported because this webhook module does not depend on that API; the
+	// literals are pinned by TestVolumeSnapshotProvenanceWireLiterals so a rename cannot pass unnoticed on
+	// this side, and the two sides agree by that name being part of a published contract, not by a comment.
+	provenanceLabelName     = "state-snapshotter.deckhouse.io/provenance"
+	provenanceUserInCluster = "user-in-cluster"
 )
+
+// stateOriginOnCreate stamps the origin of a VolumeSnapshot that is being created right now, and reports
+// whether it wrote anything. Two shapes are left exactly as they arrived, and each for its own reason:
+//
+//   - an object that ALREADY carries the key: its creator has stated its origin in the very payload being
+//     admitted — the unified snapshot write-path does this for a tree node — and overwriting that would
+//     erase the only truthful statement about who built the object, turning a node of a snapshot tree into
+//     something this stack no longer recognises as its own;
+//   - an object that arrives with a CONTROLLER owner reference: it is already part of another controller's
+//     lifecycle, and this module puts no marker of any kind on somebody else's object. Nothing is lost by
+//     staying silent — such a snapshot is refused domain capture on the owner reference alone, long before
+//     any origin is consulted — and the alternative is a label key of this stack appearing on objects a
+//     neighbouring module owns.
+//
+// Everything else is a snapshot a client of the cluster API is creating unclaimed, and its origin is
+// recorded so that later readers can tell it from a snapshot the cluster already contained.
+func stateOriginOnCreate(snapshot *snapshotv1.VolumeSnapshot) bool {
+	if _, stated := snapshot.Labels[provenanceLabelName]; stated {
+		return false
+	}
+	for _, ref := range snapshot.OwnerReferences {
+		if ref.Controller != nil && *ref.Controller {
+			return false
+		}
+	}
+	if snapshot.Labels == nil {
+		snapshot.Labels = map[string]string{}
+	}
+	snapshot.Labels[provenanceLabelName] = provenanceUserInCluster
+	return true
+}
 
 func VolumeSnapshotMutate(ctx context.Context, _ *model.AdmissionReview, obj metav1.Object) (*kwhmutating.MutatorResult, error) {
 	log := slog.New(&slogh.Handler{})
@@ -48,10 +92,22 @@ func VolumeSnapshotMutate(ctx context.Context, _ *model.AdmissionReview, obj met
 	log.Debug("VolumeSnapshotMutate called")
 	snapshot, ok := obj.(*snapshotv1.VolumeSnapshot)
 	if !ok {
+		// The only branch that returns no object, and the only one where that is right: this handler has
+		// nothing to say about a kind it cannot read, and admitting it unchanged is the outcome that changes
+		// nothing. Every other successful branch returns the snapshot, because by then it carries its origin.
 		return &kwhmutating.MutatorResult{}, nil
 	}
 
 	log.Info("VolumeSnapshotMutate: object is VolumeSnapshot", "name", snapshot.Name, "namespace", snapshot.Namespace)
+
+	// The origin is recorded first, before anything that can fail or return early: this admission is the one
+	// moment at which the fact is knowable, and every path below that lets the object be created must carry
+	// it. The webhook is registered on CREATE only, so there is no UPDATE through which an already-stated
+	// origin could be revised here.
+	if stateOriginOnCreate(snapshot) {
+		log.Info("VolumeSnapshotMutate: recorded the in-cluster origin of a VolumeSnapshot created by a client",
+			"snapshot", snapshot.Name, "namespace", snapshot.Namespace)
+	}
 
 	client, err := kubeclient.New(d8commonapi.AddToScheme,
 		corev1.AddToScheme,
@@ -66,8 +122,8 @@ func VolumeSnapshotMutate(ctx context.Context, _ *model.AdmissionReview, obj met
 	}
 
 	if snapshot.Spec.Source.PersistentVolumeClaimName == nil {
-		log.Warn("VolumeSnapshotMutate: VolumeSnapshot PersistentVolumeClaimName is nil. Skipping mutation", "snapshot", snapshot.Name)
-		return &kwhmutating.MutatorResult{}, nil
+		log.Warn("VolumeSnapshotMutate: VolumeSnapshot PersistentVolumeClaimName is nil. Skipping class defaulting", "snapshot", snapshot.Name)
+		return &kwhmutating.MutatorResult{MutatedObject: snapshot}, nil
 	}
 
 	namespace := snapshot.Namespace
@@ -104,12 +160,9 @@ func VolumeSnapshotMutate(ctx context.Context, _ *model.AdmissionReview, obj met
 			if volumeSnapshotClassName, ok := sc.Annotations[storageClassVolumeSnapshotAnnotationName]; ok {
 				log.Info("VolumeSnapshotMutate: StorageClass has volume snapshot class name annotation, set it in VolumeSnapshot", "name", volumeSnapshotClassName)
 				snapshot.Spec.VolumeSnapshotClassName = &volumeSnapshotClassName
-				return &kwhmutating.MutatorResult{
-					MutatedObject: snapshot,
-				}, nil
 			}
 		}
-		return &kwhmutating.MutatorResult{}, nil
+		return &kwhmutating.MutatorResult{MutatedObject: snapshot}, nil
 	}
 
 	log.Info("VolumeSnapshotMutate: StorageClass is managed by module", "storageClass", sc.Name, "managedBy", managedBy)

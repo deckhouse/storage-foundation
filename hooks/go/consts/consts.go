@@ -22,6 +22,20 @@ const (
 	ModulePluralName        string = "storage-foundation"
 	ValidatingWebhookCertCn string = "snapshot-validation-webhook"
 	WebhookCertCn           string = "webhooks"
+
+	// AggregationAPICertCn is the Common Name and SAN base of the serving certificate of the module's
+	// aggregated API server. It MUST equal the Service name in templates/controller/service.yaml: the
+	// kube-apiserver aggregation layer dials <service>.<namespace>.svc and validates the presented
+	// certificate against that DNS name, so a mismatch makes every aggregated request fail TLS
+	// verification with the APIService reporting itself unavailable.
+	AggregationAPICertCn string = "controller"
+
+	// AggregationAPICertValuesKey is the internal values key under which the certificate hook publishes
+	// the aggregated API server's crt/key/ca. It is the single name shared by the hook
+	// (FullValuesPathPrefix) and the chart (templates/controller/{secret,apiservice}.yaml), which read
+	// the serving pair and the caBundle from the same generated value so the APIService can never
+	// advertise a CA that does not match the mounted certificate.
+	AggregationAPICertValuesKey string = "aggregationApiCert"
 )
 
 const (

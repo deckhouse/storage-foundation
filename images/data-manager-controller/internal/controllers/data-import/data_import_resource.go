@@ -1100,7 +1100,7 @@ func updateDataImport(ctx context.Context, c client.Client, dataImportOld, dataI
 			merged := statusCopy.DeepCopy()
 			// Preserve the pod-owned status fields from the latest server-side object; the controller
 			// owns everything else (conditions, phase, completionTimestamp, publicURL, volumeMode, data).
-			merged.Url = fresh.Status.Url
+			merged.URL = fresh.Status.URL
 			merged.CA = fresh.Status.CA
 			merged.AccessTimestamp = fresh.Status.AccessTimestamp
 			merged.ServerState = fresh.Status.ServerState

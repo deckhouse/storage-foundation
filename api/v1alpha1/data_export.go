@@ -19,7 +19,6 @@ package v1alpha1
 import (
 	"crypto/x509"
 
-	_ "k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
@@ -43,7 +42,7 @@ type DataExportList struct {
 
 // +k8s:deepcopy-gen=true
 type DataExportSpec struct {
-	Ttl     string `json:"ttl"`
+	TTL     string `json:"ttl"`
 	Publish bool   `json:"publish"`
 	// PublicIngress selects which cluster ingress to expose public URL through
 	// allowed values: KubernetesAPI, ConsoleFrontend

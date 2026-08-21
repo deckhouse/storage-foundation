@@ -105,7 +105,7 @@ func TestPodReconcile_UpdatesOwnerURL(t *testing.T) {
 
 	got := &dev1alpha1.DataImport{}
 	require.NoError(t, r.Client.Get(context.Background(), types.NamespacedName{Namespace: "app", Name: "di1"}, got))
-	assert.Equal(t, "https://10.0.0.9:8085/", got.Status.Url)
+	assert.Equal(t, "https://10.0.0.9:8085/", got.Status.URL)
 }
 
 // TestPodReconcile_OutsideControllerNamespace: pods outside the controller namespace are ignored.

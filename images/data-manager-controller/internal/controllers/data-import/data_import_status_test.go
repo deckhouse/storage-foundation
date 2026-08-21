@@ -228,7 +228,7 @@ func TestUpdateDataImport_PreservesConcurrentPodFields(t *testing.T) {
 		Status: dev1alpha1.DataExportImportStatus{
 			ServerState:     string(common.ServerStateFinished),
 			AccessTimestamp: access,
-			Url:             "https://10.0.0.5:8085/",
+			URL:             "https://10.0.0.5:8085/",
 		},
 	}
 	c := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(stored).WithObjects(stored).Build()
@@ -251,7 +251,7 @@ func TestUpdateDataImport_PreservesConcurrentPodFields(t *testing.T) {
 	// Pod-owned fields preserved (not clobbered by the controller's snapshot).
 	assert.Equal(t, string(common.ServerStateFinished), got.Status.ServerState, "concurrent serverState=Finished must survive")
 	assert.Equal(t, access, got.Status.AccessTimestamp, "concurrent accessTimestamp must survive")
-	assert.Equal(t, "https://10.0.0.5:8085/", got.Status.Url)
+	assert.Equal(t, "https://10.0.0.5:8085/", got.Status.URL)
 	// Controller-owned change persisted.
 	ready := meta.FindStatusCondition(got.Status.Conditions, string(common.ConditionReady))
 	require.NotNil(t, ready)
