@@ -42,33 +42,42 @@ func readyFacade() *Handler {
 // The alias exists so a client released on another schedule keeps working. That is only true if the two
 // groups answer identically: a difference in the payload means the alias is a second, diverging API
 // rather than the same one under an old name.
+//
+// Each case pins the status it expects as well. Comparing the two groups against each other alone is not
+// enough: a request that starts failing on BOTH groups still compares equal, and the case then quietly
+// stops comparing the payload it was written for and compares two identical error bodies instead.
 func TestAliasGroup_AnswersByteIdenticallyToThePrimaryGroup(t *testing.T) {
 	for _, tc := range []struct {
-		name string
-		call func(group string) *http.Request
+		name       string
+		wantStatus int
+		call       func(group string) *http.Request
 	}{
 		{
-			name: SubresourceManifestsDownload,
+			name:       SubresourceManifestsDownload,
+			wantStatus: http.StatusOK,
 			call: func(group string) *http.Request {
 				return httptest.NewRequest(http.MethodGet,
 					subresourcePath(group, testNamespace, testVSName, SubresourceManifestsDownload), nil)
 			},
 		},
 		{
-			name: SubresourceManifestsRestore,
+			name:       SubresourceManifestsRestore,
+			wantStatus: http.StatusOK,
 			call: func(group string) *http.Request {
 				return httptest.NewRequest(http.MethodGet,
-					subresourcePath(group, testNamespace, testVSName, SubresourceManifestsRestore)+"?targetNamespace=restored", nil)
+					subresourcePath(group, testNamespace, testVSName, SubresourceManifestsRestore), nil)
 			},
 		},
 		{
-			name: SubresourceManifestsUpload,
+			name:       SubresourceManifestsUpload,
+			wantStatus: http.StatusOK,
 			call: func(group string) *http.Request {
 				return uploadRequest(group, fmt.Sprintf(`{"manifests":%s,"childRefs":[]}`, uploadManifests))
 			},
 		},
 		{
-			name: "a failing request",
+			name:       "a failing request",
+			wantStatus: http.StatusNotFound,
 			call: func(group string) *http.Request {
 				return httptest.NewRequest(http.MethodGet,
 					subresourcePath(group, testNamespace, "absent", SubresourceManifestsDownload), nil)
@@ -79,6 +88,10 @@ func TestAliasGroup_AnswersByteIdenticallyToThePrimaryGroup(t *testing.T) {
 			primary := serve(readyFacade(), tc.call(PrimaryGroup))
 			alias := serve(readyFacade(), tc.call(DeprecatedAliasGroup))
 
+			if primary.Code != tc.wantStatus {
+				t.Fatalf("primary group answered %d, want %d — this case no longer compares what it was written for (body %s)",
+					primary.Code, tc.wantStatus, primary.Body.String())
+			}
 			if primary.Code != alias.Code {
 				t.Fatalf("status differs between groups: primary %d, alias %d", primary.Code, alias.Code)
 			}

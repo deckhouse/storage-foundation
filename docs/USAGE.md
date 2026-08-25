@@ -224,7 +224,11 @@ Grant the permissions to the ServiceAccount in one of the two ways below.
 
 ##### Binding the built-in role (preferred)
 
-The module ships the `d8:use:capability:module:storage-foundation:transfer_volume_data` ClusterRole. It grants `create` on both `download` subresources, and it also allows creating, reading and deleting the `DataExport` and `DataImport` resources themselves, which is what a client needs to run a transfer on its own. The role is not aggregated into any of the cluster-wide access levels, so it takes effect only where it is bound:
+The module ships the `d8:use:capability:module:storage-foundation:transfer_volume_data` ClusterRole. It grants `create` on both `download` subresources, and it also allows creating, reading and deleting the `DataExport` and `DataImport` resources themselves, which is what a client needs to run a transfer on its own. The role is not folded into any of the cluster-wide access levels, so holding such a level does not bring the permission along with it.
+
+The role is, however, part of the set aggregated by the `d8:use:capability:module:state-snapshotter:backup_agent` ClusterRole — a single role granted to an external backup agent in place of several separate ones. That aggregate is only granted by an explicit binding too, so the permission still reaches nobody on its own; but it does take effect in every namespace where either this role or that aggregate is bound. Keep that in mind when auditing who can read a volume out of the cluster or write one back into it: the bindings whose `roleRef` names this role are not the whole answer, because the bindings of the aggregate grant the same thing. In a cluster without the module that defines the aggregate, the aggregate does not exist and only the bindings of this role matter.
+
+Bind the role to the ServiceAccount:
 
 ```bash
 d8 k create -f - <<EOF

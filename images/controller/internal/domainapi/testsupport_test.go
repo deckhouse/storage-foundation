@@ -37,11 +37,17 @@ import (
 
 const (
 	testNamespace = "app-ns"
-	testVSName    = "pvc-snap"
-	testContent   = "content-pvc-snap"
-	testVSCName   = "snapcontent-durable"
-	testPVCName   = "data"
-	testPVCUID    = "pvc-uid-1"
+	// capturedNamespace is deliberately NOT testNamespace. A tree loaded back into a cluster carries
+	// manifests captured somewhere else, and the node addressed lives where the tree was loaded. Keeping
+	// the two apart is what lets a namespace assertion see the restore rewrite at all: with one value for
+	// both, "the output is addressed into the addressed namespace" compares a value with itself and stays
+	// green with the rewrite removed.
+	capturedNamespace = "captured-elsewhere-ns"
+	testVSName        = "pvc-snap"
+	testContent       = "content-pvc-snap"
+	testVSCName       = "snapcontent-durable"
+	testPVCName       = "data"
+	testPVCUID        = "pvc-uid-1"
 )
 
 // fakeReader answers the two reads the facade makes: the addressed VolumeSnapshot (unstructured, because
@@ -261,14 +267,15 @@ func withoutCheckpoint() contentOption {
 }
 
 // capturedPVCJSON is one captured PVC as the content layer hands it over: raw, with status and the source
-// namespace and uid intact.
+// namespace and uid intact. That source namespace is capturedNamespace, not the namespace the tests
+// address — see the constant for why they must differ.
 func capturedPVCJSON() []byte {
 	return []byte(`[{
       "apiVersion": "v1",
       "kind": "PersistentVolumeClaim",
       "metadata": {
         "name": "` + testPVCName + `",
-        "namespace": "` + testNamespace + `",
+        "namespace": "` + capturedNamespace + `",
         "uid": "` + testPVCUID + `",
         "resourceVersion": "4711"
       },

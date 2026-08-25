@@ -55,6 +55,20 @@ const (
 	// aggregationLabelPrefix marks a role whose rules are folded into a cluster-wide access level,
 	// reaching every subject of that level without anyone binding the role.
 	aggregationLabelPrefix = "rbac.deckhouse.io/aggregate-to-"
+
+	// backupAgentAggregationLabel is the one axis under aggregationLabelPrefix that does NOT put the
+	// rules of a role behind a cluster-wide access level, and therefore the one exemption from
+	// TestNoAggregatedRoleGrantsVolumeDataTransfer. It is collected by a single ClusterRole,
+	// d8:use:capability:module:state-snapshotter:backup_agent, which grants nothing until somebody
+	// binds it: a role on this axis still reaches exactly the subjects of an explicit RoleBinding,
+	// which is the property that ban exists to protect. Every other axis stays banned.
+	backupAgentAggregationLabel = aggregationLabelPrefix + "backup-agent-as"
+
+	// backupAgentAggregationValue is the value transferVolumeDataRoleName must carry on that axis. It
+	// has to equal the value the aggregating role selects on, and nothing in this repository can check
+	// that: a mismatch is silent, the role simply stays out of the aggregated set, and the transfer
+	// then answers 403 to a subject whose binding looks correct.
+	backupAgentAggregationValue = "member"
 )
 
 // authorizedSubresources returns the "<resource>/<subresource>" pairs the data-exporter authorizes
@@ -195,10 +209,109 @@ func TestTransferVolumeDataRoleGrantsAuthorizedSubresources(t *testing.T) {
 		transferVolumeDataRoleName, AuthzVerb)
 }
 
+// aggregationLabels returns the "rbac.deckhouse.io/aggregate-to-*" labels of the role, keyed by
+// label, so that a check can talk about the axes a role declares without restating the other labels.
+func aggregationLabels(role rbacv1.ClusterRole) map[string]string {
+	axes := make(map[string]string)
+	for label, value := range role.Labels {
+		if strings.HasPrefix(label, aggregationLabelPrefix) {
+			axes[label] = value
+		}
+	}
+
+	return axes
+}
+
+// TestTransferVolumeDataRoleAggregatesOnlyIntoBackupAgent pins which aggregation axes the role
+// declares, and covers the half TestNoAggregatedRoleGrantsVolumeDataTransfer cannot: that test
+// inspects only the roles it finds aggregated, so a label dropped, or given a value the aggregate does
+// not select, leaves it green while the aggregated role silently loses the transfer permission — and
+// the failure surfaces as a 403 in a cluster, on a binding that looks correct. A misspelling that
+// keeps the aggregate-to- prefix is not in that gap: such a label counts as another axis, so the ban
+// inspects the role and goes red on it.
+//
+// The set is compared exactly, not just searched for the expected axis. The kubernetes axis in
+// particular must never appear here: with it, reading a volume out of the cluster and writing one
+// back in would reach every subject of the corresponding cluster-wide access level, with no binding
+// anyone can point at.
+//
+// Limit: the "only" in the name is about the aggregate-to-* axes and reaches no further. An
+// aggregationRule selecting on heritage, module or rbac.deckhouse.io/kind alone would collect this
+// role while it carries no aggregate-to-* label at all, and nothing here can see that — the selecting
+// role is not part of this chart.
+func TestTransferVolumeDataRoleAggregatesOnlyIntoBackupAgent(t *testing.T) {
+	roles, files, documents := loadRBACv2ClusterRoles(t)
+	t.Logf("read %d YAML file(s) and %d document(s) under %s, %d ClusterRole(s)",
+		files, documents, rbacV2Dir, len(roles))
+	require.NotEmpty(t, roles, "no ClusterRole was read, so this check compared nothing")
+
+	role := findClusterRole(t, roles, transferVolumeDataRoleName)
+
+	axes := aggregationLabels(role)
+	t.Logf("%q declares %d aggregation label(s) among its %d label(s)", role.Name, len(axes), len(role.Labels))
+
+	assert.Equal(t, map[string]string{backupAgentAggregationLabel: backupAgentAggregationValue}, axes,
+		"%q must declare %s=%s and no other aggregation axis: that value is what puts the role into the "+
+			"aggregated set, and any other axis would fold the transfer permission into a cluster-wide access level",
+		role.Name, backupAgentAggregationLabel, backupAgentAggregationValue)
+}
+
+// TestBackupAgentAggregationIsCarriedOnlyByTransferVolumeDataRole fixes WHICH roles under
+// templates/rbacv2 may be drawn into that aggregate. The axis is just a label, and it selects with
+// rbac.deckhouse.io/kind: use — which the neighbouring view and edit roles carry as well. So a copy of
+// the label on one of them would fold its rules into the very role an external backup agent holds,
+// wherever that aggregate is bound: for the edit role that means mutating verbs on the transfer
+// objects, on the capture and restore requests and on VolumeSnapshots. Nothing else here would notice
+// it — TestNoAggregatedRoleGrantsVolumeDataTransfer inspects the "<resource>/download" pairs, which
+// those roles do not grant at all.
+//
+// Limit: the walk covers templates/rbacv2 and nothing beyond it, so "no other role" here means no
+// other role under THAT directory, not of this chart. Every other ClusterRole this chart defines sits
+// in a templated file — the rbac-for-us.yaml ones and templates/user-authz-cluster-roles.yaml — which
+// the flat YAML parser of loadRBACv2ClusterRoles cannot read, so widening the walk is not a matter of
+// changing a path: a check covering them has to render the chart. Several of those roles hold mutating
+// verbs on the transfer objects, and the exempt axis appearing on one of them would go unnoticed here
+// and by the ban below alike, since the ban looks at the "<resource>/download" pairs and they grant
+// none. Beyond the chart there is nothing this file can do at all: the aggregate collects any
+// ClusterRole in the cluster carrying the labels it selects on, a cluster administrator's own
+// included, and no chart pins that set.
+func TestBackupAgentAggregationIsCarriedOnlyByTransferVolumeDataRole(t *testing.T) {
+	roles, files, documents := loadRBACv2ClusterRoles(t)
+	t.Logf("read %d YAML file(s) and %d document(s) under %s, %d ClusterRole(s)",
+		files, documents, rbacV2Dir, len(roles))
+	require.NotEmpty(t, roles, "no ClusterRole was read, so this check compared nothing")
+
+	var carriers []string
+	for _, role := range roles {
+		if _, ok := aggregationLabels(role)[backupAgentAggregationLabel]; ok {
+			carriers = append(carriers, role.Name)
+		}
+	}
+	t.Logf("inspected %d ClusterRole(s) under %s, %d of them carry %s",
+		len(roles), rbacV2Dir, len(carriers), backupAgentAggregationLabel)
+
+	assert.ElementsMatch(t, []string{transferVolumeDataRoleName}, carriers,
+		"%s may be carried by %q and by no other role under %s: the label alone is enough to fold a role "+
+			"into the aggregate an external backup agent is bound to",
+		backupAgentAggregationLabel, transferVolumeDataRoleName, rbacV2Dir)
+}
+
 // TestNoAggregatedRoleGrantsVolumeDataTransfer keeps the permission behind an explicit binding.
 // Moving a volume out of the cluster and back in is granted to a named subject on purpose; an
 // aggregation label on any role carrying these subresources would hand the same reach to every
 // subject of a cluster-wide access level, silently and without a binding anyone can point at.
+//
+// Exactly one axis is exempt, backupAgentAggregationLabel, and the exemption is the same rule applied
+// to a different mechanism rather than a hole in it: the axes banned here are held by everyone at the
+// corresponding access level from the moment the label appears, while the role collecting the exempt
+// axis is itself granted to a named subject by an explicit RoleBinding and reaches nobody until then.
+// The exemption is per LABEL, not per role — a role declaring the exempt axis alongside any other one
+// is still inspected and still fails. The room it does leave is covered by two checks above, one for
+// each half: TestTransferVolumeDataRoleAggregatesOnlyIntoBackupAgent pins WHICH axes
+// transferVolumeDataRoleName may declare, its value included, and
+// TestBackupAgentAggregationIsCarriedOnlyByTransferVolumeDataRole pins WHICH roles may declare the
+// exempt axis at all. The second one is what keeps the exemption from being as wide as it looks:
+// without it any role under templates/rbacv2 could take the exemption and nothing here would object.
 //
 // Limit: it inspects the roles under templates/rbacv2 only. A role defined elsewhere in the chart, or
 // written by a cluster administrator, is outside its reach.
@@ -210,28 +323,36 @@ func TestNoAggregatedRoleGrantsVolumeDataTransfer(t *testing.T) {
 	pairs := authorizedSubresources()
 	require.NotEmpty(t, pairs, "no transfer direction is authorized, so this check compared nothing")
 
-	aggregated := 0
+	aggregated, exempt := 0, 0
 	for _, role := range roles {
-		isAggregated := false
-		for label := range role.Labels {
-			if strings.HasPrefix(label, aggregationLabelPrefix) {
-				isAggregated = true
+		var levelAxes []string
+		hasExemptAxis := false
+		for label := range aggregationLabels(role) {
+			if label == backupAgentAggregationLabel {
+				hasExemptAxis = true
 
-				break
+				continue
 			}
+			levelAxes = append(levelAxes, label)
 		}
-		if !isAggregated {
+		if len(levelAxes) == 0 {
+			if hasExemptAxis {
+				exempt++
+			}
+
 			continue
 		}
 		aggregated++
+		slices.Sort(levelAxes)
 
 		granted := grantedSubresources(t, role)
 		for _, pair := range pairs {
 			assert.NotContainsf(t, granted, pair,
-				"%q is aggregated into a cluster-wide access level and must not grant %q on %s",
-				role.Name, AuthzVerb, pair)
+				"%q carries %s, so its rules reach every subject of that access level, and it must not grant %q on %s",
+				role.Name, strings.Join(levelAxes, ", "), AuthzVerb, pair)
 		}
 	}
-	t.Logf("inspected %d aggregated ClusterRole(s) out of %d", aggregated, len(roles))
+	t.Logf("inspected %d aggregated ClusterRole(s) out of %d; %d exempt on %s alone",
+		aggregated, len(roles), exempt, backupAgentAggregationLabel)
 	require.NotZero(t, aggregated, "no aggregated ClusterRole was inspected, so this check compared nothing")
 }

@@ -209,7 +209,18 @@ func (h *Handler) handleManifestsWithDataRestoration(w http.ResponseWriter, r *h
 	}
 	opts.SnapshotNamespace = namespace
 	opts.SnapshotName = name
-	opts.TargetNamespace = r.URL.Query().Get("targetNamespace")
+	// No namespace is taken from the caller: a subtree is compiled into the namespace of the node
+	// addressed. Reading a targetNamespace here would make the same query mean different things
+	// depending on which group the client hit, which is the one thing the shared query contract exists
+	// to prevent.
+	//
+	// What is still missing is the outright REFUSAL of a foreign value, which the snapshot core already
+	// answers 400 with while this facade answers 200. It is missing by omission, not by version: the
+	// refusal is restoreapi.RejectForeignTargetNamespace, a function of its own that ParseQueryOptions
+	// above does not call, so it starts acting when a line here calls it and not before. Two steps, in
+	// this order: require a snapshotsdk version that HAS that function (no version this module has ever
+	// depended on does), then call it immediately after the parser and hand its error to WriteError, as
+	// the parser's own error is handled. Bumping alone leaves this endpoint answering 200.
 
 	data, err := h.restore.ManifestsWithDataRestoration(r.Context(), opts)
 	if err != nil {

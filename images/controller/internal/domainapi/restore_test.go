@@ -116,22 +116,61 @@ func TestManifestsWithDataRestoration_BindsThePVCToItsVolumeSnapshot(t *testing.
 	}
 }
 
-// A restore into another namespace has to rewrite the objects, or applying them recreates the source
-// namespace's objects instead.
-func TestManifestsWithDataRestoration_RewritesTargetNamespace(t *testing.T) {
+// The output is addressed into the namespace of the node addressed, never into the one the manifests were
+// captured in: applying them as captured would recreate the source namespace's objects, and for a tree
+// loaded back into a cluster that namespace may not even exist. The caller does not get to name a third
+// one — a restored claim reaches its data through a dataSourceRef that carries no namespace, so the claim
+// and the VolumeSnapshot it names have to end up in the same place.
+func TestManifestsWithDataRestoration_AddressesTheOutputIntoTheAddressedNamespace(t *testing.T) {
 	core := &fakeCore{manifests: capturedPVCJSON()}
 	reader := newFakeReader().withVolumeSnapshot(newVolumeSnapshot()).withContent(newSnapshotContent())
 
-	path := subresourcePath(PrimaryGroup, testNamespace, testVSName, SubresourceManifestsRestore) + "?targetNamespace=restored"
-	rec := serve(newTestHandler(reader, core), httptest.NewRequest(http.MethodGet, path, nil))
+	rec := serve(newTestHandler(reader, core), httptest.NewRequest(http.MethodGet,
+		subresourcePath(PrimaryGroup, testNamespace, testVSName, SubresourceManifestsRestore), nil))
 
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status: got %d want 200 (body %s)", rec.Code, rec.Body.String())
 	}
 	objects := decodeObjects(t, rec.Body.Bytes())
+	if len(objects) != 1 {
+		t.Fatalf("compiled objects: got %d want 1 — with nothing emitted the namespace assertion below checks nothing (%v)", len(objects), objects)
+	}
 	meta, _ := nestedMap(objects[0], "metadata")
-	if got := meta["namespace"]; got != "restored" {
-		t.Fatalf("compiled PVC namespace: got %v want %q", got, "restored")
+	if got := meta["namespace"]; got != testNamespace {
+		t.Fatalf("compiled PVC namespace: got %v, want the addressed %q; it was captured in %q, so a value other than the addressed one means the restore rewrite is gone",
+			got, testNamespace, capturedNamespace)
+	}
+}
+
+// A caller can still put a target namespace on the wire, and this facade ANSWERS such a request: 200, with
+// the output addressed into the snapshot's own namespace regardless of what was asked for. The snapshot
+// core refuses the same request with 400, so one request means two things depending on the group.
+//
+// That disagreement does NOT end by itself. The refusal is a separate function of the shared restore
+// package, which the query parser does not call; it begins to act when the handler calls it, and not when
+// a dependency is raised. So this guard has two jobs. It reddens on the day someone wires the refusal up
+// — the intended end state, and the moment to rewrite it to assert the refusal instead — and until then it
+// is the only thing stopping the value from quietly being obeyed again, which takes two edits here, in the
+// handler and in the compilation, and which no other test would see: none of them sends the value.
+func TestManifestsWithDataRestoration_AnswersACallerSuppliedTargetNamespaceInTheAddressedOne(t *testing.T) {
+	core := &fakeCore{manifests: capturedPVCJSON()}
+	reader := newFakeReader().withVolumeSnapshot(newVolumeSnapshot()).withContent(newSnapshotContent())
+
+	path := subresourcePath(PrimaryGroup, testNamespace, testVSName, SubresourceManifestsRestore) + "?targetNamespace=other-ns"
+	rec := serve(newTestHandler(reader, core), httptest.NewRequest(http.MethodGet, path, nil))
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status: got %d want 200 (body %s); a 400 means the shared refusal was wired into the handler — that is the intended end state, so replace this guard with one asserting the refusal. Nothing else produces it: raising the dependency without adding that call leaves the answer at 200",
+			rec.Code, rec.Body.String())
+	}
+	objects := decodeObjects(t, rec.Body.Bytes())
+	if len(objects) != 1 {
+		t.Fatalf("compiled objects: got %d want 1 — with nothing emitted the namespace assertion below checks nothing (%v)", len(objects), objects)
+	}
+	meta, _ := nestedMap(objects[0], "metadata")
+	if got := meta["namespace"]; got != testNamespace {
+		t.Fatalf("compiled PVC namespace: got %v, want the addressed %q; a value on the wire must not move where the answer is addressed (it was captured in %q)",
+			got, testNamespace, capturedNamespace)
 	}
 }
 

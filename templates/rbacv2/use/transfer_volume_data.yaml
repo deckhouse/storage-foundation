@@ -11,12 +11,39 @@
 # one back in would silently reach every subject of the corresponding cluster-wide access level.
 # This role is meant to be granted to a named subject by an explicit RoleBinding, and it grants
 # nothing until that binding exists.
+#
+# The `rbac.deckhouse.io/aggregate-to-backup-agent-as` label below does not undo that rule, because
+# the two axes differ in who ends up holding the rules. A `kubernetes` axis is reached by holding the
+# cluster-wide access level itself, so the rules arrive together with the level and nobody binds
+# anything. The `backup-agent` axis is collected by a single ClusterRole,
+# `d8:use:capability:module:state-snapshotter:backup_agent`, which in turn grants nothing until
+# somebody binds it — so this role still reaches only a named subject, and only through an explicit
+# RoleBinding. What the label buys is that setting up an external backup agent takes one binding
+# instead of a handful, and a forgotten one can no longer leave that agent authorized for everything
+# except the volume data.
+#
+# So do not "restore" the paragraph above by deleting the label.
+# TestNoAggregatedRoleGrantsVolumeDataTransfer keeps every OTHER aggregation axis banned for this
+# role, and TestTransferVolumeDataRoleAggregatesOnlyIntoBackupAgent pins this one, its value
+# included. The value has to be the one the aggregating role selects on, and that role lives in
+# another module's chart, so nothing here can verify the pair: a rename on either side silently drops
+# this role out of the aggregated set and the transfer answers 403 to a subject whose binding looks
+# correct. When that module is absent, the label selects nothing and this role behaves exactly as it
+# did before.
+#
+# The label belongs to THIS role and to no other role under `templates/rbacv2`: the axis selects
+# together with `rbac.deckhouse.io/kind: use`, which the neighbouring view and edit roles carry too, so
+# a copy of it there would hand their rules to the same backup agent. That much is held by
+# TestBackupAgentAggregationIsCarriedOnlyByTransferVolumeDataRole — which also spells out how far its
+# reach goes, because the ClusterRoles this chart defines outside that directory are not examined at
+# all.
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
   labels:
     heritage: deckhouse
     module: storage-foundation
+    rbac.deckhouse.io/aggregate-to-backup-agent-as: member
     rbac.deckhouse.io/kind: use
   name: d8:use:capability:module:storage-foundation:transfer_volume_data
 rules:
