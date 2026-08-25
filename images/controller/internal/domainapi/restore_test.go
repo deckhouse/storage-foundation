@@ -142,35 +142,57 @@ func TestManifestsWithDataRestoration_AddressesTheOutputIntoTheAddressedNamespac
 	}
 }
 
-// A caller can still put a target namespace on the wire, and this facade ANSWERS such a request: 200, with
-// the output addressed into the snapshot's own namespace regardless of what was asked for. The snapshot
-// core refuses the same request with 400, so one request means two things depending on the group.
+// A caller can still put a target namespace on the wire, and the answer is a refusal rather than a
+// differently-addressed 200. The decision belongs to the shared restore package, so this facade and the
+// snapshot core answer the same request the same way instead of one request meaning two things depending
+// on which group the client hit.
 //
-// That disagreement does NOT end by itself. The refusal is a separate function of the shared restore
-// package, which the query parser does not call; it begins to act when the handler calls it, and not when
-// a dependency is raised. So this guard has two jobs. It reddens on the day someone wires the refusal up
-// — the intended end state, and the moment to rewrite it to assert the refusal instead — and until then it
-// is the only thing stopping the value from quietly being obeyed again, which takes two edits here, in the
-// handler and in the compilation, and which no other test would see: none of them sends the value.
-func TestManifestsWithDataRestoration_AnswersACallerSuppliedTargetNamespaceInTheAddressedOne(t *testing.T) {
-	core := &fakeCore{manifests: capturedPVCJSON()}
-	reader := newFakeReader().withVolumeSnapshot(newVolumeSnapshot()).withContent(newSnapshotContent())
+// Ignoring the value instead is what would make the failure dangerous: a client that asked for another
+// namespace would receive objects addressed HERE together with a 200, apply them here, and overwrite what
+// is there — the mistake landing after the answer already looked fine.
+//
+// The equal value and the empty one stay accepted on purpose: existing clients pass the addressed
+// namespace and mean nothing by it, so refusing them would break working callers to make a point.
+//
+// LIMIT: these show that the refusal is reached through the handler and that its status maps to 400. They
+// do NOT exercise the live path through the aggregated API — the request never leaves the process here —
+// and no test at this level can; that role belongs to an end-to-end spec, which this facade does not yet
+// have.
+func TestManifestsWithDataRestoration_RefusesAForeignTargetNamespace(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		query    string
+		wantCode int
+	}{
+		{name: "a foreign namespace is refused", query: "?targetNamespace=other-ns", wantCode: http.StatusBadRequest},
+		{name: "a foreign namespace hidden behind the addressed one is refused", query: "?targetNamespace=" + testNamespace + "&targetNamespace=other-ns", wantCode: http.StatusBadRequest},
+		{name: "the addressed namespace is tolerated", query: "?targetNamespace=" + testNamespace, wantCode: http.StatusOK},
+		{name: "an empty value is tolerated", query: "?targetNamespace=", wantCode: http.StatusOK},
+		{name: "no value at all is tolerated", query: "", wantCode: http.StatusOK},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			core := &fakeCore{manifests: capturedPVCJSON()}
+			reader := newFakeReader().withVolumeSnapshot(newVolumeSnapshot()).withContent(newSnapshotContent())
 
-	path := subresourcePath(PrimaryGroup, testNamespace, testVSName, SubresourceManifestsRestore) + "?targetNamespace=other-ns"
-	rec := serve(newTestHandler(reader, core), httptest.NewRequest(http.MethodGet, path, nil))
+			path := subresourcePath(PrimaryGroup, testNamespace, testVSName, SubresourceManifestsRestore) + tc.query
+			rec := serve(newTestHandler(reader, core), httptest.NewRequest(http.MethodGet, path, nil))
 
-	if rec.Code != http.StatusOK {
-		t.Fatalf("status: got %d want 200 (body %s); a 400 means the shared refusal was wired into the handler — that is the intended end state, so replace this guard with one asserting the refusal. Nothing else produces it: raising the dependency without adding that call leaves the answer at 200",
-			rec.Code, rec.Body.String())
-	}
-	objects := decodeObjects(t, rec.Body.Bytes())
-	if len(objects) != 1 {
-		t.Fatalf("compiled objects: got %d want 1 — with nothing emitted the namespace assertion below checks nothing (%v)", len(objects), objects)
-	}
-	meta, _ := nestedMap(objects[0], "metadata")
-	if got := meta["namespace"]; got != testNamespace {
-		t.Fatalf("compiled PVC namespace: got %v, want the addressed %q; a value on the wire must not move where the answer is addressed (it was captured in %q)",
-			got, testNamespace, capturedNamespace)
+			if rec.Code != tc.wantCode {
+				t.Fatalf("status: got %d want %d (body %s)", rec.Code, tc.wantCode, rec.Body.String())
+			}
+			if tc.wantCode != http.StatusOK {
+				return
+			}
+			objects := decodeObjects(t, rec.Body.Bytes())
+			if len(objects) != 1 {
+				t.Fatalf("compiled objects: got %d want 1 — with nothing emitted the namespace assertion below checks nothing (%v)", len(objects), objects)
+			}
+			meta, _ := nestedMap(objects[0], "metadata")
+			if got := meta["namespace"]; got != testNamespace {
+				t.Fatalf("compiled PVC namespace: got %v, want the addressed %q; a value on the wire must not move where the answer is addressed (it was captured in %q)",
+					got, testNamespace, capturedNamespace)
+			}
+		})
 	}
 }
 

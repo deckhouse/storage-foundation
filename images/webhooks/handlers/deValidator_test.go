@@ -61,7 +61,10 @@ func makeDataExport(group, kind, name string) *dev1alpha1.DataExport {
 func assertResult(t *testing.T, got *kwhvalidating.ValidatorResult, wantValid bool, wantMsgContains string) {
 	t.Helper()
 	if got == nil {
+		// t.Fatal ends the goroutine, so nothing below runs; the explicit return
+		// states that for readers and for analysers that do not model it.
 		t.Fatal("ValidatorResult is nil")
+		return
 	}
 	if got.Valid != wantValid {
 		t.Errorf("Valid = %v, want %v (message: %q)", got.Valid, wantValid, got.Message)

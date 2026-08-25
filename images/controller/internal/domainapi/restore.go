@@ -123,10 +123,8 @@ func (s *RestoreService) ManifestsWithDataRestoration(ctx context.Context, opts 
 		CapturedManifests: captured,
 		// The output is addressed into the namespace of the node addressed, and there is no other
 		// choice: a restored claim reaches its data through a dataSourceRef that carries no namespace,
-		// while the VolumeSnapshot it names stays with the snapshot. The field is named for a target a
-		// caller once picked; nothing picks it any more, so this node's own namespace goes in directly
-		// rather than through a variable that would read like a decision.
-		TargetNamespace: namespace,
+		// while the VolumeSnapshot it names stays with the snapshot.
+		NodeNamespace:   namespace,
 		PVCDataBindings: pvcDataBindings(content.Status.Data),
 		// This snapshot IS the visibility leaf of the volume its captured PVC used: the durable
 		// VolumeSnapshotContent it is bound to is the artifact the data binding names, and this

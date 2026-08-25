@@ -2,8 +2,8 @@ module github.com/deckhouse/storage-foundation/images/controller
 
 go 1.27.0
 require (
-	github.com/deckhouse/state-snapshotter/api v0.0.0-20260821131532-5fdc15704503
-	github.com/deckhouse/state-snapshotter/pkg/snapshotsdk v0.0.0-20260821131532-5fdc15704503
+	github.com/deckhouse/state-snapshotter/api v0.0.0-20260825032206-4f854a795522
+	github.com/deckhouse/state-snapshotter/pkg/snapshotsdk v0.0.0-20260825032206-4f854a795522
 	github.com/deckhouse/storage-foundation/api v0.0.0-00010101000000-000000000000
 	github.com/deckhouse/storage-foundation/common v0.0.0-00010101000000-000000000000
 	github.com/deckhouse/deckhouse v1.67.7-0.20251212134859-497a0dab9fc0
