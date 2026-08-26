@@ -1,16 +1,13 @@
 Changes:
-- General Availability level release. storage-foundation becomes the owner of support
-  for CSI snapshots (extended VolumeSnapshot with spec.mode), volume cloning and DataExport/DataImport
-  data export/import via HTTP in the cluster.
-- Auto-enabled in Default and Managed bundles; requires Deckhouse >= 1.76.9 (release
-  with d8 compatible CLI) and state-snapshotter module >= 1.0.0.
-- The deprecated snapshot-controller module (v0.2.0+) is pinned to this v1.0.0 release and hands
-  its functionality over to storage-foundation.
-- The storage-volume-data-manager module remains supported and may stay enabled alongside
-  storage-foundation — each of the two modules serves its own DataExport/DataImport resources
-  independently, under its own API group and in its own namespace. One and the same live volume
-  still must not be exported through both modules at once (see the module usage documentation).
-- Added CI check hack/check-consumer-crds.sh, which protects against byte-by-byte discrepancies
-  between this module's CRDs and the copies shipped by other modules — the snapshot CRDs handed
-  over by snapshot-controller, and the vendored VolumePopulators CRD that storage-foundation and
-  storage-volume-data-manager both install.
+  - First release, at the General Availability level. The module provides snapshot and volume cloning
+    support for compatible CSI drivers, as well as export and import of volume data over HTTP, both
+    inside the cluster and outside it through the ingress.
+  - Enabled automatically in the Default and Managed bundles. Requires Deckhouse >= 1.76.9 and the
+    state-snapshotter module >= 1.0.0.
+  - The module takes over the functionality of snapshot-controller, so for correct operation it
+    requires that module to be absent or disabled, or updated to 0.2.0 or newer.
+  - The storage-volume-data-manager module may be kept enabled at the same time; each of the two
+    serves its own DataExport/DataImport resources, in its own API group and its own namespace. The
+    same live volume cannot be exported through both at once.
+  - VolumeSnapshot is extended, so a snapshot keeps both the volume data and the manifest of the PVC
+    it was made from.
