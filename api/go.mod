@@ -1,6 +1,6 @@
 module github.com/deckhouse/storage-foundation/api
 
-go 1.25.12
+go 1.25.14
 
 require (
 	github.com/deckhouse/state-snapshotter/api v0.0.0-20260825032206-4f854a795522
