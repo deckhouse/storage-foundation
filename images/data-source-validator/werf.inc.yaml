@@ -30,7 +30,7 @@ shell:
 
 ---
 image: {{ .ModuleNamePrefix }}{{ .ImageName }}-golang-artifact
-from: {{ index $.Images (eq .SVACE_ENABLED "false" | ternary "builder/golang" "builder/alpine-svace") }}
+from: {{ index $.Images "builder/golang" }}
 final: false
 
 import:
@@ -48,6 +48,7 @@ secrets:
 
 shell:
   setup:
+    {{- include "svace toolchain for golang builds" . | nindent 4 }}
     - cd /src/cmd/volume-data-source-validator
     - GOPROXY=$(cat /run/secrets/GOPROXY) go mod download
     - export GOOS=linux GOARCH=amd64 CGO_ENABLED=0
