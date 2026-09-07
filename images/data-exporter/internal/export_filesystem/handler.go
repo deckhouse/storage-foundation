@@ -83,6 +83,11 @@ type FilesystemExporter struct {
 }
 
 func NewFilesystemExporter(fsys d8fs.OS, root string, logger *slog.Logger) (*FilesystemExporter, error) {
+	// Cleaned once, here, so every later comparison against it is against one canonical form. A root
+	// carrying a trailing separator would make the containment check in resolvePath compare against
+	// "/mnt/data//", which no resolved path has as a prefix.
+	root = filepath.Clean(root)
+
 	err := checkIsDir(fsys, root)
 	if err != nil {
 		logger.Error("Failed to initialize file system exporter", "error", err)
@@ -157,10 +162,23 @@ func (d *FilesystemExporter) resolvePath(urlPath string) (string, fs.FileInfo, e
 	// - We don't care directory renaming attack because user has no access to the
 	//   storage-foundation container
 
-	// URL path is always an absolute path
-	// Clean() prevents path to escape the root, e.g. "/.." -> "/"
-	// Therefore, we don't have to handle ".."
-	path := filepath.Clean(urlPath)
+	// The path arrives RELATIVE, and that is the whole reason this function must root it itself.
+	// The handler is mounted behind http.StripPrefix, which removes the served prefix from
+	// r.URL.Path — so what gets here is "file", "dir/nested_file" or, from a caller that asked for
+	// it, "../../etc/passwd". filepath.Clean does not remove leading ".." from a relative path
+	// (that would change its meaning), so cleaning such a path leaves the escape intact and the
+	// Join below walks out of the volume.
+	//
+	// Rooting it first is what makes Clean do the work the old comment claimed it already did:
+	// Clean("/" + "../../etc/passwd") is "/etc/passwd", because ".." at the top of an ABSOLUTE path
+	// has nowhere to go. Every remaining segment is then inside the volume by construction.
+	//
+	// Note what this does NOT rely on: that a ".." ever reaches here in a recognisable form. It
+	// does not — the same request spelled ..%2F..%2F or %2e%2e%2f%2e%2e%2f arrives already decoded,
+	// and http.ServeMux only collapses the forms that are literal in the ESCAPED path. So this is
+	// not a filter over spellings, which would have to enumerate them; it is a statement that the
+	// result is under the root whatever the input was.
+	path := filepath.Clean("/" + urlPath)
 	segments := strings.Split(path, "/") // NOTE: safely use "/" because path is from URL
 
 	// Inspect path segment by segment to check no symlinks occure
@@ -183,7 +201,20 @@ func (d *FilesystemExporter) resolvePath(urlPath string) (string, fs.FileInfo, e
 	}
 
 	// We've already get file info, so let caller reuse it
-	return filepath.Join(d.Root, path), fi, nil
+	resolved := filepath.Join(d.Root, path)
+
+	// A second, independent check on the result rather than on the input. The rooting above is
+	// what prevents the escape; this catches the case where a later change reintroduces one, and it
+	// costs a string comparison. A guard that can only ever fire on a bug is worth having when what
+	// it guards is "serve any file the exporter can read".
+	if resolved != d.Root && !strings.HasPrefix(resolved, d.Root+string(filepath.Separator)) {
+		return "", nil, &httpiohelpers.HTTPError{
+			Err:    fmt.Errorf("resolved path escapes the export root, path=%s", urlPath),
+			Status: http.StatusBadRequest,
+		}
+	}
+
+	return resolved, fi, nil
 }
 
 // Common request processing for HEAD and GET

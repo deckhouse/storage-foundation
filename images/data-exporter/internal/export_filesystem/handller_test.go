@@ -37,6 +37,10 @@ import (
 	"github.com/deckhouse/storage-foundation/images/data-exporter/internal/test"
 )
 
+// outsideRootMarker is the content of the files that live OUTSIDE the exported root. A test that reads
+// it back has been served something the exporter must never serve, whatever status code came with it.
+const outsideRootMarker = "OUTSIDE-THE-EXPORT-ROOT"
+
 func createTestFs(t *testing.T) *fake.OS {
 	// FS mock
 	// /
@@ -64,8 +68,8 @@ func createTestFs(t *testing.T) *fake.OS {
 		WithFileAtPath("sharedir/file", os.FileMode(0o664), fake.RWContentFromString("file")).
 		WithFileAtPath("sharedir/file_link", os.ModeSymlink, fake.LinkReader{Target: "/foo/bar"}).
 		WithFileAtPath("outer_dir", os.ModeDir).
-		WithFileAtPath("outer_dir/file", os.FileMode(0o664)).
-		WithFileAtPath("outer_file", os.FileMode(0o664)).
+		WithFileAtPath("outer_dir/file", os.FileMode(0o664), fake.RWContentFromString(outsideRootMarker)).
+		WithFileAtPath("outer_file", os.FileMode(0o664), fake.RWContentFromString(outsideRootMarker)).
 		Build()
 	assert.NoError(t, err)
 
@@ -537,6 +541,12 @@ func TestHeadFileNotFound(t *testing.T) {
 }
 
 // Negative: access file out of the dir
+//
+// This one passed long before the escape was fixed, and the reason is worth keeping: the target here is
+// ABSOLUTE ("/../outer_file"), and filepath.Clean does drop a ".." at the top of an absolute path. In
+// production the handler sits behind http.StripPrefix and receives the RELATIVE remainder, where Clean
+// keeps the ".." and the escape survives. So this test asserted a property of a shape the handler never
+// actually receives. TestGetPathEscapingRootIsRefused covers the shape it does.
 func TestHeadFileUpPath(t *testing.T) {
 	fsys := createTestFs(t)
 
@@ -669,4 +679,79 @@ func TestGetDirectoryWithFIFOReturnsOtherType(t *testing.T) {
 	assert.Equal(t, "cfgarq", resp.Items[0].Name)
 	assert.Equal(t, "other", resp.Items[0].Type, "FIFO must be reported as 'other', not 'dir'")
 	assert.NotEqual(t, "dir", resp.Items[0].Type, "regression: FIFO must not be reported as 'dir'")
+}
+
+// The paths below are what a client actually sent to a live exporter, and two of them were served:
+// `..%2F..%2Fetc%2Fpasswd` and `%2e%2e%2f%2e%2e%2fetc%2fpasswd` came back 200 with the contents of the
+// exporter container's own /etc/passwd. The plain `../../etc/passwd` spelling was refused, but not by
+// this code — http.ServeMux collapses dot segments that are literal in the escaped path before routing,
+// so that form never reached the handler at all.
+//
+// The requests here are built the way the handler receives them: behind http.StripPrefix, so the path
+// is RELATIVE and already percent-decoded. That is the shape in which the escape was invisible, and it
+// is the shape the fix has to hold for — hence no encoded spellings among the cases. Encoding is what
+// got a path past the router; it is not what the file resolution sees.
+func TestGetPathEscapingRootIsRefused(t *testing.T) {
+	// /outer_file and /outer_dir/file live outside the shared root (see createTestFs), so serving
+	// either of them is the breach itself rather than a proxy for it.
+	for _, path := range []string{
+		"../outer_file",
+		"../../outer_file",
+		"../outer_dir/file",
+		"dir/../../outer_file",
+		"./../outer_file",
+		"/../outer_file",
+	} {
+		t.Run(path, func(t *testing.T) {
+			fsys := createTestFs(t)
+			req := httptest.NewRequest(http.MethodGet, "/", nil)
+			// Set the path directly: httptest.NewRequest would canonicalise a target containing "..",
+			// which is precisely the collapsing this test must NOT rely on.
+			req.URL.Path = path
+			rr := httptest.NewRecorder()
+
+			serve(t, fsys, rr, req)
+
+			response := rr.Result()
+			defer response.Body.Close()
+
+			body, err := readAll(response.Body)
+			assert.NoError(t, err)
+			assert.NotEqual(t, http.StatusOK, response.StatusCode,
+				"path %q must not be served; body=%q", path, string(body))
+			// The bytes, not just the status: the marker is the content of the file outside the root,
+			// so its absence is the invariant itself rather than a proxy for it. A refusal that still
+			// echoed the requested path would pass a substring check on the path and fail this one.
+			assert.NotContains(t, string(body), outsideRootMarker,
+				"no content from outside the export root may be served for %q", path)
+		})
+	}
+}
+
+// The counterpart: rooting the path must not break the paths that are supposed to work, including the
+// ones that contain ".." and stay inside the volume.
+func TestGetPathInsideRootStillServed(t *testing.T) {
+	for _, tc := range []struct{ path, want string }{
+		{"file", "file"},
+		{"dir/nested_file", "nested_file"},
+		{"dir/../file", "file"},
+		{"/file", "file"},
+	} {
+		t.Run(tc.path, func(t *testing.T) {
+			fsys := createTestFs(t)
+			req := httptest.NewRequest(http.MethodGet, "/", nil)
+			req.URL.Path = tc.path
+			rr := httptest.NewRecorder()
+
+			serve(t, fsys, rr, req)
+
+			response := rr.Result()
+			defer response.Body.Close()
+
+			assert.Equal(t, http.StatusOK, response.StatusCode, "path %q must still be served", tc.path)
+			body, err := readAll(response.Body)
+			assert.NoError(t, err)
+			assert.Equal(t, tc.want, string(body))
+		})
+	}
 }
