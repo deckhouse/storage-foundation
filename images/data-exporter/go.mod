@@ -1,6 +1,6 @@
 module github.com/deckhouse/storage-foundation/images/data-exporter
 
-go 1.27.0
+go 1.27.1
 require (
 	github.com/deckhouse/sds-common-lib v0.10.0
 	github.com/deckhouse/storage-foundation/api v0.0.0-00010101000000-000000000000

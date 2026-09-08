@@ -1,7 +1,6 @@
 module github.com/deckhouse/storage-foundation/common
 
-go 1.27.0
-
+go 1.27.1
 require (
 	github.com/deckhouse/storage-foundation/api v0.0.0-00010101000000-000000000000
 	github.com/deckhouse/virtualization/api v0.15.0
