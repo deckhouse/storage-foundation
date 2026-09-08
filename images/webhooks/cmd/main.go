@@ -23,9 +23,9 @@ import (
 	"os"
 
 	snapshotv1 "github.com/kubernetes-csi/external-snapshotter/client/v6/apis/volumesnapshot/v1"
-	"github.com/sirupsen/logrus"
-	kwhlogrus "github.com/slok/kubewebhook/v2/pkg/log/logrus"
 
+	"github.com/deckhouse/sds-common-lib/logger"
+	"github.com/deckhouse/sds-common-lib/logger/kwhlogger"
 	dev1alpha1 "github.com/deckhouse/storage-foundation/api/v1alpha1"
 	"github.com/deckhouse/storage-foundation/images/webhooks/handlers"
 )
@@ -64,9 +64,19 @@ const (
 )
 
 func main() {
-	logrusLogEntry := logrus.NewEntry(logrus.New())
-	logrusLogEntry.Logger.SetLevel(logrus.DebugLevel)
-	logger := kwhlogrus.NewLogrus(logrusLogEntry)
+	// LOG_LEVEL arrives as a number 0..4 from lib-helm, which is what the
+	// controller container in this same pod already reads. This webhook used to
+	// ignore it, so its level was whatever main hard-coded no matter what the
+	// module setting said.
+	log, err := logger.NewLoggerFromEnv(logger.InfoLevel)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "unable to create the logger: %s\n", err)
+		os.Exit(1)
+	}
+	kwhLog := kwhlogger.New(log)
+	// One logger per process: the handlers are plain functions with nowhere to pass
+	// one through, so they read it from their own package.
+	handlers.SetLogger(log)
 
 	cfg, err := initFlags()
 	if err != nil {
@@ -74,13 +84,13 @@ func main() {
 		os.Exit(1)
 	}
 
-	volumeSnapshotMutatingWebHookHandler, err := handlers.GetMutatingWebhookHandler(handlers.VolumeSnapshotMutate, volumeSnapshotMutatorID, &snapshotv1.VolumeSnapshot{}, logger)
+	volumeSnapshotMutatingWebHookHandler, err := handlers.GetMutatingWebhookHandler(handlers.VolumeSnapshotMutate, volumeSnapshotMutatorID, &snapshotv1.VolumeSnapshot{}, kwhLog)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error creating volumeSnapshotMutatingWebHookHandler: %s", err)
 		os.Exit(1)
 	}
 
-	dataExportValidatingWebHookHandler, err := handlers.NewValidatingWebhookHandler(handlers.DataExportValidateFunc(), dataExportValidatorID, &dev1alpha1.DataExport{}, logger)
+	dataExportValidatingWebHookHandler, err := handlers.NewValidatingWebhookHandler(handlers.DataExportValidateFunc(), dataExportValidatorID, &dev1alpha1.DataExport{}, kwhLog)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error creating dataExportValidatingWebHookHandler: %s", err)
 		os.Exit(1)
@@ -91,7 +101,7 @@ func main() {
 	mux.Handle("/dataexport-validate", dataExportValidatingWebHookHandler)
 	mux.HandleFunc("/healthz", httpHandlerHealthz)
 
-	logger.Infof("Listening on %s", port)
+	log.Info("listening", "address", port)
 	err = http.ListenAndServeTLS(port, cfg.certFile, cfg.keyFile, mux)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error serving webhook: %s", err)

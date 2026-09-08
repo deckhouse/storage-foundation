@@ -21,11 +21,11 @@ import (
 	"os"
 	"time"
 
-	"github.com/deckhouse/storage-foundation/images/controller/pkg/logger"
+	"github.com/deckhouse/sds-common-lib/logger"
+	"github.com/deckhouse/sds-common-lib/monitoring"
 )
 
 const (
-	LogLevelEnvName                      = "LOG_LEVEL"
 	ControllerNamespaceEnv               = "CONTROLLER_NAMESPACE"
 	HardcodedControllerNS                = "d8-storage-foundation"
 	ControllerName                       = "controller"
@@ -50,8 +50,11 @@ const (
 type Options struct {
 	Loglevel               logger.Verbosity
 	HealthProbeBindAddress string
-	ControllerNamespace    string
-	Retention              RetentionConfig
+	// MetricsBindAddress is where the manager serves /metrics, injected via
+	// METRICS_BIND_ADDRESS from Helm.
+	MetricsBindAddress  string
+	ControllerNamespace string
+	Retention           RetentionConfig
 
 	// AggregationAPIAddr is where the module's aggregated API server listens (see internal/domainapi).
 	AggregationAPIAddr string
@@ -67,15 +70,18 @@ type RetentionConfig struct {
 	DetachTTL   time.Duration // TTL for detached PV artifacts - IRetainer
 }
 
+// defaultMetricsBindAddress keeps the endpoint on loopback when the chart says
+// nothing: the kube-rbac-proxy of the same pod is what publishes it. The fleet-wide
+// fallback is the wildcard ":8080", which would both answer unauthenticated on the
+// pod IP and collide with the proxy, since the two carry the same port number.
+const defaultMetricsBindAddress = "127.0.0.1:8080"
+
 func NewConfig() *Options {
 	var opts Options
 
-	loglevel := os.Getenv(LogLevelEnvName)
-	if loglevel == "" {
-		opts.Loglevel = logger.DebugLevel
-	} else {
-		opts.Loglevel = logger.Verbosity(loglevel)
-	}
+	opts.Loglevel = logger.VerbosityFromEnv(logger.InfoLevel)
+
+	opts.MetricsBindAddress = monitoring.BindAddressFromEnvOr(defaultMetricsBindAddress)
 
 	opts.HealthProbeBindAddress = os.Getenv(DefaultHealthProbeBindAddressEnvName)
 	if opts.HealthProbeBindAddress == "" {

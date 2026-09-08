@@ -1,23 +1,24 @@
 module github.com/deckhouse/storage-foundation/images/controller
 
 go 1.27.1
+
 require (
-	github.com/deckhouse/state-snapshotter/api v0.0.0-20260825032206-4f854a795522
-	github.com/deckhouse/state-snapshotter/pkg/snapshotsdk v0.0.0-20260825032206-4f854a795522
+	github.com/deckhouse/sds-common-lib v0.15.0
+	github.com/deckhouse/state-snapshotter/api v0.0.0-20260903020803-2954009c5a0b
+	github.com/deckhouse/state-snapshotter/pkg/snapshotsdk v0.0.0-20260903020803-2954009c5a0b
 	github.com/deckhouse/storage-foundation/api v0.0.0-00010101000000-000000000000
 	github.com/deckhouse/storage-foundation/common v0.0.0-00010101000000-000000000000
 	github.com/deckhouse/deckhouse v1.67.7-0.20251212134859-497a0dab9fc0
 	github.com/go-logr/logr v1.4.3
 	github.com/kubernetes-csi/external-snapshotter/client/v8 v8.2.0
-	github.com/onsi/ginkgo/v2 v2.23.3
-	github.com/onsi/gomega v1.37.0
+	github.com/onsi/ginkgo/v2 v2.23.4
+	github.com/onsi/gomega v1.38.0
 	github.com/stretchr/testify v1.11.1
 	k8s.io/api v0.34.1
 	k8s.io/apiextensions-apiserver v0.34.1
 	k8s.io/apimachinery v0.34.1
 	k8s.io/apiserver v0.34.1
 	k8s.io/client-go v0.34.1
-	k8s.io/klog/v2 v2.130.1
 	k8s.io/kube-openapi v0.0.0-20250710124328-f3f2b991d03b
 	k8s.io/utils v0.0.0-20250604170112-4c0f3b243397
 	sigs.k8s.io/controller-runtime v0.22.4
@@ -27,6 +28,7 @@ replace github.com/deckhouse/storage-foundation/api => ../../api
 
 require (
 	cel.dev/expr v0.25.1 // indirect
+	github.com/DataDog/gostackparse v0.7.0 // indirect
 	github.com/Masterminds/semver/v3 v3.3.1 // indirect
 	github.com/NYTimes/gziphandler v1.1.1 // indirect
 	github.com/antlr4-go/antlr/v4 v4.13.1 // indirect
@@ -37,6 +39,8 @@ require (
 	github.com/coreos/go-semver v0.3.1 // indirect
 	github.com/coreos/go-systemd/v22 v22.5.0 // indirect
 	github.com/davecgh/go-spew v1.1.2-0.20180830191138-d8f796af33cc // indirect
+	github.com/deckhouse/deckhouse/pkg/log v0.2.1 // indirect
+	github.com/deckhouse/deckhouse/pkg/metrics-storage v0.3.0 // indirect
 	github.com/emicklei/go-restful/v3 v3.12.2 // indirect
 	github.com/evanphx/json-patch/v5 v5.9.11 // indirect
 	github.com/felixge/httpsnoop v1.0.4 // indirect
@@ -54,10 +58,12 @@ require (
 	github.com/google/cel-go v0.29.0 // indirect
 	github.com/google/gnostic-models v0.7.0 // indirect
 	github.com/google/go-cmp v0.7.0 // indirect
-	github.com/google/pprof v0.0.0-20250208200701-d0013a598941 // indirect
+	github.com/google/pprof v0.0.0-20250403155104-27863c87afa6 // indirect
 	github.com/google/uuid v1.6.0 // indirect
 	github.com/grpc-ecosystem/go-grpc-prometheus v1.2.0 // indirect
 	github.com/grpc-ecosystem/grpc-gateway/v2 v2.26.3 // indirect
+	github.com/hashicorp/errwrap v1.1.0 // indirect
+	github.com/hashicorp/go-multierror v1.1.1 // indirect
 	github.com/inconshreveable/mousetrap v1.1.0 // indirect
 	github.com/josharian/intern v1.0.0 // indirect
 	github.com/json-iterator/go v1.1.12 // indirect
@@ -89,6 +95,7 @@ require (
 	go.opentelemetry.io/otel/sdk v1.43.0 // indirect
 	go.opentelemetry.io/otel/trace v1.43.0 // indirect
 	go.opentelemetry.io/proto/otlp v1.5.0 // indirect
+	go.uber.org/automaxprocs v1.6.0 // indirect
 	go.uber.org/multierr v1.11.0 // indirect
 	go.uber.org/zap v1.27.0 // indirect
 	go.yaml.in/yaml/v2 v2.4.2 // indirect
@@ -113,6 +120,7 @@ require (
 	gopkg.in/natefinch/lumberjack.v2 v2.2.1 // indirect
 	gopkg.in/yaml.v3 v3.0.1 // indirect
 	k8s.io/component-base v0.34.1 // indirect
+	k8s.io/klog/v2 v2.130.1 // indirect
 	k8s.io/kms v0.34.1 // indirect
 	sigs.k8s.io/apiserver-network-proxy/konnectivity-client v0.31.2 // indirect
 	sigs.k8s.io/json v0.0.0-20241014173422-cfa47c3a1cc8 // indirect

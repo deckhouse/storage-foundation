@@ -18,12 +18,11 @@ package main
 
 import (
 	"context"
-	stdlog "log"
+	"fmt"
 	"os"
 	"time"
 
 	virtv1alpha2 "github.com/deckhouse/virtualization/api/core/v1alpha2"
-	"github.com/go-logr/stdr"
 	snapv1 "github.com/kubernetes-csi/external-snapshotter/client/v8/apis/volumesnapshot/v1"
 	appsv1 "k8s.io/api/apps/v1"
 	batchv1 "k8s.io/api/batch/v1"
@@ -47,9 +46,12 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/manager"
 	"sigs.k8s.io/controller-runtime/pkg/manager/signals"
+	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
+	"github.com/deckhouse/sds-common-lib/logger"
+	"github.com/deckhouse/sds-common-lib/monitoring"
 	dev1alpha1 "github.com/deckhouse/storage-foundation/api/v1alpha1"
 	"github.com/deckhouse/storage-foundation/common/config"
 	dataexport "github.com/deckhouse/storage-foundation/images/data-manager-controller/internal/controllers/data-export"
@@ -61,14 +63,26 @@ import (
 var syncPeriod = time.Hour
 
 func main() {
-	stdr.SetVerbosity(5)
-	log.SetLogger(stdr.New(stdlog.New(os.Stdout, "___", stdlog.LstdFlags)))
-
 	cfgParams := config.NewConfig()
+
+	// Every log line here goes through controller-runtime's logr, so setting the
+	// shared logger routes all of them -- and makes LOG_LEVEL mean something: the
+	// previous logger was a stdlib one behind stdr with the prefix "___" and a
+	// hard-coded verbosity, and cfgParams.Loglevel was parsed and never read.
+	baseLog, err := logger.NewLogger(cfgParams.Loglevel)
+	if err != nil {
+		fmt.Printf("unable to create the logger: %v\n", err)
+		os.Exit(1)
+	}
+	log.SetLogger(baseLog.GetLogger())
 
 	k8sConfig, err := loadCubeConfig()
 	if err != nil {
-		panic(err)
+		// A panic here printed a stack trace for a plain configuration error and
+		// did it before the logger was of any use. Now that there is one, the
+		// message says what failed and the exit code says the process did not start.
+		baseLog.Error("unable to load the kubernetes config", logger.Err(err))
+		os.Exit(1)
 	}
 
 	schemes := NewCombinedSchemeBuilder(
@@ -125,6 +139,12 @@ func loadCubeConfig() (*rest.Config, error) {
 	return k8sConfig, nil
 }
 
+// defaultMetricsBindAddress keeps the endpoint on loopback when the chart says
+// nothing: the kube-rbac-proxy of the same pod is what publishes it. The fleet-wide
+// fallback is the wildcard ":8080", which would both answer unauthenticated on the
+// pod IP and collide with the proxy, since the two carry the same port number.
+const defaultMetricsBindAddress = "127.0.0.1:8080"
+
 func createManager(scheme *runtime.Scheme, cfgParams *config.Options, k8sConfig *rest.Config) (manager.Manager, error) {
 	req, err := labels.NewRequirement(
 		dev1alpha1.LabelApplicationKey,
@@ -137,7 +157,11 @@ func createManager(scheme *runtime.Scheme, cfgParams *config.Options, k8sConfig 
 	podSelector := labels.NewSelector().Add(*req)
 
 	mgrOpts := manager.Options{
-		Scheme:                        scheme,
+		Scheme: scheme,
+		// controller-runtime binds :8080 whenever this is empty, so this manager has
+		// always served its reconcile and workqueue metrics with nothing declaring the
+		// port. The chart points it at loopback and puts a kube-rbac-proxy in front.
+		Metrics:                       metricsserver.Options{BindAddress: monitoring.BindAddressFromEnvOr(defaultMetricsBindAddress)},
 		HealthProbeBindAddress:        cfgParams.HealthProbeBindAddress,
 		LeaderElection:                cfgParams.LeaderElection,
 		LeaderElectionID:              cfgParams.LeaderElectionID,

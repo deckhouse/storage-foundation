@@ -73,6 +73,13 @@ spec:
           - -tls-key-file=/etc/webhook/certs/tls.key
         image: {{ include "helm_lib_module_image" (list . "webhooks") }}
         imagePullPolicy: IfNotPresent
+        {{- /* This Deployment is written out by hand rather than rendered by
+               helm_lib_module_controller_manifests, so the LOG_LEVEL that define injects
+               into a webhooks container never reached this one. handlers.Log() reads the
+               same numeric 0..4 contract as the controller. */}}
+        env:
+          - name: LOG_LEVEL
+            value: {{ include "helm_lib_module_controller_log_level" (list . "storageFoundation") | quote }}
         volumeMounts:
           - name: webhook-certs
             mountPath: /etc/webhook/certs

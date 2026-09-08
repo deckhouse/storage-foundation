@@ -2,10 +2,9 @@ module github.com/deckhouse/storage-foundation/images/webhooks
 
 go 1.27.1
 require (
-	github.com/deckhouse/sds-common-lib v0.10.0
+	github.com/deckhouse/sds-common-lib v0.15.0
 	github.com/deckhouse/storage-foundation/api v0.0.0-00010101000000-000000000000
-	github.com/sirupsen/logrus v1.9.3
-	github.com/slok/kubewebhook/v2 v2.6.0
+	github.com/slok/kubewebhook/v2 v2.7.0
 	k8s.io/api v0.34.3
 	k8s.io/apiextensions-apiserver v0.34.3
 	k8s.io/apimachinery v0.34.3
@@ -15,7 +14,8 @@ require (
 replace github.com/deckhouse/storage-foundation/api => ../../api
 
 require (
-	github.com/fsnotify/fsnotify v1.9.0 // indirect
+	github.com/DataDog/gostackparse v0.7.0 // indirect
+	github.com/deckhouse/deckhouse/pkg/log v0.2.1 // indirect
 	github.com/go-openapi/swag/cmdutils v0.25.4 // indirect
 	github.com/go-openapi/swag/conv v0.25.4 // indirect
 	github.com/go-openapi/swag/fileutils v0.25.4 // indirect
@@ -32,6 +32,7 @@ require (
 	go.yaml.in/yaml/v2 v2.4.3 // indirect
 	go.yaml.in/yaml/v3 v3.0.4 // indirect
 	gopkg.in/evanphx/json-patch.v4 v4.13.0 // indirect
+	gopkg.in/yaml.v3 v3.0.1 // indirect
 	k8s.io/klog/v2 v2.130.1 // indirect
 	sigs.k8s.io/controller-runtime v0.20.4 // indirect
 	sigs.k8s.io/randfill v1.0.0 // indirect

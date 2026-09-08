@@ -19,7 +19,6 @@ package main
 import (
 	"bytes"
 	"encoding/base64"
-	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -186,7 +185,7 @@ func FuzzHandler(f *testing.F) {
 	}
 
 	fsys := createFsFuzzTest(f)
-	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	logger := slog.New(slog.DiscardHandler)
 
 	f.Fuzz(func(t *testing.T, authType string, basicCreds string, bearerToken string, wrongAuth string, rawURL string, methodIdx int, body []byte, failSeed int64, failProb byte) {
 		// Failure injection is a decorator around the filesystem now, not a field on the

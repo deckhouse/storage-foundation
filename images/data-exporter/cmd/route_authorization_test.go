@@ -21,7 +21,6 @@ import (
 	"go/ast"
 	"go/parser"
 	"go/token"
-	"io"
 	iofs "io/fs"
 	"log/slog"
 	"net/http"
@@ -125,7 +124,7 @@ func (c serverConfiguration) config() *config.Config {
 }
 
 func discardLogger() *slog.Logger {
-	return slog.New(slog.NewTextHandler(io.Discard, nil))
+	return slog.New(slog.DiscardHandler)
 }
 
 // transferCounter stands in for the idle-window timer and records what the transfer accounting reported to

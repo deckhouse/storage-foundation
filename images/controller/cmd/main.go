@@ -19,6 +19,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"os"
 	goruntime "runtime"
 
@@ -32,13 +33,14 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
 	"sigs.k8s.io/controller-runtime/pkg/manager"
+	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 
+	"github.com/deckhouse/sds-common-lib/logger"
 	v1alpha1 "github.com/deckhouse/storage-foundation/api/v1alpha1"
 	"github.com/deckhouse/storage-foundation/images/controller/internal/controllers"
 	"github.com/deckhouse/storage-foundation/images/controller/internal/domainapi"
 	"github.com/deckhouse/storage-foundation/images/controller/pkg/config"
 	"github.com/deckhouse/storage-foundation/images/controller/pkg/kubutils"
-	"github.com/deckhouse/storage-foundation/images/controller/pkg/logger"
 )
 
 var (
@@ -57,23 +59,29 @@ func main() {
 	ctx := context.Background()
 	cfgParams := config.NewConfig()
 
-	log, err := logger.NewLogger(cfgParams.Loglevel)
+	baseLog, err := logger.NewLogger(cfgParams.Loglevel)
 	if err != nil {
 		fmt.Printf("unable to create NewLogger, err: %v\n", err)
 		os.Exit(1)
 	}
+	log := baseLog.Named("main")
 
-	log.Info(fmt.Sprintf("[main] Go Version:%s ", goruntime.Version()))
-	log.Info(fmt.Sprintf("[main] OS/Arch:Go OS/Arch:%s/%s ", goruntime.GOOS, goruntime.GOARCH))
-
-	log.Info("[main] CfgParams has been successfully created")
-	log.Info(fmt.Sprintf("[main] %s = %s", config.LogLevelEnvName, cfgParams.Loglevel))
+	log.Info("starting storage-foundation-controller",
+		"goVersion", goruntime.Version(), "os", goruntime.GOOS, "arch", goruntime.GOARCH)
+	log.Info("configuration",
+		"logLevel", string(cfgParams.Loglevel),
+		"controllerNamespace", cfgParams.ControllerNamespace,
+		"healthProbeBindAddress", cfgParams.HealthProbeBindAddress,
+		"metricsBindAddress", cfgParams.MetricsBindAddress)
 
 	kConfig, err := kubutils.KubernetesDefaultConfigCreate()
 	if err != nil {
-		log.Error(err, "[main] unable to KubernetesDefaultConfigCreate")
+		// Without a config the manager cannot be built at all; continuing only moved
+		// the failure a few lines down, to a message that does not name the cause.
+		log.Error("unable to KubernetesDefaultConfigCreate", logger.Err(err))
+		os.Exit(1)
 	}
-	log.Info("[main] kubernetes config has been successfully created.")
+	log.Info("kubernetes config has been successfully created.")
 
 	// Raise the client-go rate limiter above the conservative library defaults (QPS=5 / Burst=10).
 	// Those defaults serialize reads and status patches on the shared manager client and become the
@@ -85,7 +93,7 @@ func main() {
 	)
 	kConfig.QPS = kubeClientQPS
 	kConfig.Burst = kubeClientBurst
-	log.Info("[main] kubernetes client rate limiter configured",
+	log.Info("kubernetes client rate limiter configured",
 		"qps", kConfig.QPS,
 		"burst", kConfig.Burst,
 	)
@@ -94,46 +102,46 @@ func main() {
 	for _, f := range resourcesSchemeFuncs {
 		err := f(scheme)
 		if err != nil {
-			log.Error(err, "[main] unable to add scheme to func")
+			log.Error("unable to add scheme to func", logger.Err(err))
 			os.Exit(1)
 		}
 	}
-	log.Info("[main] successfully read scheme CR")
+	log.Info("successfully read scheme CR")
 
 	// Set logger for controller-runtime BEFORE creating manager
 	// This prevents the warning: "[controller-runtime] log.SetLogger(...) was never called; logs will not be displayed"
-	ctrl.SetLogger(log.GetLogger())
+	ctrl.SetLogger(baseLog.GetLogger())
 
 	// NOTE: We don't restrict cache to specific namespaces because VolumeCaptureRequest
 	// and VolumeRestoreRequest can be created in any namespace by users.
 	// The controller needs to watch all namespaces to process these resources.
 	managerOpts := manager.Options{
-		Scheme: scheme,
-		//MetricsBindAddress: cfgParams.MetricsPort,
+		Scheme:                  scheme,
+		Metrics:                 metricsserver.Options{BindAddress: cfgParams.MetricsBindAddress},
 		HealthProbeBindAddress:  cfgParams.HealthProbeBindAddress,
 		LeaderElection:          true,
 		LeaderElectionNamespace: cfgParams.ControllerNamespace,
 		LeaderElectionID:        config.ControllerName,
-		Logger:                  log.GetLogger(),
+		Logger:                  baseLog.GetLogger(),
 	}
 
 	mgr, err := manager.New(kConfig, managerOpts)
 	if err != nil {
-		log.Error(err, "[main] unable to manager.New")
+		log.Error("unable to manager.New", logger.Err(err))
 		os.Exit(1)
 	}
-	log.Info("[main] successfully created kubernetes manager")
+	log.Info("successfully created kubernetes manager")
 
 	// Add VolumeCaptureRequest controller
 	if err = controllers.AddVolumeCaptureRequestControllerToManager(mgr, cfgParams); err != nil {
-		log.Error(err, "unable to create controller", "controller", "VolumeCaptureRequest")
+		log.Error("unable to create controller", logger.Err(err), slog.String("controller", "VolumeCaptureRequest"))
 		os.Exit(1)
 	}
 	log.Info("VolumeCaptureRequestController added to manager")
 
 	// Add VolumeRestoreRequest controller
 	if err = controllers.AddVolumeRestoreRequestControllerToManager(mgr, cfgParams); err != nil {
-		log.Error(err, "unable to create controller", "controller", "VolumeRestoreRequest")
+		log.Error("unable to create controller", logger.Err(err), slog.String("controller", "VolumeRestoreRequest"))
 		os.Exit(1)
 	}
 	log.Info("VolumeRestoreRequestController added to manager")
@@ -142,7 +150,7 @@ func main() {
 	// VolumeSnapshots). It builds its own dedicated scheme/client for the Deckhouse-extended VolumeSnapshot
 	// type, so the manager default scheme keeps mapping the GVK to the upstream external-snapshotter type.
 	if err = controllers.AddVolumeSnapshotDomainControllerToManager(mgr, cfgParams); err != nil {
-		log.Error(err, "unable to create controller", "controller", "VolumeSnapshotDomain")
+		log.Error("unable to create controller", logger.Err(err), slog.String("controller", "VolumeSnapshotDomain"))
 		os.Exit(1)
 	}
 	log.Info("VolumeSnapshotDomainController added to manager")
@@ -150,26 +158,26 @@ func main() {
 	// Add the aggregated API server that serves the VolumeSnapshot subresources. It runs on EVERY
 	// replica, not only the leader: the Service in front of it load-balances across all ready pods.
 	if err = domainapi.AddToManager(mgr, cfgParams, log.GetLogger()); err != nil {
-		log.Error(err, "unable to add the aggregated API server to manager")
+		log.Error("unable to add the aggregated API server to manager", logger.Err(err))
 		os.Exit(1)
 	}
 	log.Info("aggregated API server added to manager")
 
 	if err = mgr.AddHealthzCheck("healthz", healthz.Ping); err != nil {
-		log.Error(err, "[main] unable to mgr.AddHealthzCheck")
+		log.Error("unable to mgr.AddHealthzCheck", logger.Err(err))
 		os.Exit(1)
 	}
-	log.Info("[main] successfully AddHealthzCheck")
+	log.Info("successfully AddHealthzCheck")
 
 	if err = mgr.AddReadyzCheck("readyz", healthz.Ping); err != nil {
-		log.Error(err, "[main] unable to mgr.AddReadyzCheck")
+		log.Error("unable to mgr.AddReadyzCheck", logger.Err(err))
 		os.Exit(1)
 	}
-	log.Info("[main] successfully AddReadyzCheck")
+	log.Info("successfully AddReadyzCheck")
 
 	err = mgr.Start(ctx)
 	if err != nil {
-		log.Error(err, "[main] unable to mgr.Start")
+		log.Error("unable to mgr.Start", logger.Err(err))
 		os.Exit(1)
 	}
 }

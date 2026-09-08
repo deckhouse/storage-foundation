@@ -18,11 +18,10 @@ package main
 
 import (
 	"context"
-	stdlog "log"
+	"fmt"
 	"net/http"
 	"os"
 
-	"github.com/go-logr/stdr"
 	populatorMachinery "github.com/kubernetes-csi/lib-volume-populator/v3/populator-machinery"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -36,6 +35,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
+	"github.com/deckhouse/sds-common-lib/logger"
 	dev1alpha1 "github.com/deckhouse/storage-foundation/api/v1alpha1"
 	"github.com/deckhouse/storage-foundation/common"
 	"github.com/deckhouse/storage-foundation/common/config"
@@ -50,12 +50,20 @@ var (
 )
 
 func main() {
-	stdr.SetVerbosity(5)
-	log.SetLogger(stdr.New(stdlog.New(os.Stdout, "___", stdlog.LstdFlags)))
+	cfgParams = config.NewConfig()
+
+	// Every log line here goes through controller-runtime's logr, so setting the
+	// shared logger routes all of them -- and makes LOG_LEVEL mean something: the
+	// previous logger was a stdlib one behind stdr with the prefix "___" and a
+	// hard-coded verbosity, and cfgParams.Loglevel was parsed and never read.
+	baseLog, err := logger.NewLogger(cfgParams.Loglevel)
+	if err != nil {
+		fmt.Printf("unable to create the logger: %v\n", err)
+		os.Exit(1)
+	}
+	log.SetLogger(baseLog.GetLogger())
 
 	log.Log.Info("Run provider-populator controller")
-
-	cfgParams = config.NewConfig()
 
 	pfcfg := &populatorMachinery.ProviderFunctionConfig{
 		PopulateFn:         populateFn,
@@ -87,7 +95,6 @@ func main() {
 	}
 
 	// We have to read Kubeconfig  again, because config from populatorMachinery is unuaccessible
-	var err error
 	cfg, err = clientcmd.BuildConfigFromFlags(vpcfg.MasterURL, vpcfg.Kubeconfig)
 	if err != nil {
 		log.Log.Error(err, "Failed to create config")
