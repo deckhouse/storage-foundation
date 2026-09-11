@@ -9,7 +9,7 @@ properties:
       - DEBUG
       - TRACE
     description: Logging level for the module components.
-    default: DEBUG
+    default: INFO
   highAvailability:
     type: boolean
     x-examples: [true, false]
