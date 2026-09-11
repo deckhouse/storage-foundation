@@ -36,6 +36,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	"github.com/deckhouse/sds-common-lib/logger"
+	"github.com/deckhouse/sds-common-lib/monitoring"
 	dev1alpha1 "github.com/deckhouse/storage-foundation/api/v1alpha1"
 	"github.com/deckhouse/storage-foundation/common"
 	"github.com/deckhouse/storage-foundation/common/config"
@@ -84,8 +85,14 @@ func main() {
 	vpcfg := &populatorMachinery.VolumePopulatorConfig{
 		MasterURL:  "",
 		Kubeconfig: os.Getenv("KUBECONFIG"),
-		// HttpEndpoint:           *httpEndpoint, // ???
-		// MetricsPath:            *metricsPath,  // ???
+		// The populator machinery serves volume_populator_operation_seconds and
+		// volume_populator_operations_in_flight on this endpoint, and serves nothing at
+		// all while either field is empty -- which is how this binary has run so far.
+		//
+		// Loopback: the kube-rbac-proxy of the same pod is what publishes it, the same
+		// shape the controllers of this module use.
+		HttpEndpoint:           cfgParams.MetricsBindAddress,
+		MetricsPath:            monitoring.MetricsPath,
 		Namespace:              cfgParams.ControllerNamespace,
 		Prefix:                 "storage-foundation.deckhouse.io",
 		Gk:                     groupKind,

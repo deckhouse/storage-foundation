@@ -26,6 +26,7 @@ spec:
       maxAllowed:
         cpu: 200m
         memory: 100Mi
+    {{- include "helm_lib_vpa_kube_rbac_proxy_resources" . | nindent 4 }}
 {{- end }}
 ---
 apiVersion: policy/v1
@@ -94,7 +95,63 @@ spec:
           env:
             - name: LOG_LEVEL
               value: {{ include "helm_lib_module_controller_log_level" (list . "storageFoundation") | quote }}
+            {{- /*
+              The populator machinery serves volume_populator_operation_seconds and
+              volume_populator_operations_in_flight, and serves nothing at all while its
+              HttpEndpoint is empty -- which is how this Deployment has run so far.
+              Loopback, because the kube-rbac-proxy below is what publishes it.
+            */}}
+            - name: METRICS_BIND_ADDRESS
+              value: "127.0.0.1:{{ .Values.storageFoundation.internal.populatorMetricsPort }}"
             - name: POPULATOR_NAMESPACE
               valueFrom:
                 fieldRef:
                   fieldPath: metadata.namespace
+        - name: kube-rbac-proxy
+          {{- include "helm_lib_module_container_security_context_pss_restricted_flexible" dict | nindent 10 }}
+          image: {{ include "helm_lib_module_common_image" (list . "kubeRbacProxy") }}
+          imagePullPolicy: IfNotPresent
+          args:
+            - "--secure-listen-address=$(KUBE_RBAC_PROXY_LISTEN_ADDRESS):{{ .Values.storageFoundation.internal.populatorMetricsProxyPort }}"
+            - "--v=2"
+            - "--logtostderr=true"
+            - "--stale-cache-interval=1h30m"
+            - "--livez-path=/livez"
+          env:
+            - name: KUBE_RBAC_PROXY_LISTEN_ADDRESS
+              valueFrom:
+                fieldRef:
+                  fieldPath: status.podIP
+            - name: KUBE_RBAC_PROXY_CONFIG
+              value: |
+                excludePaths:
+                - /livez
+                upstreams:
+                - upstream: http://127.0.0.1:{{ .Values.storageFoundation.internal.populatorMetricsPort }}/metrics
+                  path: /metrics
+                  authorization:
+                    resourceAttributes:
+                      namespace: d8-{{ .Chart.Name }}
+                      apiGroup: apps
+                      apiVersion: v1
+                      resource: deployments
+                      subresource: prometheus-metrics
+                      name: populator
+          ports:
+            - name: https-metrics
+              containerPort: {{ .Values.storageFoundation.internal.populatorMetricsProxyPort }}
+              protocol: TCP
+          livenessProbe:
+            httpGet:
+              path: /livez
+              port: {{ .Values.storageFoundation.internal.populatorMetricsProxyPort }}
+              scheme: HTTPS
+          {{- /* No readinessProbe on purpose: a sidecar that only serves metrics must not
+                 be able to take the pod out of the endpoints of anything that selects it.
+                 A wedged proxy is still restarted by the liveness probe. */}}
+          resources:
+            requests:
+              {{- include "helm_lib_module_ephemeral_storage_only_logs" . | nindent 14 }}
+{{- if not (include "helm_lib_api_version_exists" (list . "autoscaling.k8s.io/v1/VerticalPodAutoscaler")) }}
+              {{- include "helm_lib_container_kube_rbac_proxy_resources" . | nindent 14 }}
+{{- end }}
