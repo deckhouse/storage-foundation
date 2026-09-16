@@ -2,7 +2,7 @@
   "@context": "https://openvex.dev/ns/v0.2.0",
   "@id": "https://openvex.dev/docs/public/vex-storage-foundation-controller",
   "author": "Deckhouse <contact@deckhouse.io>",
-  "version": 1,
+  "version": 2,
   "statements": [
     {
       "vulnerability": {
@@ -10,7 +10,7 @@
       },
       "products": [
         {
-          "@id": "pkg:golang/golang.org/x/crypto@v0.53.0"
+          "@id": "pkg:golang/golang.org/x/crypto@v0.57.0"
         }
       ],
       "status": "not_affected",
@@ -18,5 +18,5 @@
       "impact_statement": "Advisory covers the unmaintained golang.org/x/crypto/openpgp subpackage. In the controller binary golang.org/x/crypto is pulled in transitively by the module's aggregated API server (images/controller/internal/domainapi -> k8s.io/apiserver/pkg/server): cryptobyte and cryptobyte/asn1 for ASN.1/TLS parsing, and hkdf, nacl/secretbox, salsa20/salsa, internal/poly1305 and internal/alias through k8s.io/apiserver/pkg/server/options/encryptionconfig. `go list -deps ./cmd` lists exactly those seven as the packages resolved from this module's golang.org/x/crypto (the remaining x/crypto entries in its output are the Go standard library's own vendored copies under vendor/, used by crypto/tls and not resolved from this module), and no openpgp package appears in either set; `go mod why golang.org/x/crypto/openpgp` likewise reports the main module does not need it, so the vulnerable code is not compiled into the binary and is not in the execution path. golang.org/x/crypto has no release that drops openpgp, so the finding cannot be resolved by upgrading."
     }
   ],
-  "timestamp": "2026-07-20T00:00:00Z"
+  "timestamp": "2026-09-16T00:00:00Z"
 }
