@@ -17,6 +17,7 @@ limitations under the License.
 package common
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -97,4 +98,18 @@ func TestValidateHashAndTarget(t *testing.T) {
 			assert.NoError(t, err)
 		})
 	}
+}
+
+// TestNewNames_ImportScratchPVCNameDoesNotCollideWithExportPVC guards against a DataImport and a
+// DataExport with equal namespace+name (and the same targetKindShort=="pvc") generating the same
+// scratch/target PVC name in the same ControllerNamespace — see the ImportScratchPVCName doc comment.
+func TestNewNames_ImportScratchPVCNameDoesNotCollideWithExportPVC(t *testing.T) {
+	t.Parallel()
+
+	names := NewNames(dev1alpha1.KindPVC, userPVCName, reconcileDataExportNamespace, reconcileDataExportName)
+
+	assert.NotEqual(t, names.ExportPVCName, names.ImportScratchPVCName)
+	assert.True(t, strings.HasPrefix(names.ImportScratchPVCName, "import-pvc-for-"))
+	assert.Contains(t, names.ImportScratchPVCName, names.HashSuffix)
+	assert.LessOrEqual(t, len(names.ImportScratchPVCName), 253, "must be a valid DNS-1123 subdomain")
 }

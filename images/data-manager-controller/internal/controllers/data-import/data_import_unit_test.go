@@ -25,6 +25,7 @@ import (
 	snapv1 "github.com/kubernetes-csi/external-snapshotter/client/v8/apis/volumesnapshot/v1"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	storagev1 "k8s.io/api/storage/v1"
 	"k8s.io/apimachinery/pkg/api/meta"
@@ -257,17 +258,28 @@ func TestKeeperOwnerReferenceIsNonController(t *testing.T) {
 	assert.Nil(t, ref.Controller)
 }
 
+// vcrTestKeeper builds an ObjectKeeper fixture suitable for buildVolumeCaptureRequest's ownerRef:
+// buildVolumeCaptureRequest only reads the keeper's Name/UID (via keeperOwnerReference), so a bare
+// unstructured object with those two fields set is a faithful stand-in for the real one.
+func vcrTestKeeper(name, uid string) *unstructured.Unstructured {
+	keeper := &unstructured.Unstructured{}
+	keeper.SetName(name)
+	keeper.SetUID(types.UID(uid))
+	return keeper
+}
+
 func TestBuildVolumeCaptureRequestTargetsScratchPVC(t *testing.T) {
-	di := &dev1alpha1.DataImport{
-		ObjectMeta: metav1.ObjectMeta{Name: "imp-1", Namespace: "ns", UID: "di-uid"},
-	}
+	const controllerNamespace = "d8"
+	keeper := vcrTestKeeper("data-import-di-uid", "keeper-uid")
 	pvc := &corev1.PersistentVolumeClaim{
-		ObjectMeta: metav1.ObjectMeta{Name: "imp-1", Namespace: "ns", UID: "pvc-uid"},
+		ObjectMeta: metav1.ObjectMeta{Name: "imp-1", Namespace: controllerNamespace, UID: "pvc-uid"},
 	}
-	vcr := buildVolumeCaptureRequest(volumeCaptureRequestName(di.UID), di, pvc, vcrModeSnapshot)
+	vcr := buildVolumeCaptureRequest(volumeCaptureRequestName("di-uid"), controllerNamespace, keeper, pvc, vcrModeSnapshot)
 
 	mode, _, _ := unstructured.NestedString(vcr.Object, "spec", "mode")
 	assert.Equal(t, vcrModeSnapshot, mode)
+
+	assert.Equal(t, controllerNamespace, vcr.GetNamespace())
 
 	// Single-target VCR: spec.target is a single object (not a spec.targets[] list). The list shape is
 	// pruned by the CRD and leaves the VCR target-less, so guard against regressing to it.
@@ -285,13 +297,17 @@ func TestBuildVolumeCaptureRequestTargetsScratchPVC(t *testing.T) {
 	_, hasNS := target["namespace"]
 	assert.False(t, hasNS, "spec.target.namespace must be omitted")
 
+	// Owned by the import ObjectKeeper (controller=true), not natively by the DataImport: the VCR now
+	// lives in the controller namespace, so a namespaced ownerRef to the (user-namespace) DataImport
+	// would be invalid.
 	owners := vcr.GetOwnerReferences()
 	require.Len(t, owners, 1)
-	assert.Equal(t, dataImportKind, owners[0].Kind)
-	assert.Equal(t, "imp-1", owners[0].Name)
-	assert.Equal(t, di.UID, owners[0].UID)
+	assert.Equal(t, objectKeeperKind, owners[0].Kind)
+	assert.Equal(t, "data-import-di-uid", owners[0].Name)
+	assert.Equal(t, types.UID("keeper-uid"), owners[0].UID)
 	require.NotNil(t, owners[0].Controller)
 	assert.True(t, *owners[0].Controller)
+	assert.Nil(t, owners[0].BlockOwnerDeletion)
 }
 
 // TestBuildVolumeCaptureRequest_ConformsToVCRAPIType guards against cross-repo shape drift between the
@@ -307,13 +323,11 @@ func TestBuildVolumeCaptureRequestTargetsScratchPVC(t *testing.T) {
 // hard failure here, at unit level. It then mirrors the CRD's mode=Snapshot => spec.target CEL rule so a
 // writer that drops the required target also fails locally.
 func TestBuildVolumeCaptureRequest_ConformsToVCRAPIType(t *testing.T) {
-	di := &dev1alpha1.DataImport{
-		ObjectMeta: metav1.ObjectMeta{Name: "imp-1", Namespace: "ns", UID: "di-uid"},
-	}
+	keeper := vcrTestKeeper("data-import-di-uid", "keeper-uid")
 	pvc := &corev1.PersistentVolumeClaim{
-		ObjectMeta: metav1.ObjectMeta{Name: "imp-1", Namespace: "ns", UID: "pvc-uid"},
+		ObjectMeta: metav1.ObjectMeta{Name: "imp-1", Namespace: "d8", UID: "pvc-uid"},
 	}
-	vcr := buildVolumeCaptureRequest(volumeCaptureRequestName(di.UID), di, pvc, vcrModeSnapshot)
+	vcr := buildVolumeCaptureRequest(volumeCaptureRequestName("di-uid"), "d8", keeper, pvc, vcrModeSnapshot)
 
 	raw, err := json.Marshal(vcr.Object)
 	require.NoError(t, err)
@@ -364,14 +378,17 @@ func TestEnsurePVCImportTargetRequiresTemplate(t *testing.T) {
 }
 
 // newCreatePVCReconciler builds a CreatePVC reconciler whose PVC import target is restored-pvc, with a
-// fake client carrying only corev1/storagev1 (the populate path never touches snapshot machinery).
+// fake client carrying corev1/storagev1 (the populate path never touches snapshot machinery) plus
+// batchv1 and names, needed because the TargetStatusReady branch deletes the dummy Job.
 func newCreatePVCReconciler(objs ...runtime.Object) *DataImportReconciler {
 	scheme := runtime.NewScheme()
 	_ = corev1.AddToScheme(scheme)
 	_ = storagev1.AddToScheme(scheme)
+	_ = batchv1.AddToScheme(scheme)
 	fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithRuntimeObjects(objs...).Build()
 	return &DataImportReconciler{
 		Client: fakeClient,
+		names:  common.NewNames(dev1alpha1.KindPVC, "imp-b", "ns", "imp-b"),
 		dataImport: &dev1alpha1.DataImport{
 			ObjectMeta: metav1.ObjectMeta{Name: "imp-b", Namespace: "ns"},
 			Spec: dev1alpha1.DataImportSpec{
@@ -438,7 +455,8 @@ func TestEnsureImportPVCWiresDataSourceRefToDataImport(t *testing.T) {
 			VolumeMode:       &fs,
 		},
 	}
-	require.NoError(t, r.ensureImportPVC(context.Background(), tmpl))
+	_, err := r.ensureImportPVC(context.Background(), tmpl)
+	require.NoError(t, err)
 
 	got := &corev1.PersistentVolumeClaim{}
 	require.NoError(t, r.Client.Get(context.Background(), types.NamespacedName{Namespace: "ns", Name: "restored-pvc"}, got))

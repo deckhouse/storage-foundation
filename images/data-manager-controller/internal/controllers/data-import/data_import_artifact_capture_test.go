@@ -40,14 +40,19 @@ import (
 
 	dev1alpha1 "github.com/deckhouse/storage-foundation/api/v1alpha1"
 	"github.com/deckhouse/storage-foundation/common"
+	"github.com/deckhouse/storage-foundation/common/config"
 )
 
 const (
-	captureTestNamespace  = "ns"
-	captureTestImportName = "imp-1"
-	captureTestImportUID  = types.UID("di-uid")
-	captureTestVSCName    = "vsc-1"
-	captureTestDriver     = "csi.example.com"
+	captureTestNamespace = "ns"
+	// captureTestControllerNamespace is where the PopulateData scratch PVC and its VolumeCaptureRequest live:
+	// the controller's own namespace, not the DataImport's (captureTestNamespace). The two differ on purpose,
+	// so a lookup that used the wrong one fails the test instead of passing by coincidence.
+	captureTestControllerNamespace = "d8"
+	captureTestImportName          = "imp-1"
+	captureTestImportUID           = types.UID("di-uid")
+	captureTestVSCName             = "vsc-1"
+	captureTestDriver              = "csi.example.com"
 
 	// captureTestScratchPVName is the PersistentVolume the scratch PVC is bound to.
 	captureTestScratchPVName = "pv-scratch-1"
@@ -116,8 +121,9 @@ func readyObjectKeeper(name string, di *dev1alpha1.DataImport) *unstructured.Uns
 // filesystem-type observation depends on. No field defaults: each test states the volume it means, so a
 // case like "Block" or "PV already gone" cannot be read as an omission.
 type artifactCaptureOptions struct {
-	// volumeMode of the scratch PVC. Always set: handleTargetStatus rejects a claim without one long before
-	// ensureDataArtifact is reached, so a nil mode here would describe a state the code never sees.
+	// volumeMode of the scratch PVC. Always set: uploadSnapshotImportTarget rejects a claim without one
+	// long before ensureDataArtifact is reached, so a nil mode here would describe a state the code never
+	// sees.
 	volumeMode corev1.PersistentVolumeMode
 	// pvFSType is what the scratch PersistentVolume records in spec.csi.fsType.
 	pvFSType string
@@ -237,17 +243,19 @@ func newArtifactCaptureReconcilerWith(t *testing.T, opts artifactCaptureOptions)
 	vcrName := volumeCaptureRequestName(di.UID)
 	dyn := dynamicfake.NewSimpleDynamicClientWithCustomListKinds(runtime.NewScheme(), gvrToListKind,
 		readyObjectKeeper(keeperName, di),
-		readyVolumeCaptureRequest(vcrName, di.Namespace, captureTestVSCName),
+		readyVolumeCaptureRequest(vcrName, captureTestControllerNamespace, captureTestVSCName),
 	)
 
 	r := &DataImportReconciler{
 		Client:     c,
 		Dynamic:    dyn,
+		Config:     &config.Options{ControllerNamespace: captureTestControllerNamespace},
 		dataImport: di,
+		names:      common.NewNames(dev1alpha1.KindPVC, di.Name, di.Namespace, di.Name),
 	}
 
 	// Fetch the scratch PVC back through the client so it carries a real resourceVersion, matching how
-	// the real reconcile path (handleTargetStatus -> GetScratchPVC) obtains it before calling
+	// the real reconcile path (captureSnapshotImportTarget -> GetPVC) obtains it before calling
 	// ensureDataArtifact.
 	got := &corev1.PersistentVolumeClaim{}
 	require.NoError(t, c.Get(context.Background(), types.NamespacedName{Namespace: captureTestNamespace, Name: captureTestImportName}, got))
