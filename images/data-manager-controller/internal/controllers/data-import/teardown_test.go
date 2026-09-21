@@ -24,7 +24,6 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	appsv1 "k8s.io/api/apps/v1"
-	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	networkingv1 "k8s.io/api/networking/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -47,14 +46,12 @@ import (
 const teardownControllerNS = "d8"
 
 // teardownScheme carries every typed API group teardownImportInfra/cleanupDataImport touch: corev1
-// (PVC/Secret/Service/Pod), appsv1 (Deployment), batchv1 (dummy Job), networkingv1 (Ingress) and
-// dev1alpha1 (DataImport).
+// (PVC/Secret/Service/Pod), appsv1 (Deployment), networkingv1 (Ingress) and dev1alpha1 (DataImport).
 func teardownScheme(t *testing.T) *runtime.Scheme {
 	t.Helper()
 	scheme := runtime.NewScheme()
 	require.NoError(t, corev1.AddToScheme(scheme))
 	require.NoError(t, appsv1.AddToScheme(scheme))
-	require.NoError(t, batchv1.AddToScheme(scheme))
 	require.NoError(t, networkingv1.AddToScheme(scheme))
 	require.NoError(t, dev1alpha1.AddToScheme(scheme))
 	return scheme
@@ -103,103 +100,45 @@ func newTeardownReconciler(
 	return r, c, dyn
 }
 
-// TestTeardownImportInfra_DeletesImporterDeploymentAndCASecret guards the shape of the rewritten
-// teardownImportInfra: it must actually delete the CA secret (a pre-existing leak DataImport never closed
-// before) in the controller namespace, for both import modes, and report allGone once nothing is left. The
-// importer Deployment itself is only deleted this way in PopulateData mode; in CreatePVC mode it is owned
-// elsewhere and teardownImportInfra only observes whether it is gone (see the dedicated
-// TestTeardownImportInfra_CreatePVCBlocksWhileImporterDeploymentExists for that half).
+// TestTeardownImportInfra_DeletesImporterDeploymentAndCASecret guards the shape of teardownImportInfra:
+// for both import modes, unconditionally, it deletes the importer Deployment and the CA secret (a
+// pre-existing leak DataImport never closed before) in the controller namespace, and reports allGone once
+// nothing is left. There is no per-mode gate: both modes go through the exact same code path.
 func TestTeardownImportInfra_DeletesImporterDeploymentAndCASecret(t *testing.T) {
 	t.Parallel()
 
-	t.Run("PopulateData", func(t *testing.T) {
-		t.Parallel()
+	for _, mode := range []dev1alpha1.DataImportMode{dev1alpha1.DataImportModePopulateData, dev1alpha1.DataImportModeCreatePVC} {
+		t.Run(string(mode), func(t *testing.T) {
+			t.Parallel()
 
-		di := teardownDataImport("teardown-imp-PopulateData", dev1alpha1.DataImportModePopulateData)
-		names := common.NewNames(dev1alpha1.KindPVC, di.Name, di.Namespace, di.Name)
+			di := teardownDataImport("teardown-imp-"+string(mode), mode)
+			names := common.NewNames(dev1alpha1.KindPVC, di.Name, di.Namespace, di.Name)
 
-		deploy := &appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{Name: names.DeployName, Namespace: teardownControllerNS}}
-		secret := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: names.CASecretName, Namespace: teardownControllerNS}}
+			deploy := &appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{Name: names.DeployName, Namespace: teardownControllerNS}}
+			secret := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: names.CASecretName, Namespace: teardownControllerNS}}
 
-		r, c, _ := newTeardownReconciler(t, di, []client.Object{deploy, secret}, nil)
+			r, c, _ := newTeardownReconciler(t, di, []client.Object{deploy, secret}, nil)
 
-		// The CA secret's prior existence gates allGone this pass (mirroring the pre-existing dummy-Job
-		// contract: common.DeleteJob reports the Job "existed" on the very pass it deletes it) -- so the
-		// first call deletes both objects but must still report allGone=false.
-		allGone, err := r.teardownImportInfra(context.Background())
-		require.NoError(t, err)
-		assert.False(t, allGone, "the CA secret existed this pass, so allGone must stay false even though it (and the Deployment) were just deleted")
+			// The CA secret's prior existence gates allGone this pass (mirroring stopImporter's own
+			// "existed" contract for the Deployment) -- so the first call deletes both objects but must
+			// still report allGone=false.
+			allGone, err := r.teardownImportInfra(context.Background())
+			require.NoError(t, err)
+			assert.False(t, allGone, "the CA secret existed this pass, so allGone must stay false even though it (and the Deployment) were just deleted")
 
-		getErr := c.Get(context.Background(), types.NamespacedName{Namespace: teardownControllerNS, Name: names.DeployName}, &appsv1.Deployment{})
-		require.Error(t, getErr)
-		assert.True(t, apierrors.IsNotFound(getErr), "the importer Deployment must be deleted")
+			getErr := c.Get(context.Background(), types.NamespacedName{Namespace: teardownControllerNS, Name: names.DeployName}, &appsv1.Deployment{})
+			require.Error(t, getErr)
+			assert.True(t, apierrors.IsNotFound(getErr), "the importer Deployment must be deleted")
 
-		getErr = c.Get(context.Background(), types.NamespacedName{Namespace: teardownControllerNS, Name: names.CASecretName}, &corev1.Secret{})
-		require.Error(t, getErr)
-		assert.True(t, apierrors.IsNotFound(getErr), "the CA secret must be deleted")
+			getErr = c.Get(context.Background(), types.NamespacedName{Namespace: teardownControllerNS, Name: names.CASecretName}, &corev1.Secret{})
+			require.Error(t, getErr)
+			assert.True(t, apierrors.IsNotFound(getErr), "the CA secret must be deleted")
 
-		allGone, err = r.teardownImportInfra(context.Background())
-		require.NoError(t, err)
-		assert.True(t, allGone, "the next pass, with everything already gone, reports allGone=true")
-	})
-
-	// In CreatePVC mode the importer Deployment is owned by something outside this reconciler;
-	// teardownImportInfra only observes it and must not delete it directly, so allGone can only flip true
-	// once it is gone by some other means -- modelled here by deleting the fixture directly.
-	t.Run("CreatePVC", func(t *testing.T) {
-		t.Parallel()
-
-		di := teardownDataImport("teardown-imp-CreatePVC", dev1alpha1.DataImportModeCreatePVC)
-		names := common.NewNames(dev1alpha1.KindPVC, di.Name, di.Namespace, di.Name)
-
-		deploy := &appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{Name: names.DeployName, Namespace: teardownControllerNS}}
-		secret := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: names.CASecretName, Namespace: teardownControllerNS}}
-
-		r, c, _ := newTeardownReconciler(t, di, []client.Object{deploy, secret}, nil)
-
-		allGone, err := r.teardownImportInfra(context.Background())
-		require.NoError(t, err)
-		assert.False(t, allGone, "the importer Deployment still exists, so allGone must stay false")
-
-		getErr := c.Get(context.Background(), types.NamespacedName{Namespace: teardownControllerNS, Name: names.DeployName}, &appsv1.Deployment{})
-		require.NoError(t, getErr, "teardownImportInfra must not delete the CreatePVC importer Deployment itself")
-
-		getErr = c.Get(context.Background(), types.NamespacedName{Namespace: teardownControllerNS, Name: names.CASecretName}, &corev1.Secret{})
-		require.Error(t, getErr)
-		assert.True(t, apierrors.IsNotFound(getErr), "the CA secret must still be deleted regardless of mode")
-
-		// Stand in for whatever eventually removes the CreatePVC importer Deployment.
-		require.NoError(t, c.Delete(context.Background(), deploy))
-
-		allGone, err = r.teardownImportInfra(context.Background())
-		require.NoError(t, err)
-		assert.True(t, allGone, "once the importer Deployment is observed gone, the next pass reports allGone=true")
-	})
-
-	// allGone only flips true on the pass where nothing was observed to still exist -- mirroring the
-	// pre-existing dummy-Job contract (common.DeleteJob reports the Job "existed" on the very pass it
-	// deletes it), which teardownImportInfra's rewrite deliberately preserves.
-	t.Run("success: allGone flips true only on the pass after a live resource's prior existence is confirmed gone", func(t *testing.T) {
-		t.Parallel()
-
-		di := teardownDataImport("teardown-flip", dev1alpha1.DataImportModePopulateData)
-		names := common.NewNames(dev1alpha1.KindPVC, di.Name, di.Namespace, di.Name)
-		job := &batchv1.Job{ObjectMeta: metav1.ObjectMeta{Name: names.DummyJobName, Namespace: di.Namespace}}
-
-		r, c, _ := newTeardownReconciler(t, di, []client.Object{job}, nil)
-
-		allGone, err := r.teardownImportInfra(context.Background())
-		require.NoError(t, err)
-		assert.False(t, allGone, "the dummy Job existed this pass, so allGone must stay false even though it was just deleted")
-
-		getErr := c.Get(context.Background(), types.NamespacedName{Namespace: di.Namespace, Name: names.DummyJobName}, &batchv1.Job{})
-		require.Error(t, getErr)
-		assert.True(t, apierrors.IsNotFound(getErr), "the dummy Job must actually be deleted on the very pass that reports allGone=false")
-
-		allGone, err = r.teardownImportInfra(context.Background())
-		require.NoError(t, err)
-		assert.True(t, allGone, "the next pass, with nothing left existing, reports allGone=true")
-	})
+			allGone, err = r.teardownImportInfra(context.Background())
+			require.NoError(t, err)
+			assert.True(t, allGone, "the next pass, with everything already gone, reports allGone=true")
+		})
+	}
 }
 
 // TestTeardownImportInfra_DoesNotDeletePVCWhileImporterPodRemains guards the mount-consistency invariant
@@ -262,26 +201,112 @@ func TestTeardownImportInfra_CreatePVCNeverDeletesTargetPVC(t *testing.T) {
 		"the finalizer is only removed later, by cleanupDataImport")
 }
 
-// TestTeardownImportInfra_CreatePVCBlocksWhileImporterDeploymentExists guards against writing the
-// CreatePVC importer-Deployment observation as a call skipped entirely for that mode: skipping the
-// observation would drop the Deployment out of teardownImportInfra's allGone computation, so allGone
-// would go true while the Deployment is still running. teardownImportInfra must observe it and hold
-// allGone=false, without deleting it, for as long as it exists.
-func TestTeardownImportInfra_CreatePVCBlocksWhileImporterDeploymentExists(t *testing.T) {
+// TestTeardownCreatePVCDeletesScratchPVCButNeverTheTargetPVC guards the CreatePVC shape of
+// teardownImportInfra's unconditional scratch-PVC delete: the internal scratch PVC is the
+// controller's own working copy, so it is always safe to delete regardless of its bind state --
+// the internal scratch PVC in the controller namespace is deleted like PopulateData's, while the
+// CreatePVC target PVC in the user's namespace -- the user's product -- is never even inspected
+// for deletion, only ever released of its own finalizer elsewhere (cleanupDataImport,
+// reconcileTargetPVCRelease).
+func TestTeardownCreatePVCDeletesScratchPVCButNeverTheTargetPVC(t *testing.T) {
 	t.Parallel()
 
-	di := teardownDataImport("teardown-createpvc-blocks", dev1alpha1.DataImportModeCreatePVC)
+	tests := []struct {
+		name        string
+		withLivePod bool
+	}{
+		{name: "success: scratch PVC deleted, target PVC untouched, importer fully stopped"},
+		{name: "success: scratch PVC survives while a live importer pod blocks teardown, target PVC still untouched", withLivePod: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			di := teardownDataImport("teardown-createpvc-scratch", dev1alpha1.DataImportModeCreatePVC)
+			di.Spec.PvcTemplate = &dev1alpha1.PersistentVolumeClaimTemplateSpec{
+				PersistentVolumeClaimTemplateMetadata: dev1alpha1.PersistentVolumeClaimTemplateMetadata{Name: "target-pvc"},
+			}
+			targetPVC := boundImportPVC("target-pvc")
+			targetPVC.Namespace = di.Namespace
+			targetPVC.Finalizers = []string{dev1alpha1.StorageManagerFinalizerName}
+
+			names := common.NewNames(dev1alpha1.KindPVC, di.Name, di.Namespace, di.Name)
+			scratchPVC := boundInternalScratchPVC(names.ImportScratchPVCName, teardownControllerNS)
+
+			extra := []client.Object{targetPVC, scratchPVC}
+			if tt.withLivePod {
+				extra = append(extra, importerPodFixture("importer-pod", teardownControllerNS, names.DeployName))
+			}
+			r, c, _ := newTeardownReconciler(t, di, extra, nil)
+
+			allGone, err := r.teardownImportInfra(context.Background())
+			require.NoError(t, err)
+
+			targetKey := types.NamespacedName{Namespace: di.Namespace, Name: "target-pvc"}
+			gotTarget := &corev1.PersistentVolumeClaim{}
+			require.NoError(t, c.Get(context.Background(), targetKey, gotTarget),
+				"the target PVC must survive teardown unconditionally")
+			assert.Contains(t, gotTarget.Finalizers, dev1alpha1.StorageManagerFinalizerName,
+				"teardownImportInfra never touches the target PVC's finalizer")
+
+			scratchKey := types.NamespacedName{Namespace: teardownControllerNS, Name: names.ImportScratchPVCName}
+			if tt.withLivePod {
+				assert.False(t, allGone, "a live importer pod means the mount may still be held")
+				require.NoError(t, c.Get(context.Background(), scratchKey, &corev1.PersistentVolumeClaim{}),
+					"the scratch PVC must survive while a live importer pod blocks teardown")
+				return
+			}
+
+			assert.True(t, allGone, "with no importer pod and no CA secret/publish resources, teardown finishes in one pass")
+			getErr := c.Get(context.Background(), scratchKey, &corev1.PersistentVolumeClaim{})
+			require.Error(t, getErr)
+			assert.True(t, apierrors.IsNotFound(getErr), "the scratch PVC must be deleted once the importer is fully stopped")
+		})
+	}
+}
+
+// TestTeardownCreatePVCStopsTheImporter guards that, with the populator component gone, teardownImportInfra
+// deletes the importer Deployment for CreatePVC exactly as it does for PopulateData -- not merely observes
+// it -- so cleanupDataImport can reach allGone and release the DataImport finalizer. A CreatePVC teardown
+// that only observed the Deployment (the shape this mode needed while the populator owned that delete)
+// would leave allGone permanently false here, and the DataImport would never finish deleting.
+func TestTeardownCreatePVCStopsTheImporter(t *testing.T) {
+	t.Parallel()
+
+	di := teardownDataImport("teardown-createpvc-importer", dev1alpha1.DataImportModeCreatePVC)
+	di.Finalizers = []string{dev1alpha1.StorageManagerFinalizerName}
+	now := fixedNow
+	di.DeletionTimestamp = &now
+	di.Spec.PvcTemplate = &dev1alpha1.PersistentVolumeClaimTemplateSpec{
+		PersistentVolumeClaimTemplateMetadata: dev1alpha1.PersistentVolumeClaimTemplateMetadata{Name: "target-pvc"},
+	}
+	targetPVC := boundImportPVC(di.Name)
+	targetPVC.Name = "target-pvc"
+	targetPVC.Namespace = di.Namespace
+	targetPVC.Finalizers = []string{dev1alpha1.StorageManagerFinalizerName}
+
 	names := common.NewNames(dev1alpha1.KindPVC, di.Name, di.Namespace, di.Name)
 	deploy := &appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{Name: names.DeployName, Namespace: teardownControllerNS}}
 
-	r, c, _ := newTeardownReconciler(t, di, []client.Object{deploy}, nil)
+	r, c, _ := newTeardownReconciler(t, di, []client.Object{targetPVC, deploy}, nil)
 
-	allGone, err := r.teardownImportInfra(context.Background())
+	done, err := r.cleanupDataImport(context.Background())
 	require.NoError(t, err)
-	assert.False(t, allGone, "a live importer Deployment must keep allGone false in CreatePVC mode")
+	assert.True(t, done, "with no live importer pod, CreatePVC teardown must reach allGone in the same pass the Deployment is deleted")
 
 	getErr := c.Get(context.Background(), types.NamespacedName{Namespace: teardownControllerNS, Name: names.DeployName}, &appsv1.Deployment{})
-	require.NoError(t, getErr, "teardownImportInfra must never delete the CreatePVC importer Deployment itself")
+	require.Error(t, getErr)
+	assert.True(t, apierrors.IsNotFound(getErr), "the importer Deployment must be deleted, not merely observed, for CreatePVC")
+
+	assert.NotContains(t, r.dataImport.Finalizers, dev1alpha1.StorageManagerFinalizerName,
+		"cleanupDataImport releases the DataImport's own finalizer once teardown reports allGone")
+
+	gotTarget := &corev1.PersistentVolumeClaim{}
+	require.NoError(t, c.Get(context.Background(), types.NamespacedName{Namespace: di.Namespace, Name: "target-pvc"}, gotTarget),
+		"the target PVC is the user's product and is never deleted by cleanup")
+	assert.NotContains(t, gotTarget.Finalizers, dev1alpha1.StorageManagerFinalizerName,
+		"cleanupDataImport releases our finalizer from the target PVC once allGone")
 }
 
 // TestCleanupDataImport_DeletesVolumeCaptureRequest guards the explicit VCR delete added to

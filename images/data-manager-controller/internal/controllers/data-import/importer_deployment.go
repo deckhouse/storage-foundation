@@ -28,8 +28,7 @@ import (
 	"github.com/deckhouse/storage-foundation/common"
 )
 
-// importerVolumeName is the name of the Pod volume the internal scratch PVC is mounted under, referenced
-// both by the volume definition and by the server container's VolumeMounts/VolumeDevices.
+// importerVolumeName is the name of the Pod volume the internal scratch PVC is mounted under.
 const importerVolumeName = "pvc"
 
 // ensureImporterDeployment brings up the upload server: a Deployment in the controller namespace mounting
@@ -90,9 +89,8 @@ func (r *DataImportReconciler) getDeploymentCfg(podSpec corev1.PodSpec) common.D
 	}
 }
 
-// stopImporter deletes the upload server and reports whether it is fully stopped (Deployment gone AND
-// no pod left). Capturing the volume while the importer still holds the mount would be less consistent
-// than the pre-existing populator flow, which waited for ClaimLost before tearing the Deployment down.
+// stopImporter deletes the upload server and reports stopped only once the Deployment is gone and no
+// importer pod is left — captureSnapshotImportTarget depends on that before it captures the volume.
 func (r *DataImportReconciler) stopImporter(ctx context.Context) (stopped bool, err error) {
 	if _, err := common.DeleteDeployment(ctx, r.Client, r.Config.ControllerNamespace, r.names.DeployName); err != nil {
 		return false, err
@@ -102,9 +100,8 @@ func (r *DataImportReconciler) stopImporter(ctx context.Context) (stopped bool, 
 }
 
 // importerPodsGone reports whether every importer pod for this DataImport has fully terminated.
-// Pod-object absence is the strongest available "the volume was unmounted, and therefore flushed"
-// signal: images/data-exporter performs no explicit fsync anywhere, so consistency of the captured
-// volume rests entirely on the kubelet's unmount, which completes before the Pod object is removed.
+// images/data-exporter performs no explicit fsync anywhere, so consistency of the captured volume rests
+// entirely on the kubelet's unmount, which completes before the Pod object is removed.
 func (r *DataImportReconciler) importerPodsGone(ctx context.Context) (bool, error) {
 	pods := new(corev1.PodList)
 	if err := r.Client.List(ctx, pods,

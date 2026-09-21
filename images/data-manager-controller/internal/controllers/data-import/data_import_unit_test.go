@@ -25,10 +25,8 @@ import (
 	snapv1 "github.com/kubernetes-csi/external-snapshotter/client/v8/apis/volumesnapshot/v1"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	storagev1 "k8s.io/api/storage/v1"
-	"k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
@@ -38,7 +36,12 @@ import (
 
 	dev1alpha1 "github.com/deckhouse/storage-foundation/api/v1alpha1"
 	"github.com/deckhouse/storage-foundation/common"
+	"github.com/deckhouse/storage-foundation/common/config"
 )
+
+// createPVCReconcilerControllerNamespace is the ControllerNamespace newCreatePVCReconciler wires: where
+// its internal scratch PVC (and any importer Deployment) would live.
+const createPVCReconcilerControllerNamespace = "d8"
 
 func TestScratchVolumeParamsFromSpec(t *testing.T) {
 	svt := func(sc, size, mode string) dev1alpha1.DataImportSpec {
@@ -378,16 +381,15 @@ func TestEnsurePVCImportTargetRequiresTemplate(t *testing.T) {
 }
 
 // newCreatePVCReconciler builds a CreatePVC reconciler whose PVC import target is restored-pvc, with a
-// fake client carrying corev1/storagev1 (the populate path never touches snapshot machinery) plus
-// batchv1 and names, needed because the TargetStatusReady branch deletes the dummy Job.
+// fake client carrying corev1/storagev1 (the storage class the node-hint gate looks up) and names.
 func newCreatePVCReconciler(objs ...runtime.Object) *DataImportReconciler {
 	scheme := runtime.NewScheme()
 	_ = corev1.AddToScheme(scheme)
 	_ = storagev1.AddToScheme(scheme)
-	_ = batchv1.AddToScheme(scheme)
 	fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithRuntimeObjects(objs...).Build()
 	return &DataImportReconciler{
 		Client: fakeClient,
+		Config: &config.Options{ControllerNamespace: createPVCReconcilerControllerNamespace},
 		names:  common.NewNames(dev1alpha1.KindPVC, "imp-b", "ns", "imp-b"),
 		dataImport: &dev1alpha1.DataImport{
 			ObjectMeta: metav1.ObjectMeta{Name: "imp-b", Namespace: "ns"},
@@ -401,41 +403,22 @@ func newCreatePVCReconciler(objs ...runtime.Object) *DataImportReconciler {
 	}
 }
 
+// boundPVC builds the target PVC newCreatePVCReconciler's DataImport ("imp-b" in namespace "ns") owns,
+// with the storage-manager annotations ensureImportPVC would have stamped on creation, so the ownership
+// guard on the CreatePVC target-PVC path treats it as ours.
 func boundPVC(volumeMode corev1.PersistentVolumeMode) *corev1.PersistentVolumeClaim {
 	return &corev1.PersistentVolumeClaim{
-		ObjectMeta: metav1.ObjectMeta{Name: "restored-pvc", Namespace: "ns"},
-		Spec:       corev1.PersistentVolumeClaimSpec{VolumeMode: &volumeMode},
-		Status:     corev1.PersistentVolumeClaimStatus{Phase: corev1.ClaimBound},
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "restored-pvc",
+			Namespace: "ns",
+			Annotations: map[string]string{
+				dev1alpha1.AnnotationStorageManagerNamespaceKey: "ns",
+				dev1alpha1.AnnotationStorageManagerNameKey:      "imp-b",
+			},
+		},
+		Spec:   corev1.PersistentVolumeClaimSpec{VolumeMode: &volumeMode},
+		Status: corev1.PersistentVolumeClaimStatus{Phase: corev1.ClaimBound},
 	}
-}
-
-func TestHandlePVCImportStatusCompletesWithoutArtifact(t *testing.T) {
-	r := newCreatePVCReconciler()
-	meta.SetStatusCondition(&r.dataImport.Status.Conditions, metav1.Condition{
-		Type:   string(common.ConditionUploadFinished),
-		Status: metav1.ConditionTrue,
-		Reason: "UploadFinished",
-	})
-
-	res, err := r.handlePVCImportStatus(context.Background(), boundPVC(corev1.PersistentVolumeFilesystem))
-	require.NoError(t, err)
-	assert.Zero(t, res.RequeueAfter)
-	assert.True(t, meta.IsStatusConditionTrue(r.dataImport.Status.Conditions, string(common.ConditionCompleted)))
-	// The defining difference of CreatePVC: no durable artifact is produced.
-	assert.Nil(t, r.dataImport.Status.Data)
-	assert.Equal(t, "Filesystem", r.dataImport.Status.VolumeMode)
-}
-
-func TestHandlePVCImportStatusAwaitsUpload(t *testing.T) {
-	r := newCreatePVCReconciler()
-
-	res, err := r.handlePVCImportStatus(context.Background(), boundPVC(corev1.PersistentVolumeFilesystem))
-	require.NoError(t, err)
-	assert.Equal(t, dataImportRequeueInterval, res.RequeueAfter)
-	assert.False(t, meta.IsStatusConditionTrue(r.dataImport.Status.Conditions, string(common.ConditionCompleted)))
-	ready := meta.FindStatusCondition(r.dataImport.Status.Conditions, string(common.ConditionReady))
-	require.NotNil(t, ready)
-	assert.Equal(t, metav1.ConditionFalse, ready.Status)
 }
 
 func TestEnsureImportPVCWiresDataSourceRefToDataImport(t *testing.T) {
@@ -461,8 +444,9 @@ func TestEnsureImportPVCWiresDataSourceRefToDataImport(t *testing.T) {
 	got := &corev1.PersistentVolumeClaim{}
 	require.NoError(t, r.Client.Get(context.Background(), types.NamespacedName{Namespace: "ns", Name: "restored-pvc"}, got))
 	require.NotNil(t, got.Spec.DataSourceRef)
-	// The populator keys the upload server off DataSourceRef -> DataImport, so the user-named PVC is
-	// still wired back to the import.
+	// DataSourceRef names a kind the provisioner can't recognize, which is what parks the claim
+	// Pending instead of dynamically provisioning it (see ensureImportPVC). This guards that the
+	// user-named PVC still gets it set.
 	assert.Equal(t, dataImportKind, got.Spec.DataSourceRef.Kind)
 	assert.Equal(t, "imp-b", got.Spec.DataSourceRef.Name)
 	assert.Contains(t, got.Finalizers, dev1alpha1.StorageManagerFinalizerName)

@@ -27,6 +27,7 @@ import (
 	appsv1 "k8s.io/api/apps/v1"
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
+	storagev1 "k8s.io/api/storage/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -58,6 +59,20 @@ func populateFlowScheme(t *testing.T) *runtime.Scheme {
 	s := reconcileScheme(t)
 	require.NoError(t, snapv1.SchemeBuilder.AddToScheme(s))
 	return s
+}
+
+// wffcStorageClass builds a WaitForFirstConsumer StorageClass whose volumesnapshotclass annotation
+// satisfies resolveSnapshotCaptureMode, PopulateData's snapshot-capability gate.
+func wffcStorageClass(name string) *storagev1.StorageClass {
+	mode := storagev1.VolumeBindingWaitForFirstConsumer
+	return &storagev1.StorageClass{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:        name,
+			Annotations: map[string]string{storageClassVSCAnnotation: "wffc-vsc"},
+		},
+		Provisioner:       "csi.example.com",
+		VolumeBindingMode: &mode,
+	}
 }
 
 // wffcVolumeSnapshotClass is the VolumeSnapshotClass referenced by wffcStorageClass's annotation; its
@@ -520,8 +535,7 @@ func TestReconcile_PopulateData_MissingInternalPVCAfterUploadIsTerminalOnlyWitho
 // TestReconcile_PopulateData_TransientErrorsPreserveReadyReason guards the PopulateData upload/capture
 // phase's transient (retryable) errors -- stopImporter's Deployment delete, the importer pod List, and
 // ensureScratchPVC's Create -- so each comes out of Reconcile unwrapped (neither ErrTargetFailed nor
-// ErrTerminal) and mutateReadyByErr leaves the previously persisted Ready.Reason untouched, the same
-// principle that keeps reconcileDummyJobDeletion's retry gate open.
+// ErrTerminal) and mutateReadyByErr leaves the previously persisted Ready.Reason untouched.
 func TestReconcile_PopulateData_TransientErrorsPreserveReadyReason(t *testing.T) {
 	t.Parallel()
 

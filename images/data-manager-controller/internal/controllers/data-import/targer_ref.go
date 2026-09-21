@@ -20,9 +20,7 @@ package dataimport
 type TargetStatus int
 
 const (
-	TargetStatusUnknown      TargetStatus = iota // Unable to determine target status
-	TargetStatusPending                          // Target is being initialized
-	TargetStatusNeedConsumer                     // Consumer is needed to initialize target
-	TargetStatusReady                            // Target is ready for use
-	TargetStatusFailed                           // Target  failed
+	TargetStatusPending TargetStatus = iota // Target is being initialized
+	TargetStatusReady                       // Target is ready for use
+	TargetStatusFailed                      // Target  failed
 )

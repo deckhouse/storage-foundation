@@ -25,7 +25,6 @@ import (
 	virtv1alpha2 "github.com/deckhouse/virtualization/api/core/v1alpha2"
 	snapv1 "github.com/kubernetes-csi/external-snapshotter/client/v8/apis/volumesnapshot/v1"
 	appsv1 "k8s.io/api/apps/v1"
-	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	networkingv1 "k8s.io/api/networking/v1"
 	storagev1 "k8s.io/api/storage/v1"
@@ -90,7 +89,6 @@ func main() {
 		&corev1.SchemeBuilder,
 		&storagev1.SchemeBuilder,
 		&appsv1.SchemeBuilder,
-		&batchv1.SchemeBuilder,
 		&networkingv1.SchemeBuilder,
 		&snapv1.SchemeBuilder,
 		&virtv1alpha2.SchemeBuilder,
@@ -301,11 +299,6 @@ func createController(manager manager.Manager, cfgParams *config.Options) error 
 		For(&dev1alpha1.DataImport{}).
 		Watches(
 			&appsv1.Deployment{},
-			handler.EnqueueRequestsFromMapFunc(importCreateRequest),
-			builder.WithPredicates(importPredicate),
-		).
-		Watches(
-			&batchv1.Job{},
 			handler.EnqueueRequestsFromMapFunc(importCreateRequest),
 			builder.WithPredicates(importPredicate),
 		).

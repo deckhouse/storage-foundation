@@ -36,7 +36,6 @@ type Names struct {
 	HeadlessServiceName  string
 	IngressResourceName  string
 	ExportPVCName        string // Export-specific
-	DummyJobName         string // Import-specific
 	ImportScratchPVCName string // Import-specific
 }
 
@@ -66,7 +65,6 @@ func NewNamesFromShort(targetKindShort, targetName, namespace, name string) Name
 		HeadlessServiceName:  fmt.Sprintf("service-for-%s-%s", targetKindShort, hashSuffix),
 		IngressResourceName:  fmt.Sprintf("ingress-for-%s-%s", targetKindShort, hashSuffix),
 		ExportPVCName:        fmt.Sprintf("pvc-for-%s-%s", targetKindShort, hashSuffix),
-		DummyJobName:         fmt.Sprintf("dummy-for-%s-%s", targetKindShort, hashSuffix),
 		ImportScratchPVCName: fmt.Sprintf("import-pvc-for-%s-%s", targetKindShort, hashSuffix),
 	}
 }

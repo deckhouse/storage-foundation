@@ -47,16 +47,6 @@ const (
 func main() {
 	logger := slog.New(slog.NewTextHandler(os.Stdout, nil))
 
-	// "dummy" mode: the controller schedules a throwaway Job pod that references a WaitForFirstConsumer
-	// scratch PVC purely to trigger its binding (scheduling sets the selected node, the provisioner then
-	// creates and binds the PV). The pod only needs to start and exit cleanly; running the real binary
-	// (the image entrypoint) instead of a shell avoids a StartError on the distroless image, which has no
-	// /bin/sh. It exits immediately so the scratch PVC mount is released for the real upload server.
-	if len(os.Args) > 1 && os.Args[1] == "dummy" {
-		logger.Info("Dummy consumer mode: scratch PVC referenced to trigger WaitForFirstConsumer binding, exiting")
-		return
-	}
-
 	fsys := real.GetOS()
 
 	logger.Info("Start main()")

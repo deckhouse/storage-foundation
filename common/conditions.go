@@ -167,8 +167,8 @@ func GetCondition(conditions []metav1.Condition, conditionType ConditionType) *m
 // Delegates to meta.SetStatusCondition (the same helper the controllers use), which creates the
 // condition when missing. The previous implementation only mutated an already-existing condition and
 // silently no-op'd when it was absent, so conditions the controller never pre-seeds (e.g.
-// UploadFinished) could never be set by the importer/exporter — leaving the import stuck because the
-// populator waits for UploadFinished=True.
+// UploadFinished) could never be set by the importer/exporter — leaving the import stuck because
+// captureSnapshotImportTarget and handlePVCImportStatus both wait for UploadFinished=True.
 //
 // The context and client parameters are unused; they are kept to preserve the call signature.
 func UpdateCondition[T Object](

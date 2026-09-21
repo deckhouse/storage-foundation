@@ -55,8 +55,14 @@ shell:
   - git branch --show-current || true
   - echo "=== cloned go.mod ==="
   - grep -nE '^(go|toolchain) ' go.mod
+  # This module's CreatePVC data-import mode relies on prepareProvision leaving a PVC whose
+  # dataSourceRef names an unrecognized kind parked instead of provisioned (IgnoredError, "assuming
+  # an external populator will provision it"). Fail the build loudly if a future version drops that
+  # branch instead of silently shipping a provisioner that breaks CreatePVC imports.
+  - grep -q 'assuming an external populator will provision it' pkg/controller/controller.go
   {{- if $patch }}
   - git apply /patches/*.patch --verbose
+  - grep -q 'assuming an external populator will provision it' pkg/controller/controller.go
   {{- end }}
   - rm -rf vendor
   - rm -rf .git

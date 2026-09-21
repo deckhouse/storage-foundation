@@ -1,9 +1,12 @@
 ---
-# Registers DataImport as a recognized volume-populator data source. external-provisioner and the
-# volume-data-source-validator read this cluster-scoped object to allow PVCs whose spec.dataSourceRef
-# points at DataImport.storage-foundation.deckhouse.io to be provisioned via the populator (instead of being
-# rejected as an unrecognized data source). Must match the GroupKind registered by the populator
-# (see images/populator/cmd/main.go).
+# The data-manager controller sets spec.dataSourceRef on every PVC it creates in CreatePVC mode, naming
+# DataImport.storage-foundation.deckhouse.io. That field tells a StorageClass's own provisioner not to
+# dynamically provision the claim; the controller fills the volume and hands it over itself, with no
+# populator component and no controller reading this object to do so. What DOES read it is
+# volume-data-source-validator: it lists VolumePopulator objects and, on no match for a PVC's
+# dataSourceRef, emits a Warning event UnrecognizedDataSourceKind. This registration is what keeps that
+# event off every PVC the CreatePVC mode creates — sourceKind must keep matching the GroupKind the
+# controller sets.
 apiVersion: populator.storage.k8s.io/v1beta1
 kind: VolumePopulator
 metadata:

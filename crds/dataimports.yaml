@@ -75,7 +75,14 @@ spec:
                   default: false
                 waitForFirstConsumer:
                   type: boolean
-                  description: If set to `false`, a load pod is created to trigger volume population when the StorageClass has `volumeBindingMode` set to `WaitForFirstConsumer`.
+                  description: |
+                    Controls what the import waits for before it starts moving data into the target PVC.
+                    When the target PVC's StorageClass has `volumeBindingMode: WaitForFirstConsumer` and
+                    this field is `true` (the default), the import waits until a pod that mounts the
+                    target PVC is scheduled, then places the imported volume on the node that pod was
+                    scheduled to. When `false`, the import does not wait for a consumer: it proceeds
+                    immediately and becomes the volume's first consumer itself. Has no effect when the
+                    target PVC's StorageClass does not delay binding until a consumer appears.
                   default: true
                 mode:
                   type: string
@@ -189,7 +196,12 @@ spec:
                                 x-kubernetes-int-or-string: true
                         storageClassName:
                           type: string
-                          description: Name of the StorageClass required by the PersistentVolumeClaim.
+                          minLength: 1
+                          description: |
+                            Name of the StorageClass required by the PersistentVolumeClaim. When omitted,
+                            the cluster's default StorageClass is used — also when it is marked default
+                            later; the import waits until then. An empty string is not supported: the
+                            volume has to be dynamically provisioned.
                         volumeMode:
                           type: string
                           description: Volume mode required by the PersistentVolumeClaim.

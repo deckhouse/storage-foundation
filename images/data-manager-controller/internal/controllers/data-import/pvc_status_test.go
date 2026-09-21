@@ -41,7 +41,7 @@ func pvcStatusScheme(t *testing.T) *runtime.Scheme {
 }
 
 // TestInternalPVCStatus covers the classification of the internal scratch PVC, which never consults the
-// API (unlike CheckPVCStatus/processPVCPendingStatus, which may need to look up the StorageClass).
+// API (unlike isWaitForFirstConsumer, which looks up the StorageClass).
 func TestInternalPVCStatus(t *testing.T) {
 	t.Parallel()
 

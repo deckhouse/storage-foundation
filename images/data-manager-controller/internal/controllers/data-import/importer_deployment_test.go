@@ -42,6 +42,15 @@ const (
 	importerDeploymentControllerNS   = "d8"
 )
 
+// exporterImageConfigMap seeds the ConfigMap common.MakeServerContainer reads the importer container's
+// image from. Without it ensureImporterDeployment fails and the test would prove nothing.
+func exporterImageConfigMap(namespace string) *corev1.ConfigMap {
+	return &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{Name: common.CongigMapName, Namespace: namespace},
+		Data:       map[string]string{"image": "registry.example/data-exporter:test"},
+	}
+}
+
 // importerDeploymentScheme carries every typed API group ensureImporterDeployment/importerPodsGone/
 // stopImporter touch: corev1 (ConfigMap, PVC, Pod) and appsv1 (Deployment).
 func importerDeploymentScheme(t *testing.T) *runtime.Scheme {
@@ -148,7 +157,7 @@ func TestEnsureImporterDeployment_MountsInternalPVCInControllerNamespace(t *test
 }
 
 // TestEnsureImporterDeployment_IsIdempotent guards the upload-phase requeue loop
-// (uploadSnapshotImportTarget calls ensureImporterDeployment on every reconcile while awaiting
+// (uploadImportTarget calls ensureImporterDeployment on every reconcile while awaiting
 // bind/upload): a second call against unchanged inputs must not issue any further write.
 func TestEnsureImporterDeployment_IsIdempotent(t *testing.T) {
 	t.Parallel()

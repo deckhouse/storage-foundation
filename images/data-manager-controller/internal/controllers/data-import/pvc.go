@@ -33,7 +33,6 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	dev1alpha1 "github.com/deckhouse/storage-foundation/api/v1alpha1"
-	"github.com/deckhouse/storage-foundation/common"
 )
 
 // EnsurePVC creates or updates the PVC from the template and returns the current object. pvcNamespace is
@@ -179,42 +178,6 @@ func internalPVCStatus(pvc *corev1.PersistentVolumeClaim) TargetStatus {
 	}
 }
 
-func CheckPVCStatus(
-	ctx context.Context,
-	client client.Client,
-	pvc *corev1.PersistentVolumeClaim,
-	waitForFirstConsumer bool,
-) (TargetStatus, error) {
-	switch pvc.Status.Phase {
-	case corev1.ClaimBound:
-		return TargetStatusReady, nil
-	case corev1.ClaimPending:
-		return processPVCPendingStatus(ctx, client, pvc, waitForFirstConsumer)
-	default:
-		return TargetStatusFailed, nil
-	}
-}
-
-func processPVCPendingStatus(
-	ctx context.Context,
-	client client.Client,
-	pvc *corev1.PersistentVolumeClaim,
-	waitForFirstConsumer bool,
-) (TargetStatus, error) {
-	logger := log.FromContext(ctx).WithValues("pvcNamespace", pvc.Namespace, "pvcName", pvc.Name)
-	scWffc, err := isWaitForFirstConsumer(ctx, client, pvc)
-	if err != nil {
-		logger.Error(err, "Failed to check if need dummy pod")
-		return TargetStatusUnknown, err
-	}
-
-	if scWffc && !waitForFirstConsumer {
-		return TargetStatusNeedConsumer, nil
-	}
-
-	return TargetStatusPending, nil
-}
-
 func isWaitForFirstConsumer(ctx context.Context, client client.Client, pvc *corev1.PersistentVolumeClaim) (bool, error) {
 	logger := log.FromContext(ctx).WithValues("pvcNamespace", pvc.Namespace, "pvcName", pvc.Name)
 
@@ -295,15 +258,16 @@ func scratchVolumeFSType(ctx context.Context, c client.Reader, pvc *corev1.Persi
 	return pv.Spec.CSI.FSType
 }
 
-// DeleteScratchPVC removes the finalizer from and deletes the scratch PVC used to stage a PopulateData
-// import. Called once the import artifact has been safely captured (Retain + keeper-anchored), so the
-// scratch volume is no longer needed. Idempotent: tolerates the PVC already being gone.
+// DeleteScratchPVC removes the finalizer from and deletes the scratch PVC. Idempotent: tolerates the
+// PVC already being gone.
 func DeleteScratchPVC(ctx context.Context, c client.Client, pvc *corev1.PersistentVolumeClaim) error {
 	logger := log.FromContext(ctx).WithValues("pvcNamespace", pvc.Namespace, "pvcName", pvc.Name)
 
 	base := pvc.DeepCopy()
 	if controllerutil.RemoveFinalizer(pvc, dev1alpha1.StorageManagerFinalizerName) {
-		if err := c.Patch(ctx, pvc, client.MergeFrom(base)); err != nil && !kubeerrors.IsNotFound(err) {
+		// metadata.finalizers has more than one writer, so the patch carries an optimistic lock; a
+		// Conflict surfaces to the caller unretried.
+		if err := c.Patch(ctx, pvc, client.MergeFromWithOptions(base, client.MergeFromWithOptimisticLock{})); err != nil && !kubeerrors.IsNotFound(err) {
 			logger.Error(err, "Failed to remove finalizer from scratch PVC")
 			return err
 		}
@@ -330,27 +294,77 @@ func GetPVC(ctx context.Context, c client.Client, pvcKey types.NamespacedName) (
 	return pvc, nil
 }
 
-// RemovePVCFinalizer removes a finalizer from a PVC by namespace and name
-func RemovePVCFinalizer(ctx context.Context, client client.Client, namespacedName types.NamespacedName, finalizerName string) error {
-	logger := log.FromContext(ctx)
-
-	pvc := &corev1.PersistentVolumeClaim{}
-	err := client.Get(ctx, namespacedName, pvc)
-	if err != nil && !kubeerrors.IsNotFound(err) {
-		logger.Error(err, "Failed to get PVC")
+// RemovePVCFinalizer removes finalizerName from di's CreatePVC target PVC, but only when the PVC's
+// storage-manager annotations name di. Without that guard, deleting a DataImport whose spec.pvcTemplate
+// names a PVC that another DataImport already owns would strip the owner's finalizer from underneath it,
+// letting a user's `kubectl delete pvc` on the still-uploading owner's target succeed instantly and the
+// owner then recreate the PVC it observes as gone. Idempotent.
+func RemovePVCFinalizer(ctx context.Context, c client.Client, di *dev1alpha1.DataImport, finalizerName string) error {
+	pvc, err := getTargetPVC(ctx, c, di)
+	if err != nil {
 		return err
 	}
-
-	if !kubeerrors.IsNotFound(err) {
-		needUpdate := common.RemoveFinalizer(ctx, client, pvc, finalizerName)
-		if needUpdate {
-			err = client.Update(ctx, pvc)
-			if err != nil {
-				logger.Error(err, "Failed to remove finalizer from PVC")
-				return err
-			}
-		}
+	if pvc == nil {
+		return nil
+	}
+	if !isTargetPVCOwnedBy(pvc, di) {
+		return nil
 	}
 
+	base := pvc.DeepCopy()
+	if !controllerutil.RemoveFinalizer(pvc, finalizerName) {
+		return nil
+	}
+	return patchPVCRemoveFinalizer(ctx, c, pvc, base)
+}
+
+// getTargetPVC returns the CreatePVC target PVC (spec.pvcTemplate.metadata.name in the DataImport's
+// namespace), or (nil, nil) when it does not exist.
+func getTargetPVC(ctx context.Context, c client.Client, di *dev1alpha1.DataImport) (*corev1.PersistentVolumeClaim, error) {
+	if di.Spec.PvcTemplate == nil || di.Spec.PvcTemplate.Name == "" {
+		return nil, nil
+	}
+	key := types.NamespacedName{Namespace: di.Namespace, Name: di.Spec.PvcTemplate.Name}
+	return GetPVC(ctx, c, key)
+}
+
+// isTargetPVCOwnedBy reports whether the PVC's storage-manager annotations name this DataImport.
+func isTargetPVCOwnedBy(pvc *corev1.PersistentVolumeClaim, di *dev1alpha1.DataImport) bool {
+	return pvc.Annotations[dev1alpha1.AnnotationStorageManagerNamespaceKey] == di.Namespace &&
+		pvc.Annotations[dev1alpha1.AnnotationStorageManagerNameKey] == di.Name
+}
+
+// patchPVCRemoveFinalizer removes our finalizer from pvc in one Patch. metadata.finalizers is a list
+// field with more than one writer, so the patch carries an optimistic lock; a Conflict is returned to
+// the caller, never retried here. NotFound is success.
+func patchPVCRemoveFinalizer(ctx context.Context, c client.Client, pvc, base *corev1.PersistentVolumeClaim) error {
+	if err := c.Patch(ctx, pvc, client.MergeFromWithOptions(base, client.MergeFromWithOptimisticLock{})); err != nil && !kubeerrors.IsNotFound(err) {
+		return err
+	}
 	return nil
+}
+
+// reconcileTargetPVCRelease lets a user-initiated delete of the failed target PVC complete: when the PVC
+// is ours, being deleted and still carries our finalizer, it is removed; every other state issues no write.
+func (r *DataImportReconciler) reconcileTargetPVCRelease(ctx context.Context) error {
+	pvc, err := getTargetPVC(ctx, r.Client, r.dataImport)
+	if err != nil {
+		return err
+	}
+	if pvc == nil {
+		return nil
+	}
+	if pvc.DeletionTimestamp == nil {
+		return nil
+	}
+	if !isTargetPVCOwnedBy(pvc, r.dataImport) {
+		return nil
+	}
+	if !controllerutil.ContainsFinalizer(pvc, dev1alpha1.StorageManagerFinalizerName) {
+		return nil
+	}
+
+	base := pvc.DeepCopy()
+	controllerutil.RemoveFinalizer(pvc, dev1alpha1.StorageManagerFinalizerName)
+	return patchPVCRemoveFinalizer(ctx, r.Client, pvc, base)
 }

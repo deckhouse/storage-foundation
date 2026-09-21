@@ -76,21 +76,33 @@ func createPVCImport(name string, serverState common.ServerState) *dev1alpha1.Da
 	return di
 }
 
+// boundImportPVC builds a target PVC already owned by the DataImport named name in namespace "ns" (the
+// storage-manager annotations createPVCImport's ensureImportPVC would have stamped on creation), so the
+// ownership guard on the CreatePVC target-PVC path treats it as ours rather than a stranger's.
 func boundImportPVC(name string) *corev1.PersistentVolumeClaim {
 	fs := corev1.PersistentVolumeFilesystem
 	return &corev1.PersistentVolumeClaim{
-		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "ns"},
-		Spec:       corev1.PersistentVolumeClaimSpec{VolumeMode: &fs},
-		Status:     corev1.PersistentVolumeClaimStatus{Phase: corev1.ClaimBound},
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      name,
+			Namespace: "ns",
+			Annotations: map[string]string{
+				dev1alpha1.AnnotationStorageManagerNamespaceKey: "ns",
+				dev1alpha1.AnnotationStorageManagerNameKey:      name,
+			},
+		},
+		Spec:   corev1.PersistentVolumeClaimSpec{VolumeMode: &fs},
+		Status: corev1.PersistentVolumeClaimStatus{Phase: corev1.ClaimBound},
 	}
 }
 
 // TestReconcile_CreatePVC_TranslatesFinishedAndCompletes exercises the real Reconcile end to end for a
 // CreatePVC import whose pod reported serverState=Finished. It is the direct guard that the controller
-// translates serverState=Finished into UploadFinished=True (with the deduplicated message) — the signal the
-// volume populator gates on — and then drives the object to the terminal Completed phase with a
-// completionTimestamp. Pre-seeding UploadFinished (as the pure phase-machine tests do) would NOT catch a
-// regression in this translation; running the whole reconcile does.
+// translates serverState=Finished into UploadFinished=True (with the deduplicated message) — the signal
+// handlePVCImportStatus gates the handover on — and then drives the object to the terminal Completed phase
+// with a completionTimestamp. Completed requires the target PVC to be Bound (here: boundImportPVC, with no
+// scratch PVC seeded, models a handover that already finished); pre-seeding UploadFinished (as the pure
+// phase-machine tests do) would NOT catch a regression in the serverState translation; running the whole
+// reconcile does.
 func TestReconcile_CreatePVC_TranslatesFinishedAndCompletes(t *testing.T) {
 	scheme := reconcileScheme(t)
 	di := createPVCImport("imp-done", common.ServerStateFinished)

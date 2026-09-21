@@ -121,7 +121,7 @@ func readyObjectKeeper(name string, di *dev1alpha1.DataImport) *unstructured.Uns
 // filesystem-type observation depends on. No field defaults: each test states the volume it means, so a
 // case like "Block" or "PV already gone" cannot be read as an omission.
 type artifactCaptureOptions struct {
-	// volumeMode of the scratch PVC. Always set: uploadSnapshotImportTarget rejects a claim without one
+	// volumeMode of the scratch PVC. Always set: uploadImportTarget rejects a claim without one
 	// long before ensureDataArtifact is reached, so a nil mode here would describe a state the code never
 	// sees.
 	volumeMode corev1.PersistentVolumeMode

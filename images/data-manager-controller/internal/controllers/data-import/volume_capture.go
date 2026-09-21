@@ -145,8 +145,7 @@ func buildVolumeCaptureRequest(name, namespace string, keeper *unstructured.Unst
 			// Single-target VCR: spec.target is a single object, not a spec.targets[] list. The
 			// CRD prunes any unknown spec.targets and the mode=Snapshot CEL rule requires spec.target, so
 			// emitting the legacy list shape produces a target-less VCR that never captures. Namespace is
-			// omitted on purpose: the captured PVC always lives in the VCR's own namespace, which is now
-			// genuinely true (both live in the controller namespace).
+			// omitted on purpose: the captured PVC always lives in the controller namespace, same as the VCR.
 			"target": map[string]interface{}{
 				"uid":        string(scratchPVC.UID),
 				"apiVersion": "v1",
