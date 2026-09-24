@@ -138,10 +138,12 @@ status:
   валидирует template storage class и volume mode для каждого request. Для источника
   `VolumeSnapshotContent` он использует template storage class, volume mode и access modes (default
   `ReadWriteOnce`), а также root `fsType` для Filesystem-томов. Для источника `PersistentVolume`
-  авторитетен source PV: volume mode, access modes, filesystem type и capacity берутся из него, а
-  соответствующие template-поля не определяют фактическую форму restore. Ни один путь не копирует
-  template labels/annotations и не считает `pvcTemplate.spec.resources.requests.storage`
-  авторитетным.
+  авторитетен source PV: volume mode, access modes и filesystem type берутся из него, а
+  соответствующие template-поля не определяют фактическую форму restore. Исключение — capacity: оба
+  пути читают `pvcTemplate.spec.resources.requests.storage` и выделяют больший из запрошенного и
+  размера источника (`restoreSize` снапшота либо capacity исходного PV), чтобы восстановленные
+  данные гарантированно поместились; если не задано ни то, ни другое — 1Gi. Ни один путь не копирует
+  template labels/annotations.
 - Поддерживаемые source kinds — `VolumeSnapshotContent` и `PersistentVolume`. Текущие controller и
   executor выбирают источник по `kind` и `name`; `sourceRef.apiVersion`, `namespace` и `uid` не
   проверяются относительно live source. Hardening source identity и admission отслеживается в

@@ -1,5 +1,5 @@
 diff --git a/cmd/csi-provisioner/csi-provisioner.go b/cmd/csi-provisioner/csi-provisioner.go
-index 9b96ba6..04c9654 100644
+index 9b96ba6..7638f27 100644
 --- a/cmd/csi-provisioner/csi-provisioner.go
 +++ b/cmd/csi-provisioner/csi-provisioner.go
 @@ -30,6 +30,7 @@ import (
@@ -169,7 +169,7 @@ index 3066c0a..960c252 100644
    - apiGroups: ["storage.k8s.io"]
      resources: ["csinodes"]
 diff --git a/go.mod b/go.mod
-index dfd3f62..6747942 100644
+index dfd3f62..4b9f808 100644
 --- a/go.mod
 +++ b/go.mod
 @@ -1,9 +1,10 @@
@@ -293,10 +293,10 @@ index 6ee8c12..48e220b 100644
  golang.org/x/xerrors v0.0.0-20191204190536-9bdfabe68543/go.mod h1:I/5z698sn9Ka8TeJc9MKroUUfqBBauWjQqLJ2OPfmY0=
 diff --git a/pkg/controller/vrr_handler.go b/pkg/controller/vrr_handler.go
 new file mode 100644
-index 0000000..bd5eb7e
+index 0000000..0a71a45
 --- /dev/null
 +++ b/pkg/controller/vrr_handler.go
-@@ -0,0 +1,862 @@
+@@ -0,0 +1,929 @@
 +/*
 +Copyright 2025 Flant JSC
 +
@@ -348,6 +348,10 @@ index 0000000..bd5eb7e
 +// objectKeeperRefAnnotation carries the ObjectKeeper owner reference set by the
 +// storage-foundation VRR lifecycle controller. The executor only consumes it.
 +const objectKeeperRefAnnotation = "storage-foundation.deckhouse.io/object-keeper-ref"
++
++// defaultVolumeCapacityBytes is the last-resort volume size used when neither the VRR nor the
++// source reports one.
++const defaultVolumeCapacityBytes int64 = 1024 * 1024 * 1024
 +
 +// VRRExecutor is the low-level executor of VolumeRestoreRequest (VRR) restore operations.
 +//
@@ -604,11 +608,28 @@ index 0000000..bd5eb7e
 +		return fmt.Errorf("failed to check target PVC %s/%s: %w", vrrTargetNamespace(vrr), vrrTargetPVCName(vrr), err)
 +	}
 +
++	// Reserved csi.storage.k8s.io/* parameters address this sidecar (secret templates,
++	// fsType), not the driver, so they are stripped before CreateVolume exactly as
++	// upstream prepareProvision does: a driver that validates parameters strictly
++	// (csi-driver-nfs) rejects the whole request with InvalidArgument and the restore
++	// never materializes. ensurePV still resolves the provisioner secret from the raw
++	// sc.Parameters. An unknown key under the reserved prefix is a StorageClass typo,
++	// not a transient fault - upstream treats it as ProvisioningFinished - so it is
++	// reported and dropped without a requeue, like the spec validations above.
++	csiParameters, err := removePrefixedParameters(sc.Parameters)
++	if err != nil {
++		e.eventRecorder.Eventf(vrr, v1.EventTypeWarning, "VRRInvalidStorageClass",
++			"StorageClass %s has an invalid parameter: %v", sc.Name, err)
++		klog.Warningf("VRR %s/%s: StorageClass %s has an invalid parameter: %v, ignoring",
++			vrr.Namespace, vrr.Name, sc.Name, err)
++		return nil
++	}
++
 +	switch vrr.Spec.SourceRef.Kind {
 +	case "VolumeSnapshotContent":
-+		return e.restoreFromVSC(ctx, vrr, sc, pvName)
++		return e.restoreFromVSC(ctx, vrr, sc, csiParameters, pvName)
 +	case "PersistentVolume":
-+		return e.restoreFromPV(ctx, vrr, sc, pvName)
++		return e.restoreFromPV(ctx, vrr, sc, csiParameters, pvName)
 +	default:
 +		e.eventRecorder.Eventf(vrr, v1.EventTypeWarning, "VRRInvalidSource",
 +			"Unsupported source kind: %s", vrr.Spec.SourceRef.Kind)
@@ -621,7 +642,7 @@ index 0000000..bd5eb7e
 +//
 +// It does not wait for the PVC to become Bound and does not update VRR status;
 +// those are the responsibility of the storage-foundation controller.
-+func (e *VRRExecutor) restoreFromVSC(ctx context.Context, vrr *storagev1alpha1.VolumeRestoreRequest, sc *storagev1.StorageClass, pvName string) error {
++func (e *VRRExecutor) restoreFromVSC(ctx context.Context, vrr *storagev1alpha1.VolumeRestoreRequest, sc *storagev1.StorageClass, csiParameters map[string]string, pvName string) error {
 +	vsc, err := e.snapshotClient.SnapshotV1().VolumeSnapshotContents().Get(ctx, vrr.Spec.SourceRef.Name, metav1.GetOptions{})
 +	if err != nil {
 +		if apierrors.IsNotFound(err) {
@@ -670,9 +691,15 @@ index 0000000..bd5eb7e
 +		return nil
 +	}
 +
-+	capacityBytes := int64(1024 * 1024 * 1024) // 1Gi default
-+	if vsc.Status != nil && vsc.Status.RestoreSize != nil {
++	// The size the user asked for in spec.pvcTemplate wins: the snapshot's RestoreSize is
++	// driver-defined and for csi-driver-nfs it is the size of the snapshot archive, not of
++	// the volume. Never go below RestoreSize though - the restored data must fit.
++	capacityBytes := vrrRequestedCapacity(vrr)
++	if vsc.Status != nil && vsc.Status.RestoreSize != nil && *vsc.Status.RestoreSize > capacityBytes {
 +		capacityBytes = *vsc.Status.RestoreSize
++	}
++	if capacityBytes == 0 {
++		capacityBytes = defaultVolumeCapacityBytes
 +	}
 +
 +	contentSource := &csi.VolumeContentSource{
@@ -683,7 +710,7 @@ index 0000000..bd5eb7e
 +		},
 +	}
 +
-+	pv, err := e.ensurePV(ctx, vrr, sc, pvName, volumeCaps, capacityBytes, contentSource, e.resolveFSType(vrr),
++	pv, err := e.ensurePV(ctx, vrr, sc, csiParameters, pvName, volumeCaps, capacityBytes, contentSource, e.resolveFSType(vrr),
 +		fmt.Sprintf("Successfully created PV %s from snapshot", pvName), effectiveAccessModes(vrr))
 +	if err != nil {
 +		return err
@@ -779,6 +806,18 @@ index 0000000..bd5eb7e
 +	return vrr.Namespace
 +}
 +
++// vrrRequestedCapacity returns the storage size requested in spec.pvcTemplate, or 0 when unset.
++// The CRD schema accepts a negative quantity, and a non-positive size would travel all the way to
++// pv.Spec.Capacity where the API server rejects it, leaving the VRR in a silent retry loop; treat
++// it as unset so the usual fallback chain applies instead.
++func vrrRequestedCapacity(vrr *storagev1alpha1.VolumeRestoreRequest) int64 {
++	q, ok := vrr.Spec.PvcTemplate.Resources.Requests[storagev1alpha1.ResourceStorage]
++	if !ok || q.Value() <= 0 {
++		return 0
++	}
++	return q.Value()
++}
++
 +// effectiveAccessModes returns the VRR-requested access modes (from spec.pvcTemplate), defaulting to
 +// ReadWriteOnce when none are specified. The returned slice is what is recorded on the PV/PVC verbatim
 +// (no lossy reverse-mapping from the single CSI access mode).
@@ -804,7 +843,7 @@ index 0000000..bd5eb7e
 +}
 +
 +// restoreFromPV restores a volume by cloning an existing PersistentVolume and creates PV + PVC.
-+func (e *VRRExecutor) restoreFromPV(ctx context.Context, vrr *storagev1alpha1.VolumeRestoreRequest, sc *storagev1.StorageClass, pvName string) error {
++func (e *VRRExecutor) restoreFromPV(ctx context.Context, vrr *storagev1alpha1.VolumeRestoreRequest, sc *storagev1.StorageClass, csiParameters map[string]string, pvName string) error {
 +	sourcePV, err := e.kubeClient.CoreV1().PersistentVolumes().Get(ctx, vrr.Spec.SourceRef.Name, metav1.GetOptions{})
 +	if err != nil {
 +		if apierrors.IsNotFound(err) {
@@ -835,9 +874,14 @@ index 0000000..bd5eb7e
 +		return fmt.Errorf("failed to get volume capabilities from PV: %w", err)
 +	}
 +
-+	capacityBytes := int64(1024 * 1024 * 1024) // 1Gi default
-+	if capacity, ok := sourcePV.Spec.Capacity[v1.ResourceStorage]; ok {
++	// The size the user asked for in spec.pvcTemplate wins, but never go below the source
++	// PV's capacity - the restored volume must fit the cloned data.
++	capacityBytes := vrrRequestedCapacity(vrr)
++	if capacity, ok := sourcePV.Spec.Capacity[v1.ResourceStorage]; ok && capacity.Value() > capacityBytes {
 +		capacityBytes = capacity.Value()
++	}
++	if capacityBytes == 0 {
++		capacityBytes = defaultVolumeCapacityBytes
 +	}
 +
 +	contentSource := &csi.VolumeContentSource{
@@ -848,7 +892,7 @@ index 0000000..bd5eb7e
 +		},
 +	}
 +
-+	pv, err := e.ensurePV(ctx, vrr, sc, pvName, volumeCaps, capacityBytes, contentSource, e.getFSTypeFromPV(sourcePV),
++	pv, err := e.ensurePV(ctx, vrr, sc, csiParameters, pvName, volumeCaps, capacityBytes, contentSource, e.getFSTypeFromPV(sourcePV),
 +		fmt.Sprintf("Successfully created PV %s from PersistentVolume %s", pvName, sourcePV.Name), sourcePV.Spec.AccessModes)
 +	if err != nil {
 +		return err
@@ -859,10 +903,14 @@ index 0000000..bd5eb7e
 +
 +// ensurePV idempotently provisions the target PV: it returns an existing PV if one
 +// is already present, otherwise it calls CSI CreateVolume and creates the PV object.
++//
++// csiParameters is sc.Parameters with the reserved csi.storage.k8s.io/* keys already
++// removed; the raw sc.Parameters stay the source for the provisioner secret reference.
 +func (e *VRRExecutor) ensurePV(
 +	ctx context.Context,
 +	vrr *storagev1alpha1.VolumeRestoreRequest,
 +	sc *storagev1.StorageClass,
++	csiParameters map[string]string,
 +	pvName string,
 +	volumeCaps []*csi.VolumeCapability,
 +	capacityBytes int64,
@@ -895,7 +943,7 @@ index 0000000..bd5eb7e
 +
 +	req := csi.CreateVolumeRequest{
 +		Name:                pvName,
-+		Parameters:          sc.Parameters,
++		Parameters:          csiParameters,
 +		VolumeCapabilities:  volumeCaps,
 +		CapacityRange:       &csi.CapacityRange{RequiredBytes: capacityBytes},
 +		VolumeContentSource: contentSource,
@@ -915,7 +963,8 @@ index 0000000..bd5eb7e
 +	}
 +	klog.V(2).Infof("ensurePV: CSI CreateVolume succeeded for VRR %s/%s, volumeHandle %s", vrr.Namespace, vrr.Name, rep.Volume.VolumeId)
 +
-+	pv, err := createPVFromCSIResponse(rep.Volume, sc, pvName, e.driverName, e.identity, volumeCaps, fsType, accessModes)
++	pv, err := createPVFromCSIResponse(rep.Volume, sc, pvName, e.driverName, e.identity, volumeCaps, fsType, accessModes, capacityBytes,
++		provisionerSecretRef)
 +	if err != nil {
 +		return nil, fmt.Errorf("failed to build PV object from CSI response: %w", err)
 +	}
@@ -1018,6 +1067,10 @@ index 0000000..bd5eb7e
 +}
 +
 +// createPVFromCSIResponse builds a PersistentVolume object from a CSI CreateVolume response.
++//
++// requestedBytes is the CapacityRange.RequiredBytes sent in the CreateVolume request; it is
++// the fallback when the driver reports zero capacity. deletionSecretRef is the provisioner
++// secret the volume was created with, or nil when the StorageClass names none.
 +func createPVFromCSIResponse(
 +	volume *csi.Volume,
 +	sc *storagev1.StorageClass,
@@ -1027,11 +1080,17 @@ index 0000000..bd5eb7e
 +	volumeCaps []*csi.VolumeCapability,
 +	fsType string,
 +	accessModes []v1.PersistentVolumeAccessMode,
++	requestedBytes int64,
++	deletionSecretRef *v1.SecretReference,
 +) (*v1.PersistentVolume, error) {
 +	respCap := volume.GetCapacityBytes()
 +	if respCap == 0 {
-+		// CSI spec: capacity = 0 means unknown, use default.
-+		respCap = 1024 * 1024 * 1024 // 1Gi default
++		// CSI spec: zero means the driver does not report capacity (csi-driver-nfs says so
++		// explicitly and expects the requested size to be used), so fall back to what was asked.
++		respCap = requestedBytes
++	}
++	if respCap == 0 {
++		respCap = defaultVolumeCapacityBytes
 +	}
 +
 +	volumeAttributes := map[string]string{
@@ -1092,9 +1151,17 @@ index 0000000..bd5eb7e
 +		},
 +	}
 +
-+	// No deletion secrets for VRR-provisioned volumes.
-+	metav1.SetMetaDataAnnotation(&pv.ObjectMeta, "volume.kubernetes.io/provisioner-deletion-secret-name", "")
-+	metav1.SetMetaDataAnnotation(&pv.ObjectMeta, "volume.kubernetes.io/provisioner-deletion-secret-namespace", "")
++	// Record the provisioner secret for DeleteVolume, exactly as upstream createVolumeOperation
++	// does. The annotations must carry the real reference: when they are present but empty,
++	// handleSecretsForDeletion concludes the volume needs no secret and does not fall back to
++	// the StorageClass, so a driver that keeps delete-time settings in that secret (csi-nfs
++	// keeps mount options and the volume cleanup method there) would delete without them.
++	deletionSecretName, deletionSecretNamespace := "", ""
++	if deletionSecretRef != nil {
++		deletionSecretName, deletionSecretNamespace = deletionSecretRef.Name, deletionSecretRef.Namespace
++	}
++	metav1.SetMetaDataAnnotation(&pv.ObjectMeta, annDeletionProvisionerSecretRefName, deletionSecretName)
++	metav1.SetMetaDataAnnotation(&pv.ObjectMeta, annDeletionProvisionerSecretRefNamespace, deletionSecretNamespace)
 +
 +	if sc.ReclaimPolicy != nil {
 +		pv.Spec.PersistentVolumeReclaimPolicy = *sc.ReclaimPolicy
@@ -1161,10 +1228,10 @@ index 0000000..bd5eb7e
 +}
 diff --git a/pkg/controller/vrr_handler_test.go b/pkg/controller/vrr_handler_test.go
 new file mode 100644
-index 0000000..d418169
+index 0000000..d67072d
 --- /dev/null
 +++ b/pkg/controller/vrr_handler_test.go
-@@ -0,0 +1,1084 @@
+@@ -0,0 +1,1564 @@
 +/*
 +Copyright 2025 Flant JSC
 +
@@ -1738,8 +1805,11 @@ index 0000000..d418169
 +		},
 +	}
 +
++	// requestedBytes is irrelevant here: the CSI response already reports a non-zero
++	// capacity, so the fallback path is never taken. A deliberately different value
++	// makes that explicit.
 +	pv, err := createPVFromCSIResponse(volume, sc, "test-pv", vrrTestDriverName, vrrTestIdentity, volumeCaps, "ext4",
-+		[]v1.PersistentVolumeAccessMode{v1.ReadOnlyMany})
++		[]v1.PersistentVolumeAccessMode{v1.ReadOnlyMany}, 2*1024*1024*1024, nil)
 +	if err != nil {
 +		t.Fatalf("createPVFromCSIResponse failed: %v", err)
 +	}
@@ -1766,8 +1836,11 @@ index 0000000..d418169
 +		},
 +	}
 +
++	// requestedBytes is irrelevant here: the CSI response already reports a non-zero
++	// capacity, so the fallback path is never taken. A deliberately different value
++	// makes that explicit.
 +	pv, err := createPVFromCSIResponse(volume, sc, "test-pv", vrrTestDriverName, vrrTestIdentity, volumeCaps, "ext4",
-+		[]v1.PersistentVolumeAccessMode{v1.ReadWriteOncePod})
++		[]v1.PersistentVolumeAccessMode{v1.ReadWriteOncePod}, 2*1024*1024*1024, nil)
 +	if err != nil {
 +		t.Fatalf("createPVFromCSIResponse failed: %v", err)
 +	}
@@ -1779,7 +1852,7 @@ index 0000000..d418169
 +	}
 +
 +	// Empty requested modes default to ReadWriteOnce.
-+	pvDefault, err := createPVFromCSIResponse(volume, sc, "test-pv2", vrrTestDriverName, vrrTestIdentity, volumeCaps, "ext4", nil)
++	pvDefault, err := createPVFromCSIResponse(volume, sc, "test-pv2", vrrTestDriverName, vrrTestIdentity, volumeCaps, "ext4", nil, 2*1024*1024*1024, nil)
 +	if err != nil {
 +		t.Fatalf("createPVFromCSIResponse failed: %v", err)
 +	}
@@ -1804,7 +1877,10 @@ index 0000000..d418169
 +		},
 +	}
 +
-+	pv, err := createPVFromCSIResponse(volume, sc, "test-pv", vrrTestDriverName, vrrTestIdentity, volumeCaps, "ext4", nil)
++	// requestedBytes is irrelevant here: the CSI response already reports a non-zero
++	// capacity, so the fallback path is never taken. A deliberately different value
++	// makes that explicit.
++	pv, err := createPVFromCSIResponse(volume, sc, "test-pv", vrrTestDriverName, vrrTestIdentity, volumeCaps, "ext4", nil, 2*1024*1024*1024, nil)
 +	if err != nil {
 +		t.Fatalf("createPVFromCSIResponse failed: %v", err)
 +	}
@@ -1956,6 +2032,475 @@ index 0000000..d418169
 +		if err := validateVRRAccessModes(modes); err == nil {
 +			t.Errorf("validateVRRAccessModes(%v) = nil, want error", modes)
 +		}
++	}
++}
++
++// TestReconcile_StripsReservedStorageClassParameters is a regression test for the
++// VRR-executor fix that strips reserved csi.storage.k8s.io/* StorageClass parameters
++// before calling CSI CreateVolume: previously they were forwarded verbatim and a
++// driver that validates parameters strictly (e.g. csi-driver-nfs) rejected the whole
++// request, so the restore never materialized.
++func TestReconcile_StripsReservedStorageClassParameters(t *testing.T) {
++	const (
++		provisionerSecretName      = "vrr-provisioner-secret"
++		provisionerSecretNamespace = "vrr-secret-ns"
++	)
++
++	tests := []struct {
++		name            string
++		scParameters    map[string]string
++		wantCreateCall  bool
++		wantEventReason string
++	}{
++		{
++			name: "success: reserved csi.storage.k8s.io/* keys are stripped, plain keys and secret resolution survive",
++			scParameters: map[string]string{
++				"server": "1.2.3.4",
++				"share":  "/export",
++				"csi.storage.k8s.io/provisioner-secret-name":      provisionerSecretName,
++				"csi.storage.k8s.io/provisioner-secret-namespace": provisionerSecretNamespace,
++			},
++			wantCreateCall: true,
++		},
++		{
++			name: "error: unknown key under reserved prefix is a permanent StorageClass error, no retry",
++			scParameters: map[string]string{
++				"csi.storage.k8s.io/bogus": "x",
++			},
++			wantCreateCall:  false,
++			wantEventReason: "VRRInvalidStorageClass",
++		},
++	}
++
++	for _, tt := range tests {
++		t.Run(tt.name, func(t *testing.T) {
++			ctrl := gomock.NewController(t)
++			defer ctrl.Finish()
++
++			sc := ourStorageClass()
++			sc.Parameters = tt.scParameters
++
++			mockSCLister := NewMockStorageClassLister(ctrl)
++			mockSCLister.storageClasses[vrrTestStorageClass] = sc
++
++			vrr := createTestVRR("test-vrr", "test-ns", "VolumeSnapshotContent", "test-vsc")
++			vsc := readyVSC("test-vsc", vrrTestSnapshotHandle)
++			snapshotClient := snapfake.NewSimpleClientset(vsc)
++
++			kubeClient := fakeclientset.NewSimpleClientset()
++			if tt.wantCreateCall {
++				secret := &v1.Secret{
++					ObjectMeta: metav1.ObjectMeta{Name: provisionerSecretName, Namespace: provisionerSecretNamespace},
++					Data:       map[string][]byte{"password": []byte("s3cr3t")},
++				}
++				if _, err := kubeClient.CoreV1().Secrets(secret.Namespace).Create(context.Background(), secret, metav1.CreateOptions{}); err != nil {
++					t.Fatalf("failed to seed secret: %v", err)
++				}
++			}
++
++			createVolumeCalled := false
++			var gotParameters map[string]string
++			var gotSecrets map[string]string
++			mockCSIClient := &mockControllerClient{
++				createVolumeFunc: func(_ context.Context, req *csi.CreateVolumeRequest) (*csi.CreateVolumeResponse, error) {
++					createVolumeCalled = true
++					gotParameters = req.Parameters
++					gotSecrets = req.Secrets
++					if !tt.wantCreateCall {
++						t.Error("CSI CreateVolume must not be called for a StorageClass with an unknown reserved-prefix parameter")
++					}
++					return &csi.CreateVolumeResponse{Volume: &csi.Volume{VolumeId: "new-volume-id", CapacityBytes: 1024 * 1024 * 1024}}, nil
++				},
++			}
++
++			eventRecorder := record.NewFakeRecorder(10)
++			e := newTestExecutor(mockCSIClient, mockSCLister, kubeClient, snapshotClient, eventRecorder)
++
++			if err := e.reconcile(context.Background(), vrr); err != nil {
++				t.Fatalf("reconcile returned unexpected error: %v", err)
++			}
++
++			if createVolumeCalled != tt.wantCreateCall {
++				t.Fatalf("CreateVolume called = %v, want %v", createVolumeCalled, tt.wantCreateCall)
++			}
++
++			if tt.wantEventReason != "" {
++				if !waitForEvent(eventRecorder, tt.wantEventReason) {
++					t.Errorf("Expected event with reason %s", tt.wantEventReason)
++				}
++				assertNoPVC(t, kubeClient)
++				return
++			}
++
++			for reservedKey := range map[string]string{
++				"csi.storage.k8s.io/provisioner-secret-name":      "",
++				"csi.storage.k8s.io/provisioner-secret-namespace": "",
++			} {
++				if _, ok := gotParameters[reservedKey]; ok {
++					t.Errorf("reserved parameter %q leaked into CSI CreateVolume request Parameters: %v", reservedKey, gotParameters)
++				}
++			}
++			wantPlain := map[string]string{"server": "1.2.3.4", "share": "/export"}
++			for k, v := range wantPlain {
++				if gotParameters[k] != v {
++					t.Errorf("plain parameter %q = %q, want %q (got %v)", k, gotParameters[k], v, gotParameters)
++				}
++			}
++			if len(gotParameters) != len(wantPlain) {
++				t.Errorf("CreateVolume Parameters = %v, want exactly %v", gotParameters, wantPlain)
++			}
++
++			// The provisioner secret must still resolve from the raw sc.Parameters -
++			// removePrefixedParameters must not affect getSecretReference's input.
++			if gotSecrets["password"] != "s3cr3t" {
++				t.Errorf("expected provisioner secret to resolve from raw StorageClass parameters, got Secrets=%v", gotSecrets)
++			}
++		})
++	}
++}
++
++// TestReconcile_RecordsProvisionerDeletionSecret verifies that the PV the executor creates
++// names the provisioner secret in the deletion-secret annotations, on both source paths.
++// Empty annotations tell the upstream deleter that the volume needs no secret and it does
++// not fall back to the StorageClass, so a driver keeping delete-time settings in that
++// secret (csi-nfs: mount options, volume cleanup method) would delete without them.
++func TestReconcile_RecordsProvisionerDeletionSecret(t *testing.T) {
++	const (
++		provisionerSecretName      = "vrr-provisioner-secret"
++		provisionerSecretNamespace = "vrr-secret-ns"
++	)
++	withSecret := map[string]string{
++		"csi.storage.k8s.io/provisioner-secret-name":      provisionerSecretName,
++		"csi.storage.k8s.io/provisioner-secret-namespace": provisionerSecretNamespace,
++	}
++
++	tests := []struct {
++		name          string
++		sourceKind    string
++		scParameters  map[string]string
++		wantName      string
++		wantNamespace string
++	}{
++		{
++			name:          "success: VolumeSnapshotContent source records the StorageClass provisioner secret",
++			sourceKind:    "VolumeSnapshotContent",
++			scParameters:  withSecret,
++			wantName:      provisionerSecretName,
++			wantNamespace: provisionerSecretNamespace,
++		},
++		{
++			name:          "success: PersistentVolume source records the StorageClass provisioner secret",
++			sourceKind:    "PersistentVolume",
++			scParameters:  withSecret,
++			wantName:      provisionerSecretName,
++			wantNamespace: provisionerSecretNamespace,
++		},
++		{
++			name:         "success: StorageClass without a provisioner secret records empty annotations",
++			sourceKind:   "VolumeSnapshotContent",
++			scParameters: map[string]string{"server": "1.2.3.4"},
++		},
++	}
++
++	for _, tt := range tests {
++		t.Run(tt.name, func(t *testing.T) {
++			ctrl := gomock.NewController(t)
++			defer ctrl.Finish()
++
++			sc := ourStorageClass()
++			sc.Parameters = tt.scParameters
++			mockSCLister := NewMockStorageClassLister(ctrl)
++			mockSCLister.storageClasses[vrrTestStorageClass] = sc
++
++			secret := &v1.Secret{
++				ObjectMeta: metav1.ObjectMeta{Name: provisionerSecretName, Namespace: provisionerSecretNamespace},
++				Data:       map[string][]byte{"password": []byte("s3cr3t")},
++			}
++			var vrr *storagev1alpha1.VolumeRestoreRequest
++			var kubeClient *fakeclientset.Clientset
++			var snapshotClient *snapfake.Clientset
++			switch tt.sourceKind {
++			case "VolumeSnapshotContent":
++				vrr = createTestVRR("test-vrr", "test-ns", "VolumeSnapshotContent", "test-vsc")
++				kubeClient = fakeclientset.NewSimpleClientset(secret)
++				snapshotClient = snapfake.NewSimpleClientset(readyVSC("test-vsc", vrrTestSnapshotHandle))
++			case "PersistentVolume":
++				vrr = createTestVRR("test-vrr", "test-ns", "PersistentVolume", "source-pv")
++				kubeClient = fakeclientset.NewSimpleClientset(secret, csiPV("source-pv", vrrTestVolumeHandle))
++			}
++
++			mockCSIClient := &mockControllerClient{
++				createVolumeFunc: func(_ context.Context, _ *csi.CreateVolumeRequest) (*csi.CreateVolumeResponse, error) {
++					return &csi.CreateVolumeResponse{Volume: &csi.Volume{VolumeId: "new-volume-id", CapacityBytes: 1024 * 1024 * 1024}}, nil
++				},
++			}
++
++			e := newTestExecutor(mockCSIClient, mockSCLister, kubeClient, snapshotClient, nil)
++			if err := e.reconcile(context.Background(), vrr); err != nil {
++				t.Fatalf("reconcile failed: %v", err)
++			}
++
++			pvName := expectedPVName(t, vrr)
++			pv, err := kubeClient.CoreV1().PersistentVolumes().Get(context.Background(), pvName, metav1.GetOptions{})
++			if err != nil {
++				t.Fatalf("expected PV %s to exist: %v", pvName, err)
++			}
++			for ann, want := range map[string]string{
++				annDeletionProvisionerSecretRefName:      tt.wantName,
++				annDeletionProvisionerSecretRefNamespace: tt.wantNamespace,
++			} {
++				got, ok := pv.Annotations[ann]
++				if !ok {
++					t.Errorf("PV annotation %q is missing; the deleter would fall back to the StorageClass instead of the recorded secret", ann)
++					continue
++				}
++				if got != want {
++					t.Errorf("PV annotation %q = %q, want %q", ann, got, want)
++				}
++			}
++		})
++	}
++}
++
++// TestReconcile_FromVSC_VolumeCapacityPrecedence verifies that restoreFromVSC picks the
++// effective volume capacity in this priority order: requested pvcTemplate size >
++// VolumeSnapshotContent RestoreSize > defaultVolumeCapacityBytes - and never picks a size
++// smaller than RestoreSize, since the restored data must fit.
++//
++// Regression coverage: on drivers that report CapacityBytes: 0 in the CSI CreateVolume
++// response (csi-driver-nfs does this by design - see controllerserver.go: "by setting it
++// to zero, Provisioner will use PVC requested size as PV size"), the executor used to
++// always fall back to a hardcoded 1Gi and ignored both RestoreSize and the user's
++// requested size. This test also asserts what is actually sent to the CSI driver
++// (CapacityRange.RequiredBytes), not just the resulting PV/PVC.
++func TestReconcile_FromVSC_VolumeCapacityPrecedence(t *testing.T) {
++	tests := []struct {
++		name             string
++		requestedStorage *resource.Quantity
++		restoreSize      *int64
++		wantCapacity     int64
++	}{
++		{
++			name:             "success: requested size wins over a smaller RestoreSize",
++			requestedStorage: quantityPtr(resource.MustParse("10Gi")),
++			restoreSize:      int64Ptr(1024 * 1024 * 1024), // 1Gi
++			wantCapacity:     10 * 1024 * 1024 * 1024,
++		},
++		{
++			// 3Gi rather than 1Gi: an implementation that dropped RestoreSize and fell through
++			// to defaultVolumeCapacityBytes would still satisfy a 1Gi expectation.
++			name:         "success: RestoreSize is used when no size is requested",
++			restoreSize:  int64Ptr(3 * 1024 * 1024 * 1024),
++			wantCapacity: 3 * 1024 * 1024 * 1024,
++		},
++		{
++			name:             "success: RestoreSize wins when larger than the requested size",
++			requestedStorage: quantityPtr(resource.MustParse("500Mi")),
++			restoreSize:      int64Ptr(1024 * 1024 * 1024), // 1Gi
++			wantCapacity:     1024 * 1024 * 1024,
++		},
++		{
++			name:         "success: default capacity is used when neither requested size nor RestoreSize is set",
++			wantCapacity: defaultVolumeCapacityBytes,
++		},
++	}
++
++	for _, tt := range tests {
++		t.Run(tt.name, func(t *testing.T) {
++			ctrl := gomock.NewController(t)
++			defer ctrl.Finish()
++
++			mockSCLister := NewMockStorageClassLister(ctrl)
++			mockSCLister.storageClasses[vrrTestStorageClass] = ourStorageClass()
++
++			vrr := createTestVRR("test-vrr", "test-ns", "VolumeSnapshotContent", "test-vsc")
++			if tt.requestedStorage != nil {
++				vrr.Spec.PvcTemplate.Resources.Requests = storagev1alpha1.ResourceList{
++					storagev1alpha1.ResourceStorage: *tt.requestedStorage,
++				}
++			}
++
++			vsc := readyVSC("test-vsc", vrrTestSnapshotHandle)
++			vsc.Status.RestoreSize = tt.restoreSize
++
++			kubeClient := fakeclientset.NewSimpleClientset()
++			snapshotClient := snapfake.NewSimpleClientset(vsc)
++
++			var gotRequiredBytes int64
++			mockCSIClient := &mockControllerClient{
++				createVolumeFunc: func(_ context.Context, req *csi.CreateVolumeRequest) (*csi.CreateVolumeResponse, error) {
++					gotRequiredBytes = req.CapacityRange.GetRequiredBytes()
++					// Mimic csi-driver-nfs: CapacityBytes 0 means "use the requested size".
++					return &csi.CreateVolumeResponse{Volume: &csi.Volume{VolumeId: "new-volume-id", CapacityBytes: 0}}, nil
++				},
++			}
++
++			e := newTestExecutor(mockCSIClient, mockSCLister, kubeClient, snapshotClient, nil)
++			if err := e.reconcile(context.Background(), vrr); err != nil {
++				t.Fatalf("reconcile failed: %v", err)
++			}
++
++			if gotRequiredBytes != tt.wantCapacity {
++				t.Errorf("CSI CreateVolumeRequest.CapacityRange.RequiredBytes = %d, want %d", gotRequiredBytes, tt.wantCapacity)
++			}
++
++			pvName := expectedPVName(t, vrr)
++			pv, err := kubeClient.CoreV1().PersistentVolumes().Get(context.Background(), pvName, metav1.GetOptions{})
++			if err != nil {
++				t.Fatalf("expected PV %s to exist: %v", pvName, err)
++			}
++			if got := pv.Spec.Capacity[v1.ResourceStorage]; got.Value() != tt.wantCapacity {
++				t.Errorf("PV Capacity = %s (%d bytes), want %d bytes", got.String(), got.Value(), tt.wantCapacity)
++			}
++
++			pvc, err := kubeClient.CoreV1().PersistentVolumeClaims(vrrTestTargetNamespace).Get(context.Background(), vrrTestTargetPVCName, metav1.GetOptions{})
++			if err != nil {
++				t.Fatalf("expected target PVC to exist: %v", err)
++			}
++			if got := pvc.Spec.Resources.Requests[v1.ResourceStorage]; got.Value() != tt.wantCapacity {
++				t.Errorf("PVC Resources.Requests[storage] = %s (%d bytes), want %d bytes", got.String(), got.Value(), tt.wantCapacity)
++			}
++		})
++	}
++}
++
++// TestReconcile_FromPV_VolumeCapacityPrecedence mirrors
++// TestReconcile_FromVSC_VolumeCapacityPrecedence for the clone-from-PV path: the
++// requested pvcTemplate size wins over a smaller source PV capacity, but the restored
++// volume never goes below what the source PV holds.
++func TestReconcile_FromPV_VolumeCapacityPrecedence(t *testing.T) {
++	tests := []struct {
++		name             string
++		requestedStorage *resource.Quantity
++		wantCapacity     int64
++	}{
++		{
++			name:             "success: requested size wins over a smaller source PV capacity",
++			requestedStorage: quantityPtr(resource.MustParse("10Gi")),
++			wantCapacity:     10 * 1024 * 1024 * 1024,
++		},
++		{
++			name:         "success: source PV capacity is used when no size is requested",
++			wantCapacity: 3 * 1024 * 1024 * 1024,
++		},
++		{
++			name:             "success: source PV capacity wins when larger than the requested size",
++			requestedStorage: quantityPtr(resource.MustParse("500Mi")),
++			wantCapacity:     3 * 1024 * 1024 * 1024,
++		},
++	}
++
++	for _, tt := range tests {
++		t.Run(tt.name, func(t *testing.T) {
++			ctrl := gomock.NewController(t)
++			defer ctrl.Finish()
++
++			mockSCLister := NewMockStorageClassLister(ctrl)
++			mockSCLister.storageClasses[vrrTestStorageClass] = ourStorageClass()
++
++			vrr := createTestVRR("test-vrr", "test-ns", "PersistentVolume", "source-pv")
++			if tt.requestedStorage != nil {
++				vrr.Spec.PvcTemplate.Resources.Requests = storagev1alpha1.ResourceList{
++					storagev1alpha1.ResourceStorage: *tt.requestedStorage,
++				}
++			}
++			sourcePV := csiPV("source-pv", vrrTestVolumeHandle)
++			// 3Gi rather than the 1Gi csiPV defaults to: an implementation that ignored the
++			// source capacity and fell through to defaultVolumeCapacityBytes would otherwise
++			// still satisfy the expectations below.
++			sourcePV.Spec.Capacity = v1.ResourceList{v1.ResourceStorage: resource.MustParse("3Gi")}
++
++			kubeClient := fakeclientset.NewSimpleClientset(sourcePV)
++
++			var gotRequiredBytes int64
++			mockCSIClient := &mockControllerClient{
++				createVolumeFunc: func(_ context.Context, req *csi.CreateVolumeRequest) (*csi.CreateVolumeResponse, error) {
++					gotRequiredBytes = req.CapacityRange.GetRequiredBytes()
++					// Mimic csi-driver-nfs: CapacityBytes 0 means "use the requested size".
++					return &csi.CreateVolumeResponse{Volume: &csi.Volume{VolumeId: "new-volume-id", CapacityBytes: 0}}, nil
++				},
++			}
++
++			e := newTestExecutor(mockCSIClient, mockSCLister, kubeClient, nil, nil)
++			if err := e.reconcile(context.Background(), vrr); err != nil {
++				t.Fatalf("reconcile failed: %v", err)
++			}
++
++			if gotRequiredBytes != tt.wantCapacity {
++				t.Errorf("CSI CreateVolumeRequest.CapacityRange.RequiredBytes = %d, want %d", gotRequiredBytes, tt.wantCapacity)
++			}
++
++			pvName := expectedPVName(t, vrr)
++			pv, err := kubeClient.CoreV1().PersistentVolumes().Get(context.Background(), pvName, metav1.GetOptions{})
++			if err != nil {
++				t.Fatalf("expected PV %s to exist: %v", pvName, err)
++			}
++			if got := pv.Spec.Capacity[v1.ResourceStorage]; got.Value() != tt.wantCapacity {
++				t.Errorf("PV Capacity = %s (%d bytes), want %d bytes", got.String(), got.Value(), tt.wantCapacity)
++			}
++
++			pvc, err := kubeClient.CoreV1().PersistentVolumeClaims(vrrTestTargetNamespace).Get(context.Background(), vrrTestTargetPVCName, metav1.GetOptions{})
++			if err != nil {
++				t.Fatalf("expected target PVC to exist: %v", err)
++			}
++			if got := pvc.Spec.Resources.Requests[v1.ResourceStorage]; got.Value() != tt.wantCapacity {
++				t.Errorf("PVC Resources.Requests[storage] = %s (%d bytes), want %d bytes", got.String(), got.Value(), tt.wantCapacity)
++			}
++		})
++	}
++}
++
++// TestCreatePVFromCSIResponse_CapacityFallback exercises the capacity fallback chain
++// directly: the driver-reported capacity wins when non-zero; otherwise requestedBytes
++// is used; otherwise defaultVolumeCapacityBytes is the last resort.
++func TestCreatePVFromCSIResponse_CapacityFallback(t *testing.T) {
++	sc := ourStorageClass()
++	volumeCaps := []*csi.VolumeCapability{
++		{
++			AccessType: getAccessTypeMount("ext4", nil),
++			AccessMode: &csi.VolumeCapability_AccessMode{Mode: csi.VolumeCapability_AccessMode_SINGLE_NODE_WRITER},
++		},
++	}
++
++	tests := []struct {
++		name           string
++		driverCapacity int64
++		requestedBytes int64
++		wantCapacity   int64
++	}{
++		{
++			name:           "success: driver-reported capacity wins when non-zero",
++			driverCapacity: 3 * 1024 * 1024 * 1024,
++			requestedBytes: 10 * 1024 * 1024 * 1024,
++			wantCapacity:   3 * 1024 * 1024 * 1024,
++		},
++		{
++			name:           "success: requestedBytes is used when driver reports zero capacity",
++			driverCapacity: 0,
++			requestedBytes: 5 * 1024 * 1024 * 1024,
++			wantCapacity:   5 * 1024 * 1024 * 1024,
++		},
++		{
++			name:           "success: defaultVolumeCapacityBytes is used when both driver and requestedBytes are zero",
++			driverCapacity: 0,
++			requestedBytes: 0,
++			wantCapacity:   defaultVolumeCapacityBytes,
++		},
++	}
++
++	for _, tt := range tests {
++		t.Run(tt.name, func(t *testing.T) {
++			volume := &csi.Volume{VolumeId: "test-volume-id", CapacityBytes: tt.driverCapacity}
++
++			pv, err := createPVFromCSIResponse(volume, sc, "test-pv", vrrTestDriverName, vrrTestIdentity, volumeCaps, "ext4",
++				nil, tt.requestedBytes, nil)
++			if err != nil {
++				t.Fatalf("createPVFromCSIResponse failed: %v", err)
++			}
++			if got := pv.Spec.Capacity[v1.ResourceStorage]; got.Value() != tt.wantCapacity {
++				t.Errorf("PV Capacity = %s (%d bytes), want %d bytes", got.String(), got.Value(), tt.wantCapacity)
++			}
++		})
 +	}
 +}
 +
@@ -2150,6 +2695,8 @@ index 0000000..d418169
 +func stringPtr(s string) *string { return &s }
 +
 +func int64Ptr(i int64) *int64 { return &i }
++
++func quantityPtr(q resource.Quantity) *resource.Quantity { return &q }
 +
 +// mockControllerClient is a minimal csi.ControllerClient stub for tests.
 +type mockControllerClient struct {

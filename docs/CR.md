@@ -136,9 +136,11 @@ Contract:
   template storage class and volume mode for every request. For a `VolumeSnapshotContent` source it
   uses the template's storage class, volume mode and access modes (default `ReadWriteOnce`), plus root
   `fsType` for Filesystem volumes. For a `PersistentVolume` source, the source PV is authoritative
-  for volume mode, access modes, filesystem type and capacity; corresponding template values are not
-  the effective restore shape. Neither path copies template labels/annotations or treats
-  `pvcTemplate.spec.resources.requests.storage` as authoritative.
+  for volume mode, access modes and filesystem type; corresponding template values are not the
+  effective restore shape. Capacity is the exception: both paths read
+  `pvcTemplate.spec.resources.requests.storage` and provision the larger of it and the source size
+  (`restoreSize` of the snapshot, or the source PV capacity), so the restored data always fits;
+  1Gi is used when neither is set. Neither path copies template labels/annotations.
 - Supported source kinds are `VolumeSnapshotContent` and `PersistentVolume`. The current controller
   and executor select a source by `kind` and `name`; `sourceRef.apiVersion`, `namespace`, and `uid` are
   not enforced against the live source. Backlog item #28 tracks source identity and admission
