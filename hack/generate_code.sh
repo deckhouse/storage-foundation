@@ -18,27 +18,29 @@
 
 set -euo pipefail
 
-CONTROLLER_GEN=controller-gen
 HEADER=./hack/boilerplate.txt
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
-if ! command -v "${CONTROLLER_GEN}" &>/dev/null; then
-  echo "controller-gen not found. Installing..."
-  go install sigs.k8s.io/controller-tools/cmd/controller-gen@v0.18.0
-  export PATH="$(go env GOPATH)/bin:$PATH"
-fi
+# controller-gen is pinned in hack/tools/go.mod and built into a temporary
+# directory. It used to be taken from PATH, with v0.18.0 installed only when
+# nothing was found there -- so the rendered manifests depended on whatever
+# controller-gen the machine happened to have.
+TOOLS_DIR="$(mktemp -d)"
+trap 'rm -rf "${TOOLS_DIR}"' EXIT
+
+echo "Building controller-gen (pinned in hack/tools/go.mod)..."
+go -C "${ROOT_DIR}/hack/tools" build -o "${TOOLS_DIR}" \
+    sigs.k8s.io/controller-tools/cmd/controller-gen
 
 echo "Generating deepcopy code for storage-foundation.deckhouse.io/v1alpha1 ..."
 
-${CONTROLLER_GEN} object:headerFile="${HEADER}" paths=./api/v1alpha1
+"${TOOLS_DIR}/controller-gen" object:headerFile="${HEADER}" paths=./api/v1alpha1
 
+# The CRD manifests are rendered and then enriched; that pair lives in its own
+# script because the shared .crds_generated_check CI job runs it by name. It also
+# owns the DataExport/DataImport exception that used to be an `rm -f` here.
 echo "Generating CRDs for storage-foundation.deckhouse.io/v1alpha1 ..."
-${CONTROLLER_GEN} crd:crdVersions=v1 output:crd:dir=./crds/internal paths=./api/v1alpha1
-
-# DataExport/DataImport CRDs are hand-curated in ./crds (they carry a non-standard `download`
-# subresource and CEL immutability rules that controller-gen markers cannot express). Drop the
-# auto-generated duplicates so the bundle does not ship two CRDs with the same metadata.name.
-rm -f ./crds/internal/storage-foundation.deckhouse.io_dataexports.yaml \
-      ./crds/internal/storage-foundation.deckhouse.io_dataimports.yaml
+"${ROOT_DIR}/hack/generate_crds.sh"
 
 echo "Done."
 
