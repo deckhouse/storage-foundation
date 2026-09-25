@@ -1,0 +1,403 @@
+# Unified fuzz image template.
+#
+# Minimal (sources live in *-artifact / *-golang-artifact after build):
+#   ---
+#   {{- $_ := set . "FuzzEngine" "go" }}
+#   {{- include "fuzz image" . }}
+#   → image {ModuleNamePrefix}{ImageName}-fuzz
+#   → fromImage + import from *-golang-artifact if present in werf.inc.yaml, else *-artifact
+# Put document separator "---" in werf.inc.yaml before include (not in this template).
+#
+# Optional: FuzzSrcAdd, FuzzSrcImage (override),
+#           FuzzImageName (base without or with -fuzz; examples:
+#             "helm" → helm-fuzz
+#             "{ImageName}-golang-artifact" → {ImageName}-golang-artifact-fuzz
+#             "{ImageName}-artifact-fuzz" → same; fromImage derived from that base),
+#           FuzzRun / FuzzPkg / FuzzTarget / FuzzTime (or FUZZ_* env).
+# Context wins over CI env.
+# FuzzSrcAdd is also used as the import destination and fuzz working directory.
+# Replay/list/run: `task fuzz:*`; task is installed outside the source module graph.
+# single Taskfile.fuzz.yml at module root is copied into each fuzz workdir as Taskfile.yml.
+{{- define "fuzz image" }}
+{{- if not .FuzzEngine }}
+  {{- fail "fuzz image: FuzzEngine is required (set .FuzzEngine before include)" }}
+{{- end }}
+{{- $engine := .FuzzEngine }}
+{{- $prefix := .ModuleNamePrefix | default "" }}
+{{- $fuzzRun := .FuzzRun | default (env "FUZZ_ENABLE_RUN" "false") }}
+{{- $fuzzPkg := .FuzzPkg | default (env "FUZZ_PKG" "") }}
+{{- $fuzzTarget := .FuzzTarget | default (env "FUZZ_TARGET" "") }}
+{{- $fuzzTime := .FuzzTime | default (env "FUZZ_TIME" "") }}
+{{- /* Base name without -fuzz; empty → ImageName. Suffix -fuzz is always added. */ -}}
+{{- $fuzzBase := .FuzzImageName | default "" }}
+{{- if not $fuzzBase }}
+  {{- $fuzzBase = .ImageName }}
+{{- end }}
+{{- $fuzzBase = trimSuffix "-fuzz" $fuzzBase }}
+{{- $fuzzImage := printf "%s%s-fuzz" $prefix $fuzzBase }}
+{{- /* Src/base image: FuzzSrcImage, else derive from FuzzImageName (*-golang-artifact / *-artifact), else werf.inc. */ -}}
+{{- $fuzzSrcImage := .FuzzSrcImage | default "" }}
+{{- if not $fuzzSrcImage }}
+  {{- if hasSuffix $fuzzBase "-golang-artifact" }}
+    {{- $fuzzSrcImage = printf "%s%s" $prefix $fuzzBase }}
+  {{- else if hasSuffix $fuzzBase "-artifact" }}
+    {{- $fuzzSrcImage = printf "%s%s" $prefix $fuzzBase }}
+  {{- else }}
+    {{- $inc := "" }}
+    {{- if .Files }}
+      {{- $inc = .Files.Get (printf "images/%s/werf.inc.yaml" .ImageName) }}
+    {{- end }}
+    {{- if contains "-golang-artifact" $inc }}
+      {{- $fuzzSrcImage = printf "%s%s-golang-artifact" $prefix .ImageName }}
+    {{- else }}
+      {{- $fuzzSrcImage = printf "%s%s-artifact" $prefix .ImageName }}
+    {{- end }}
+  {{- end }}
+{{- end }}
+{{- $fuzzSrcAdd := .FuzzSrcAdd | default "/src" }}
+image: {{ $fuzzImage }}
+fromImage: {{ $fuzzSrcImage }}
+final: false
+imageSpec:
+  config:
+    workingDir: {{ $fuzzSrcAdd | quote }}
+    labels:
+      io.deckhouse.fuzz.engine: {{ $engine | quote }}
+    env:
+      # Filled during install (not via /go/pkg mount — that path is outside the image).
+      GOMODCACHE: "/fuzz/gomod"
+git:
+  - add: {{ .ModuleDir }}/Taskfile.fuzz.yml
+    to: {{ $fuzzSrcAdd }}/Taskfile.yml
+    stageDependencies:
+      install:
+        - Taskfile.fuzz.yml
+import:
+  - image: {{ $fuzzSrcImage }}
+    add: {{ $fuzzSrcAdd }}
+    to: {{ $fuzzSrcAdd }}
+    before: install
+mount:
+{{ include "mount points for golang builds" . }}
+secrets:
+  - id: GOPROXY
+    value: {{ .GOPROXY }}
+  - id: CI_JOB_TOKEN
+    value: "{{ env "CI_JOB_TOKEN" }}"
+  - id: FUZZ_S3_ENDPOINT
+    env: FUZZ_S3_ENDPOINT
+  - id: FUZZ_S3_ACCESS_KEY
+    env: FUZZ_S3_ACCESS_KEY
+  - id: FUZZ_S3_SECRET_KEY
+    env: FUZZ_S3_SECRET_KEY
+  # Corpus layout: s3://anomaloys-materials/<repository>/<branch slug>/...
+  # CI sets FUZZ_S3_BRANCH_SLUG=main for _dev (PR builds never publish corpus).
+  - id: FUZZ_S3_REPOSITORY
+    env: FUZZ_S3_REPOSITORY
+  - id: FUZZ_S3_BRANCH_SLUG
+    env: FUZZ_S3_BRANCH_SLUG
+  - id: FUZZ_ENABLE_RUN
+    value: {{ $fuzzRun | quote }}
+  # werf rejects secrets with empty value: "" — omit when unused
+  {{- if $fuzzPkg }}
+  - id: FUZZ_PKG
+    value: {{ $fuzzPkg | quote }}
+  {{- end }}
+  {{- if $fuzzTarget }}
+  - id: FUZZ_TARGET
+    value: {{ $fuzzTarget | quote }}
+  {{- end }}
+  {{- if $fuzzTime }}
+  - id: FUZZ_TIME
+    value: {{ $fuzzTime | quote }}
+  {{- end }}
+shell:
+  install:
+  - |
+    set -eu
+    # rebuild bump 2026-08-10T09:30
+    export GOPROXY=$(cat /run/secrets/GOPROXY) CGO_ENABLED=0 GOOS=linux GOARCH=amd64
+    export CI_JOB_TOKEN=$(cat /run/secrets/CI_JOB_TOKEN)
+    export GOPRIVATE="github.com/*"
+    if [ -n "$CI_JOB_TOKEN" ]; then
+      echo "machine github.com login gitlab-ci-token password $CI_JOB_TOKEN" > ~/.netrc
+      chmod 600 ~/.netrc
+    fi
+
+    cd {{ $fuzzSrcAdd | quote }}
+
+    # git: go mod / go get need VCS; curl: download mc;
+    # python3: k8s fuzz-compliance runner (fuzzctl); ca-certificates: TLS;
+    # jq and AWS CLI: S3 restore/upload in the target Pod. ALT does not ship
+    # an awscli package, so only jq/unzip come from the distro repository.
+    # Prefer Deckhouse `pm` over apt-get: builder images often ship a stub apt-get
+    # that does not understand --no-install-recommends.
+    if ! command -v curl >/dev/null 2>&1 \
+      || ! command -v git >/dev/null 2>&1 \
+      || ! command -v python3 >/dev/null 2>&1 \
+      || ! command -v jq >/dev/null 2>&1 \
+      || ! command -v unzip >/dev/null 2>&1; then
+      if command -v pm >/dev/null 2>&1; then
+        pm install git curl python@3.12 ca-certificates jq unzip
+      elif command -v apk >/dev/null 2>&1; then
+        apk add --no-cache git curl python3 ca-certificates jq unzip
+      elif command -v apt-get >/dev/null 2>&1; then
+        apt-get update -y
+        apt-get install -y git curl python3 ca-certificates jq unzip
+      else
+        echo "git, curl, python3, jq and unzip are required on the fuzz base image" >&2
+        exit 1
+      fi
+    fi
+
+    if ! command -v aws >/dev/null 2>&1; then
+      AWS_CLI_DIR=/tmp/aws-cli-install
+      rm -rf "${AWS_CLI_DIR}"
+      mkdir -p "${AWS_CLI_DIR}"
+      curl -fsSL \
+        -o "${AWS_CLI_DIR}/awscliv2.zip" \
+        "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip"
+      unzip -q "${AWS_CLI_DIR}/awscliv2.zip" -d "${AWS_CLI_DIR}"
+      chmod +x "${AWS_CLI_DIR}/aws/install"
+      "${AWS_CLI_DIR}/aws/install" \
+        --bin-dir /usr/local/bin \
+        --install-dir /usr/local/aws-cli
+      rm -rf "${AWS_CLI_DIR}"
+    fi
+
+    jq --version
+    aws --version
+
+    # Download modules straight into the image layer. werf mounts /go/pkg from the
+    # runner host — if GOMODCACHE stays default, nothing is stored in the image and
+    # a later `cp -a /go/pkg/mod → /fuzz/gomod` takes forever on fat modules (helm).
+    export GOMODCACHE=/fuzz/gomod
+    mkdir -p "${GOMODCACHE}"
+
+    go mod download
+
+    # Install task without adding it to the imported source module. `go get -tool`
+    # followed by `go install tool` mutates the dependency graph and builds every
+    # declared upstream tool, which breaks multi-tool modules such as kustomize.
+    GOBIN=/usr/local/bin go install github.com/go-task/task/v3/cmd/task@v3.50.0
+
+    echo "Download fuzz corpus overlay from S3"
+
+    # AWS CLI rather than the MinIO client: dl.min.io answers 410 Gone since MinIO archived mc. Same
+    # replacement as upstream deckhouse (#23016).
+    fuzz_s3() {
+      AWS_CA_BUNDLE="${AWS_CA_BUNDLE:-/etc/ssl/certs/ca-certificates.crt}" \
+      AWS_ACCESS_KEY_ID="$(cat /run/secrets/FUZZ_S3_ACCESS_KEY)" \
+      AWS_SECRET_ACCESS_KEY="$(cat /run/secrets/FUZZ_S3_SECRET_KEY)" \
+      aws --endpoint-url "$(cat /run/secrets/FUZZ_S3_ENDPOINT)" \
+        --region us-east-1 "$@"
+    }
+
+    FUZZ_S3_REPOSITORY="$(cat /run/secrets/FUZZ_S3_REPOSITORY)"
+    FUZZ_S3_BRANCH_SLUG="$(cat /run/secrets/FUZZ_S3_BRANCH_SLUG)"
+    if [ -z "${FUZZ_S3_REPOSITORY}" ] || [ -z "${FUZZ_S3_BRANCH_SLUG}" ]; then
+      echo "FUZZ_S3_REPOSITORY and FUZZ_S3_BRANCH_SLUG are required for corpus sync" >&2
+      exit 1
+    fi
+
+    # s3://anomaloys-materials/<repository>/<branch slug>/<component path>/<s3_key>/
+    S3_FUZZING_PATH="s3://anomaloys-materials/${FUZZ_S3_REPOSITORY}/${FUZZ_S3_BRANCH_SLUG}/"
+    echo "Corpus S3 path: ${S3_FUZZING_PATH}"
+    TMP_CORPUS="/tmp/fuzzing-s3"
+    RESTORED_FILES="/tmp/fuzz-restored-files.txt"
+
+    rm -rf "${TMP_CORPUS}"
+    mkdir -p "${TMP_CORPUS}"
+    : > "${RESTORED_FILES}"
+
+    # Empty/missing corpus is normal for a first run — continue to replay.
+    if fuzz_s3 s3 ls "${S3_FUZZING_PATH}" 2>/dev/null | grep -q .; then
+      echo "Fuzz corpus found in S3, download overlay"
+
+      if fuzz_s3 s3 sync "${S3_FUZZING_PATH}" "${TMP_CORPUS}/" --only-show-errors >/dev/null; then
+        # A go.work makes plain `go list -m` print every workspace module.
+        # Corpus paths contain the current module, so query it with
+        # workspace mode disabled while leaving normal test commands untouched.
+        MODULE_PATH="$(GOWORK=off go list -m)"
+        echo "module path: ${MODULE_PATH}"
+
+        find "${TMP_CORPUS}" \
+          -type d \
+          -path "*/corpus/gocache-fuzz/${MODULE_PATH}/*" \
+          > /tmp/fuzz-target-dirs.txt || true
+
+        restored=0
+
+        while IFS= read -r target_dir; do
+          target="$(basename "${target_dir}")"
+
+          case "${target}" in
+            Fuzz*) ;;
+            *) continue ;;
+          esac
+
+          if ! find "${target_dir}" -maxdepth 1 -type f | grep -q .; then
+            continue
+          fi
+
+          prefix="/corpus/gocache-fuzz/${MODULE_PATH}/"
+          case "${target_dir}" in
+            *"${prefix}"*) rel="${target_dir##*${prefix}}" ;;
+            *) echo "skip: no module prefix in ${target_dir}"; continue ;;
+          esac
+          # rel is pkg-relative ("pkg/sub" or "" for module root); strip trailing target
+          pkg_rel="${rel%"${target}"}"; pkg_rel="${pkg_rel}"
+          if [ -n "${pkg_rel}" ]; then
+            seed_dir="${pkg_rel}/testdata/fuzz/${target}"
+          else
+            seed_dir="testdata/fuzz/${target}"
+          fi
+
+          echo "restore corpus"
+          echo "from: ${target_dir}"
+          echo "to: ${seed_dir}"
+
+          mkdir -p "${seed_dir}"
+
+          copied=0
+
+          for corpus_file in "${target_dir}"/*; do
+            if [ ! -f "${corpus_file}" ]; then
+              continue
+            fi
+
+            dst="${seed_dir}/$(basename "${corpus_file}")"
+
+            if [ -e "${dst}" ]; then
+              continue
+            fi
+
+            cp "${corpus_file}" "${dst}"
+            printf '%s\n' "${dst}" >> "${RESTORED_FILES}"
+
+            copied=$((copied + 1))
+          done
+
+          echo "copied corpus files for ${target}: ${copied}"
+          restored=$((restored + copied))
+        done < /tmp/fuzz-target-dirs.txt
+
+        echo "restored corpus files: ${restored}"
+        echo "restored file list: ${RESTORED_FILES}"
+      else
+        echo "Failed to download fuzz corpus overlay, continue without it"
+      fi
+    else
+      echo "No fuzz corpus found in S3 yet, continue without it"
+    fi
+
+    echo "Run fuzz replay"
+    # Integration trees often need a live cluster and/or private VCS (github.com)
+    # even during package discovery. Drop only known-bad trees before replay.
+    for bad in test/e2e tests/e2e tests/ginkgo; do
+      if [ -d "${bad}" ]; then
+        echo "remove ${bad} before fuzz replay"
+        rm -rf "${bad}"
+      fi
+    done
+    git config --global user.name "fuzz"
+    git config --global user.email "fuzz@local"
+    # Build-time regression replay is intentionally orchestrated here rather than
+    # exposed as an extra Taskfile command: Taskfile.fuzz.yml is the platform ABI.
+    # Use fuzz:list as the only discovery source, just like fuzzing-compliance.
+    FUZZ_LIST_LOG=/tmp/fuzz-list.log
+    FUZZ_TARGETS_FILE=/tmp/fuzz-targets.txt
+    list_rc=0
+    task fuzz:list > "${FUZZ_LIST_LOG}" 2>&1 || list_rc=$?
+    cat "${FUZZ_LIST_LOG}"
+
+    awk '
+      /^Fuzz[[:alnum:]_]*$/ { targets[++count] = $0; next }
+      /^(ok|FAIL|\?)[[:space:]]+/ {
+        package = $2
+        for (i = 1; i <= count; i++) print package "|" targets[i]
+        delete targets
+        count = 0
+      }
+      END { if (count != 0) exit 2 }
+    ' "${FUZZ_LIST_LOG}" > "${FUZZ_TARGETS_FILE}"
+
+    if [ ! -s "${FUZZ_TARGETS_FILE}" ]; then
+      echo "fuzz:list returned no Go fuzz targets (rc=${list_rc})" >&2
+      exit 1
+    fi
+    if [ "${list_rc}" -ne 0 ]; then
+      echo "fuzz:list exited ${list_rc}, but valid targets were parsed; continue replay"
+    fi
+
+    while IFS='|' read -r fuzz_pkg fuzz_target; do
+      echo "Replay fuzz corpus: package=${fuzz_pkg} target=${fuzz_target}"
+      FUZZ_PKG="${fuzz_pkg}" FUZZ_TARGET="${fuzz_target}" task fuzz:replay
+    done < "${FUZZ_TARGETS_FILE}"
+    rm -f "${FUZZ_LIST_LOG}" "${FUZZ_TARGETS_FILE}"
+
+    FUZZ_ENABLE_RUN="$(cat /run/secrets/FUZZ_ENABLE_RUN 2>/dev/null || true)"
+    FUZZ_PKG="$(cat /run/secrets/FUZZ_PKG 2>/dev/null || true)"
+    FUZZ_TARGET="$(cat /run/secrets/FUZZ_TARGET 2>/dev/null || true)"
+    FUZZ_TIME="$(cat /run/secrets/FUZZ_TIME 2>/dev/null || true)"
+    export FUZZ_PKG FUZZ_TARGET
+    if [ -n "${FUZZ_TIME}" ]; then
+      export FUZZ_TIME
+    fi
+
+    case "${FUZZ_ENABLE_RUN}" in
+      true|TRUE|1|yes|YES)
+        if [ -z "${FUZZ_PKG}" ] || [ -z "${FUZZ_TARGET}" ]; then
+          echo "FUZZ_ENABLE_RUN is set, but FUZZ_PKG and FUZZ_TARGET are required" >&2
+          exit 1
+        fi
+        echo "FUZZ_ENABLE_RUN=${FUZZ_ENABLE_RUN}: fuzz:run pkg=${FUZZ_PKG} target=${FUZZ_TARGET} time=${FUZZ_TIME:-until-stop}"
+        task fuzz:run
+        ;;
+      *)
+        echo "FUZZ_ENABLE_RUN=${FUZZ_ENABLE_RUN:-false}: skip active fuzzing"
+        ;;
+    esac
+
+    echo "Cleanup restored fuzz corpus"
+
+    if [ -f "${RESTORED_FILES}" ]; then
+      while IFS= read -r restored_file; do
+        if [ -n "${restored_file}" ] && [ -f "${restored_file}" ]; then
+          echo "remove restored corpus file: ${restored_file}"
+          rm -f "${restored_file}"
+        fi
+      done < "${RESTORED_FILES}"
+    else
+      echo "No restored fuzz corpus file list found, skip cleanup"
+    fi
+
+    find . \
+      -type d \
+      -path "*/testdata/fuzz/Fuzz*" \
+      -empty \
+      -exec rmdir {} \; 2>/dev/null || true
+
+    find . \
+      -type d \
+      -path "*/testdata/fuzz" \
+      -empty \
+      -exec rmdir {} \; 2>/dev/null || true
+
+    rm -rf "${TMP_CORPUS}"
+    rm -f /tmp/fuzz-target-dirs.txt
+    rm -f "${RESTORED_FILES}"
+
+    go clean -cache -testcache -fuzzcache 2>/dev/null || true
+
+    echo "restored fuzz corpus cleanup done"
+
+    # Non-root k8s: go fuzz writes failing seeds to pkg/testdata/fuzz/<Fuzz*>;
+    # coverage-watch syncs GOCACHE there. Root-owned /src → mkdir permission denied → FAIL.
+    echo "Make fuzz sources writable for non-root fuzz / testdata"
+    chmod -R a+rwX .
+
+    # Modules already live in /fuzz/gomod (image layer). Make readable/writable for non-root.
+    chmod -R a+rwX /fuzz/gomod
+    rm -f ~/.netrc
+{{- end }}

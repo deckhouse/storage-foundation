@@ -1,0 +1,118 @@
+From 5fc849dbf5cef193d8a5cea77d606bacdaa93ec6 Mon Sep 17 00:00:00 2001
+From: Vasily Oleynikov <vasily.oleynikov@flant.com>
+Date: Mon, 17 Aug 2026 18:35:33 +0300
+Subject: [PATCH] Add fuzz test for validateGroupKind
+
+---
+ .../data_source_validator_fuzz_test.go        | 99 +++++++++++++++++++
+ 1 file changed, 99 insertions(+)
+ create mode 100644 pkg/data-source-validator/data_source_validator_fuzz_test.go
+
+diff --git a/pkg/data-source-validator/data_source_validator_fuzz_test.go b/pkg/data-source-validator/data_source_validator_fuzz_test.go
+new file mode 100644
+index 00000000..272c288c
+--- /dev/null
++++ b/pkg/data-source-validator/data_source_validator_fuzz_test.go
+@@ -0,0 +1,99 @@
++/*
++Copyright 2026 Flant JSC
++
++Licensed under the Apache License, Version 2.0 (the "License");
++you may not use this file except in compliance with the License.
++You may obtain a copy of the License at
++
++    http://www.apache.org/licenses/LICENSE-2.0
++
++Unless required by applicable law or agreed to in writing, software
++distributed under the License is distributed on an "AS IS" BASIS,
++WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++See the License for the specific language governing permissions and
++limitations under the License.
++*/
++
++package data_source_validator
++
++import (
++	"testing"
++
++	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
++
++	popv1beta1 "github.com/kubernetes-csi/volume-data-source-validator/client/apis/volumepopulator/v1beta1"
++)
++
++// FuzzValidateGroupKind fuzzes validateGroupKind, the decision function
++// behind every PVC admitted by this controller. Unlike most of the CRDs
++// this module deals with, PersistentVolumeClaim.spec.dataSourceRef.{apiGroup,kind}
++// are free-form strings on a built-in core type with no enum to constrain
++// them, so any namespaced user can make gk arbitrary. validateGroupKind
++// must never panic and must only report a match when a populator with a
++// matching SourceKind actually exists.
++func FuzzValidateGroupKind(f *testing.F) {
++	const popName = "fuzz-populator"
++
++	f.Add("", "PersistentVolumeClaim", "valid.storage.k8s.io", "Valid")
++	f.Add("snapshot.storage.k8s.io", "VolumeSnapshot", "valid.storage.k8s.io", "Valid")
++	f.Add("valid.storage.k8s.io", "Valid", "valid.storage.k8s.io", "Valid")
++	f.Add("invalid.storage.k8s.io", "Invalid", "valid.storage.k8s.io", "Valid")
++	f.Add("", "", "", "")
++	f.Add("", "PersistentVolumeClaim", "", "PersistentVolumeClaim")
++	f.Add("snapshot.storage.k8s.io", "VolumeSnapshot", "", "PersistentVolumeClaim")
++	f.Add("", "persistentvolumeclaim", "", "persistentvolumeclaim")
++	f.Add("", "PersistentVolumeClaim", "", "")
++	f.Add("valid.storage.k8s.io", "Valid", "", "")
++	f.Add("", "", "valid.storage.k8s.io", "Valid")
++	f.Add("group", "Kind", "group", "Kind")
++	f.Add("group", "Kind", "GROUP", "KIND")
++	f.Add("a.b.c/../d", "Kind", "a.b.c/../d", "Kind")
++	f.Add("group\x00", "Kind", "group\x00", "Kind")
++	f.Add("group", "Kind\n", "group", "Kind\n")
++	f.Add(" группа ", "Тип", " группа ", "Тип")
++	f.Add("very.long.group.name.that.keeps.going.on.and.on.and.on.and.on", "Kind", "very.long.group.name.that.keeps.going.on.and.on.and.on.and.on", "Kind")
++	f.Add("group", "Kind", "group", "Kindx")
++	f.Add("group", "Kind", "groupx", "Kind")
++	f.Add("", "PersistentVolumeClaim ", "", "PersistentVolumeClaim")
++	f.Add("Snapshot.storage.k8s.io", "VolumeSnapshot", "", "")
++
++	f.Fuzz(func(t *testing.T, group, kind, popGroup, popKind string) {
++		ctrl := new(populatorController)
++		ctrl.metrics = new(FakeMetricsManager)
++
++		populator := popv1beta1.VolumePopulator{
++			TypeMeta: metav1.TypeMeta{
++				Kind:       "VolumePopulator",
++				APIVersion: "populator.storage.k8s.io/v1beta1",
++			},
++			ObjectMeta: metav1.ObjectMeta{
++				Name: popName,
++			},
++			SourceKind: metav1.GroupKind{
++				Group: popGroup,
++				Kind:  popKind,
++			},
++		}
++		ctrl.popLister = makeFakeLister(&populator)
++
++		gk := metav1.GroupKind{Group: group, Kind: kind}
++
++		valid, err := ctrl.validateGroupKind(gk)
++		if err != nil {
++			t.Fatalf("validateGroupKind(%+v) returned an unexpected error: %v", gk, err)
++		}
++
++		switch gk {
++		case pvcGK, volumeSnapshotGK:
++			if !valid {
++				t.Fatalf("validateGroupKind(%+v) = false, want true: PVC and VolumeSnapshot are always allowed", gk)
++			}
++			return
++		}
++
++		expected := gk == (metav1.GroupKind{Group: popGroup, Kind: popKind})
++		if valid != expected {
++			t.Fatalf("validateGroupKind(%+v) = %v, want %v (populator SourceKind=%+v)", gk, valid, expected, populator.SourceKind)
++		}
++	})
++}
+-- 
+2.43.0
+

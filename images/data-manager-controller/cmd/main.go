@@ -40,6 +40,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/cache"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/controller"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
 	"sigs.k8s.io/controller-runtime/pkg/log"
@@ -60,6 +61,29 @@ import (
 )
 
 var syncPeriod = time.Hour
+
+// maxConcurrentDataExports lets the DataExport controller work on several DataExports at once. The
+// controller-runtime default is 1, which serializes them, and a DataExport reconcile is long: it waits for
+// the exporter Deployment to come up (up to five minutes) and, on the snapshot path, for the restore to
+// provision and bind the export volume as well. One slow export therefore holds up every other one, so two
+// users creating an export at the same time means the second waits out the first.
+//
+// It is raised for the DataExport controller ONLY. DataImportReconciler keeps the object it is working on
+// and its generated names as fields on the reconciler struct, which is shared across reconciles -- letting
+// two of those run at once is a data race, not a speed-up. Anything that raises concurrency there has to
+// move that state into the call chain first.
+const maxConcurrentDataExports = 4
+
+// The client-go defaults (QPS=5, Burst=10) are set for a single-threaded consumer, and a reconcile here is
+// mostly API calls: reads of the PVC, the PV, the Deployment and the snapshot objects, plus status patches.
+// With several reconciles in flight those defaults become the limit instead of the API server, and the cost
+// shows up as "Waited for ... due to client-side throttling" in the log -- which reads as a slow cluster
+// rather than a throttled client. Raising the ceiling with the concurrency keeps the bottleneck where it
+// belongs. The values match the ones the module's other controller already uses (images/controller).
+const (
+	kubeClientQPS   = 200
+	kubeClientBurst = 400
+)
 
 func main() {
 	cfgParams := config.NewConfig()
@@ -133,6 +157,10 @@ func loadCubeConfig() (*rest.Config, error) {
 		log.Log.Error(err, "Failed to load cube config")
 		return nil, err
 	}
+
+	// See the note on kubeClientQPS: the library defaults throttle the client before the API server does.
+	k8sConfig.QPS = kubeClientQPS
+	k8sConfig.Burst = kubeClientBurst
 
 	return k8sConfig, nil
 }
@@ -241,6 +269,7 @@ func createController(manager manager.Manager, cfgParams *config.Options) error 
 	err = ctrl.
 		NewControllerManagedBy(manager).
 		For(&dev1alpha1.DataExport{}).
+		WithOptions(controller.Options{MaxConcurrentReconciles: maxConcurrentDataExports}).
 		Watches(
 			&appsv1.Deployment{},
 			handler.EnqueueRequestsFromMapFunc(exportCreateRequest),

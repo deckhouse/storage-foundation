@@ -1,0 +1,62 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  labels:
+    app: data-exporter
+  name: deploy-for-pvc-10lreb7bdr3f9ubq
+  namespace: d8-storage-foundation
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: data-exporter
+      storage-foundation.deckhouse.io/storage-manager-deployment-name: deploy-for-pvc-10lreb7bdr3f9ubq
+  strategy: {}
+  template:
+    metadata:
+      annotations:
+        storage-foundation.deckhouse.io/storage-manager-name: test-de
+        storage-foundation.deckhouse.io/storage-manager-namespace: test-ns
+      labels:
+        app: data-exporter
+        storage-foundation.deckhouse.io/storage-manager-deployment-name: deploy-for-pvc-10lreb7bdr3f9ubq
+    spec:
+      containers:
+      - args:
+        - --mode=filesystem
+        - --path=/mnt/filesystem-storage
+        - --port=8085
+        - --ttl=10m
+        - --data-export-namespace=test-ns
+        - --data-export-name=test-de
+        - --export-target-kind-short=pvc
+        - --export-target-name=test-pvc
+        - --data-export-ca-secret-name=ca-secret-for-pvc-10lreb7bdr3f9ubq
+        - --data-export-service-name=service-for-pvc-10lreb7bdr3f9ubq
+        - --controller-namespace=d8-storage-foundation
+        env:
+        - name: POD_IP
+          valueFrom:
+            fieldRef:
+              fieldPath: status.podIP
+        image: registry.example.com/storage/data-exporter:golden
+        name: data-exporter
+        ports:
+        - containerPort: 8085
+          name: http
+        resources: {}
+        securityContext:
+          readOnlyRootFilesystem: true
+          runAsUser: 0
+        volumeMounts:
+        - mountPath: /mnt/filesystem-storage
+          name: export-pvc
+      imagePullSecrets:
+      - name: storage-foundation-module-registry
+      serviceAccountName: data-exporter
+      volumes:
+      - name: export-pvc
+        persistentVolumeClaim:
+          claimName: pvc-for-pvc-10lreb7bdr3f9ubq
+          readOnly: true
+status: {}

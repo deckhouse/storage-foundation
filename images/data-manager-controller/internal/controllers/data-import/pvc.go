@@ -149,10 +149,25 @@ func handleExistingPVC(ctx context.Context, client client.Client, existingPVC *c
 }
 
 func needsPVCSpecUpdate(existingPVC *corev1.PersistentVolumeClaim, newPVC *corev1.PersistentVolumeClaim) bool {
-	return !reflect.DeepEqual(existingPVC.Spec.AccessModes, newPVC.Spec.AccessModes) ||
-		!reflect.DeepEqual(existingPVC.Spec.Resources.Requests, newPVC.Spec.Resources.Requests) ||
-		!ptrEqual(existingPVC.Spec.StorageClassName, newPVC.Spec.StorageClassName) ||
-		!ptrEqual(existingPVC.Spec.VolumeMode, newPVC.Spec.VolumeMode)
+	if !reflect.DeepEqual(existingPVC.Spec.AccessModes, newPVC.Spec.AccessModes) {
+		return true
+	}
+	if !ptrEqual(existingPVC.Spec.StorageClassName, newPVC.Spec.StorageClassName) {
+		return true
+	}
+	if !ptrEqual(existingPVC.Spec.VolumeMode, newPVC.Spec.VolumeMode) {
+		return true
+	}
+
+	// resource.Quantity carries unexported state -- the parsed value, the suffix format and a cached
+	// string -- so reflect.DeepEqual compares the representation and not the amount. The same request
+	// survives a round-trip through the API server in a different representation, and comparing it that
+	// way reports a difference that is not there. What follows from a false positive is not a harmless
+	// extra write: nearly all of PersistentVolumeClaim.spec is immutable, so the update is rejected and
+	// the reconcile fails on every pass. Cmp compares the amounts.
+	existingStorage := existingPVC.Spec.Resources.Requests[corev1.ResourceStorage]
+	newStorage := newPVC.Spec.Resources.Requests[corev1.ResourceStorage]
+	return existingStorage.Cmp(newStorage) != 0
 }
 
 func ptrEqual[T comparable](a, b *T) bool {

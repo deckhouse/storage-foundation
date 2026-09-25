@@ -1078,7 +1078,7 @@ func TestPatchPVLabelAnnotationsClaimRef(t *testing.T) {
 	fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(pv).Build()
 	reconciler := createTestReconciler(fakeClient, fakeClient, createTestConfig())
 
-	err := reconciler.patchPVLabelAnnotationsClaimRef(context.Background(), pv, exportPVC, dataExport, testNames, testUserPVCName)
+	err := reconciler.patchPVLabelAnnotationsClaimRef(context.Background(), pv, exportPVC, dataExport, testNames, testUserPVCName, pvPatchRebind)
 	require.NoError(t, err)
 
 	// Verify PV was updated

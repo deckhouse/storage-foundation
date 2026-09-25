@@ -1,0 +1,30 @@
+args:
+- --mode=filesystem
+- --path=/mnt/filesystem-storage
+- --port=8085
+- --ttl=10m
+- --data-export-namespace=test-ns
+- --data-export-name=test-di
+- --export-target-kind-short=pvc
+- --export-target-name=test-pvc
+- --data-export-ca-secret-name=ca-secret-for-pvc-p7ftjbdsvlkm1lev
+- --data-export-service-name=service-for-pvc-p7ftjbdsvlkm1lev
+- --controller-namespace=d8-storage-foundation
+- --operation=import
+env:
+- name: POD_IP
+  valueFrom:
+    fieldRef:
+      fieldPath: status.podIP
+image: registry.example.com/storage/data-exporter:golden
+name: server
+ports:
+- containerPort: 8085
+  name: http
+resources: {}
+securityContext:
+  readOnlyRootFilesystem: true
+  runAsUser: 0
+volumeMounts:
+- mountPath: /mnt/filesystem-storage
+  name: export-pvc

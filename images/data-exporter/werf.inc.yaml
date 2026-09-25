@@ -69,3 +69,9 @@ import:
 imageSpec:
   config:
     entrypoint: ["/{{ $.ImageName }}"]
+
+# Fuzz image (.werf/defines/fuzz.tmpl).
+---
+{{- $_ := set . "FuzzEngine" "go" }}
+{{- $_ := set . "FuzzSrcAdd" "/src/images/data-exporter" }}
+{{- include "fuzz image" . }}

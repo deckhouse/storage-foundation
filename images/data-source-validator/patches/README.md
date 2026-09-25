@@ -14,3 +14,13 @@ clear the findings reported by Trivy; this also pulls the transitive
 the pinned upstream version, applying the existing patches, then
 `go get`/`go mod tidy` and `git format-patch -1`; touches only
 `go.mod` / `go.sum` (the build re-runs `go mod vendor`/`download`).
+
+## 003-Add-fuzz-test-for-validateGroupKind.patch
+
+Adds FuzzValidateGroupKind, fuzzing validateGroupKind — the decision
+function behind every PVC this controller admits. Unlike the CRDs this
+module deals with elsewhere, PersistentVolumeClaim.spec.dataSourceRef.
+{apiGroup,kind} are free-form strings on a built-in core type with no
+enum to constrain them, so gk is effectively user-controlled in
+production. Adds a new file only, so it is independent of the two
+patches before it.

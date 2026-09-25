@@ -69,7 +69,7 @@ func MakeServerContainer(ctx context.Context, client client.Client, cfg ServerCo
 	case corev1.PersistentVolumeBlock:
 		mode = "block"
 		path = BlockMountPath
-		securityContext = &corev1.SecurityContext{RunAsUser: &[]int64{0}[0]}
+		securityContext = &corev1.SecurityContext{RunAsUser: &[]int64{0}[0], ReadOnlyRootFilesystem: &[]bool{true}[0]}
 		volumeDevices = []corev1.VolumeDevice{
 			{
 				Name:       cfg.VolumeName,
@@ -79,7 +79,7 @@ func MakeServerContainer(ctx context.Context, client client.Client, cfg ServerCo
 	case corev1.PersistentVolumeFilesystem:
 		mode = "filesystem"
 		path = FilesystemMountPath
-		securityContext = &corev1.SecurityContext{RunAsUser: &[]int64{0}[0]}
+		securityContext = &corev1.SecurityContext{RunAsUser: &[]int64{0}[0], ReadOnlyRootFilesystem: &[]bool{true}[0]}
 		volumeMounts = []corev1.VolumeMount{
 			{
 				Name:      cfg.VolumeName,

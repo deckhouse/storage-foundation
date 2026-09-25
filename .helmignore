@@ -12,6 +12,7 @@ images
 images_digests.json
 lib
 Makefile
+Taskfile.fuzz.yml
 monitoring_test
 openapi
 release.yaml

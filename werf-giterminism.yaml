@@ -15,6 +15,13 @@ config:
       - ACTIONS_ID_TOKEN_REQUEST_TOKEN
       - VAULT_KEY
       - WERF_SIGN_KEY
+      # Read by .werf/defines/fuzz.tmpl to parameterize the fuzz images: FUZZ_ENABLE_RUN gates
+      # whether the image runs a target at build time, the other three select it. CI_JOB_TOKEN is
+      # matched by /CI_.+/ above for this list, but the secrets list below needs it by name.
+      - FUZZ_ENABLE_RUN
+      - FUZZ_PKG
+      - FUZZ_TARGET
+      - FUZZ_TIME
     allowUncommittedFiles:
       - "base_images.yml"
   secrets:
@@ -23,6 +30,13 @@ config:
       - SOURCE_REPO
       - DISTRO_PACKAGES_PROXY
       - GO_PRIVATE_TOKEN
+      # Fuzz images (.werf/defines/fuzz.tmpl): the corpus is fetched with the job token, and the
+      # target selection is passed in as build secrets rather than baked into the digest.
+      - CI_JOB_TOKEN
+      - FUZZ_ENABLE_RUN
+      - FUZZ_PKG
+      - FUZZ_TARGET
+      - FUZZ_TIME
     allowEnvVariables:
       - REGISTRY_USER
       - REGISTRY_PASSWORD
@@ -33,6 +47,12 @@ config:
       - TRANSIT_SECRET_ENGINE_PATH
       - ACTIONS_ID_TOKEN_REQUEST_TOKEN
       - ACTIONS_ID_TOKEN_REQUEST_URL
+      # S3 bucket holding the fuzz corpus (.werf/defines/fuzz.tmpl).
+      - FUZZ_S3_ENDPOINT
+      - FUZZ_S3_ACCESS_KEY
+      - FUZZ_S3_SECRET_KEY
+      - FUZZ_S3_REPOSITORY
+      - FUZZ_S3_BRANCH_SLUG
   stapel:
     mount:
       allowBuildDir: true

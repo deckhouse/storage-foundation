@@ -317,6 +317,37 @@ Definitions:
       attribute=hash.md5  — return MD5 for regular files
 ```
 
+Response (regular file):
+
+```http
+    HTTP/1.1 200 OK
+    Content-Type: application/octet-stream
+    Content-Length: <size>
+    Content-Disposition: attachment; filename=<basename>
+    X-Attribute-Uid: <uid>
+    X-Attribute-Gid: <gid>
+    X-Attribute-Permissions: <perm>
+    X-Attribute-Modtime: <RFC3339>
+    X-Attribute-Hash-Md5: <md5>  # only if attribute=hash.md5 was requested
+    X-Type: file
+
+    <file content>
+```
+
+Response (symbolic link) — the link is reported, never followed, so a client copying a tree recreates the link rather than duplicating its target:
+
+```http
+    HTTP/1.1 200 OK
+    Content-Type: application/x-symlink
+    Content-Length: 0        # constant for a symbolic link
+    X-Attribute-Uid: <uid>
+    X-Attribute-Gid: <gid>
+    X-Attribute-Permissions: <perm>
+    X-Attribute-Modtime: <RFC3339>
+    X-Link-Target: /dir/file
+    X-Type: link
+```
+
 - Directory listing
 
 ```http
@@ -325,11 +356,28 @@ Definitions:
     Query (optional): attribute=stat | attribute=hash.md5
 ```
 
+Response:
+
+```http
+    HTTP/1.1 200 OK
+    Content-Type: application/json
+    Transfer-Encoding: chunked
+    X-Attribute-Uid: <uid>
+    X-Attribute-Gid: <gid>
+    X-Attribute-Permissions: <perm>
+    X-Attribute-Modtime: <RFC3339>
+    X-Type: dir
+
+    {"apiVersion":"v1","items":[{"name":"1.txt","size":12,"modTime":"2025-04-01 08:02:00.228156524 +0000 UTC","type":"file"}]}
+```
+
 - Metadata without body
 
 ```http
     HEAD /api/v1/files/{path|path/} HTTP/1.1
 ```
+
+The response carries the same headers as the corresponding GET (file, directory or symbolic link) with no body. `X-Type` is what distinguishes the three cases, so a client can classify an entry without fetching it.
 
 Filesystem errors (main):
 
@@ -348,11 +396,24 @@ Filesystem errors (main):
     GET /api/v1/block HTTP/1.1
 ```
 
+Response:
+
+```http
+    HTTP/1.1 200 OK
+    Content-Type: application/octet-stream
+    Content-Length: <device_size>
+    Content-Disposition: attachment; filename=data.img
+
+    <raw block content>
+```
+
 - Metadata without body
 
 ```http
     HEAD /api/v1/block HTTP/1.1
 ```
+
+The response repeats the headers of the GET above with no body, which is how a client learns the device size before starting a download.
 
 ### HTTP API: data import
 
@@ -373,11 +434,31 @@ All endpoints are available via the short path `/api/v1/files|block` and the ful
     X-Attribute-ModTime: RFC3339 timestamp (e.g., 2024-12-27T10:16:53.4537715+03:00)
 ```
 
+Partial upload response — `X-Next-Offset` is where the next chunk must start:
+
+```http
+    HTTP/1.1 204 No Content
+    X-Next-Offset: 10
+```
+
+Completed upload response (written size reached `X-Content-Length`):
+
+```http
+    HTTP/1.1 201 Created
+```
+
 - Query current upload progress
 
 ```http
     HEAD /api/v1/files/{path} HTTP/1.1
     Content-Length: 0
+```
+
+Response:
+
+```http
+    HTTP/1.1 200 OK
+    X-Next-Offset: 10
 ```
 
 - Finish import (signal to stop the file server)
@@ -386,6 +467,29 @@ All endpoints are available via the short path `/api/v1/files|block` and the ful
     POST /api/v1/finished HTTP/1.1
     Content-Length: 0
 ```
+
+Response:
+
+```http
+    HTTP/1.1 204 No Content
+```
+
+A `POST` to the data endpoint itself (`/api/v1/files/{path}` or `/api/v1/block`) completes the import as well and answers `200 OK`. Both routes do the same thing; `/api/v1/finished` is the one to prefer, because it does not require a path.
+
+Filesystem import errors:
+
+```http
+    400 Bad Request           — missing or invalid required headers; invalid X-Offset / X-Content-Length / X-Attribute-ModTime
+    401 Unauthorized          — missing, empty or malformed credentials
+    403 Forbidden             — not permitted to write to the filesystem
+    404 Not Found             — HEAD for a file that does not exist
+    405 Method Not Allowed    — methods other than PUT/HEAD/POST
+    409 Conflict              — offset mismatch (the expected offset is returned in X-Expected-Offset);
+                                a competing writer (no headers); the file is already fully uploaded
+    500 Internal Server Error — internal filesystem errors (mkdir, open/seek/copy/close, setting attributes)
+```
+
+A client must distinguish the two 409 cases by the presence of `X-Expected-Offset`: with the header the upload is recoverable by repositioning, without it another writer holds the file and retrying at any offset will not help.
 
 #### Block mode (import)
 
@@ -401,11 +505,33 @@ All endpoints are available via the short path `/api/v1/files|block` and the ful
     X-Content-Length: 10 — optional; expected total size (non-negative integer)
 ```
 
+Partial upload response:
+
+```http
+    HTTP/1.1 204 No Content
+    X-Next-Offset: 10
+```
+
+Completed upload response:
+
+```http
+    HTTP/1.1 201 Created
+    X-Next-Offset: 10        # equals X-Content-Length
+```
+
 - Query current upload progress
 
 ```http
     HEAD /api/v1/block HTTP/1.1
     Content-Length: 0
+```
+
+Response — `X-Device-Size` is reported nowhere else in this API, so this is how a client learns how much room the target device has:
+
+```http
+    HTTP/1.1 200 OK
+    X-Next-Offset: 10
+    X-Device-Size: 1024      # device size in bytes
 ```
 
 - Finish import (signal to stop the file server)
@@ -414,6 +540,29 @@ All endpoints are available via the short path `/api/v1/files|block` and the ful
     POST /api/v1/finished HTTP/1.1
     Content-Length: 0
 ```
+
+Response:
+
+```http
+    HTTP/1.1 204 No Content
+```
+
+A `POST` to the data endpoint itself (`/api/v1/files/{path}` or `/api/v1/block`) completes the import as well and answers `200 OK`. Both routes do the same thing; `/api/v1/finished` is the one to prefer, because it does not require a path.
+
+Block import errors:
+
+```http
+    400 Bad Request           — invalid path (only "/" is allowed within the block prefix); invalid X-Offset / X-Content-Length
+    401 Unauthorized          — missing, empty or malformed credentials
+    403 Forbidden             — not permitted to write to the block device
+    405 Method Not Allowed    — methods other than PUT/HEAD/POST
+    409 Conflict              — offset mismatch (X-Expected-Offset returned); a competing writer
+    416 Range Not Satisfiable — offset below zero or past the end of the device; Content-Length exceeds the remaining size
+    422 Unprocessable Entity  — more bytes were written than the declared X-Content-Length
+    500 Internal Server Error — internal errors (opening the device, reading its size, seek/copy)
+```
+
+Both 416 branches answer with no headers at all, which is why a client should read `X-Device-Size` from the HEAD above before it starts: otherwise an image larger than the target device is only discovered at the end of a transfer that may have been running for hours.
 
 ### Important notes on working with the API
 

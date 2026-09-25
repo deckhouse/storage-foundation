@@ -560,8 +560,18 @@ func (r *DataexportReconciler) implementDataExportProviding(ctx context.Context,
 	// but before PV was patched with tracking annotations.
 	// pv may be nil if exportPVC already existed (idempotent restart).
 	// ensureExportPVReady handles this case by fetching PV from exportPVC.Spec.VolumeName.
-	if err := r.ensureExportPVReady(ctx, pv, exportPVC, generatedNames, dataExport, userPVCName); err != nil {
-		return err
+	//
+	// The two kinds of target need this at opposite ends of the deployment. A live volume already has its
+	// PV, and that PV is still claimed by the user's PVC: it has to be rebound to the export PVC BEFORE a
+	// pod asks for it, or the export PVC stays Pending and the pod never schedules. A snapshot's PV does
+	// not exist yet, and under a WaitForFirstConsumer storage class the provisioner will not create it
+	// until a pod references the claim -- so for a snapshot the patch can only happen AFTER the deployment
+	// is up.
+	liveVolume := isLiveVolumeTarget(generatedNames.TargetKindShort)
+	if liveVolume {
+		if err := r.ensureExportPVReady(ctx, pv, exportPVC, generatedNames, dataExport, userPVCName); err != nil {
+			return err
+		}
 	}
 
 	// On an idempotent restart the export PVC comes from cache (validateExportPVC) without a VolumeMode
@@ -585,6 +595,20 @@ func (r *DataexportReconciler) implementDataExportProviding(ctx context.Context,
 			return err
 		}
 	}
+
+	if !liveVolume {
+		if err := r.ensureExportPVReady(ctx, pv, exportPVC, generatedNames, dataExport, userPVCName); err != nil {
+			return err
+		}
+	}
+
+	// Ready=True is set here, after the PV carries its tracking metadata, and not inside the deployment
+	// wait where it used to be. The ordering is what makes a crash recoverable: reaching Ready is the
+	// signal that reconcile has nothing left to do, so if the controller dies between the deployment
+	// coming up and the PV being patched, Ready is still not True, the next pass runs
+	// implementDataExportProviding again, and ensureExportPVReady patches the PV idempotently. With Ready
+	// set first, that pass never happens and the PV stays untracked for the life of the export.
+	setConditionReadyServerReady(dataExport)
 
 	if err := r.reconcilePublishResources(ctx, dataExport, generatedNames); err != nil {
 		return err
@@ -807,11 +831,24 @@ func (r *DataexportReconciler) makePublishConfigs(dataExport *dev1alpha1.DataExp
 // userPVCName is the resolved name of the actual user PVC (for VirtualDisk targets,
 // this is the underlying PVC name from VD status, not the VD name).
 func (r *DataexportReconciler) ensureExportPVReady(ctx context.Context, pv *corev1.PersistentVolume, exportPVC *corev1.PersistentVolumeClaim, generatedNames Names, dataExport *dev1alpha1.DataExport, userPVCName string) error {
-	// Skip for snapshot-based exports (VolumeSnapshot, VirtualDiskSnapshot) because they
-	// create new PVs via CSI provisioner and don't detach existing user PVCs.
-	// TODO: For snapshot-based exports, add polling to wait until PV is provisioned by CSI driver.
-	if generatedNames.TargetKindShort != dev1alpha1.KindPVCShort && generatedNames.TargetKindShort != dev1alpha1.KindVirtualDiskShort {
-		return nil
+	mode := pvPatchRebind
+	if !isLiveVolumeTarget(generatedNames.TargetKindShort) {
+		mode = pvPatchTrackOnly
+		// The snapshot export's PV is provisioned out-of-band from the snapshot artifact, and with a
+		// WaitForFirstConsumer storage class that does not happen until a pod references the claim -- so
+		// this runs after the deployment and the volume name arrives on the export PVC only once binding
+		// completed. Re-read the claim rather than trusting the copy the caller carries, which predates
+		// the binding.
+		refreshed := &corev1.PersistentVolumeClaim{}
+		if err := r.Client.Get(ctx, client.ObjectKeyFromObject(exportPVC), refreshed); err != nil {
+			return fmt.Errorf("failed to re-read export PVC %s: %w", exportPVC.Name, err)
+		}
+		exportPVC = refreshed
+		// Not an error: the provisioner has not finished. Requeue and look again.
+		if exportPVC.Spec.VolumeName == "" {
+			return fmt.Errorf("export PVC %s is not bound to a volume yet: %w", exportPVC.Name, ErrTargetNotReady)
+		}
+		pv = nil // force the fetch below to use the name we just learned
 	}
 
 	// If PV was not passed (idempotent restart case), fetch it from exportPVC.
@@ -832,8 +869,12 @@ func (r *DataexportReconciler) ensureExportPVReady(ctx context.Context, pv *core
 		}
 	}
 
-	if err := r.ensureUserPVCExportingAnnotationAndFinalizer(ctx, dataExport.Namespace, userPVCName); err != nil {
-		return err
+	// Only a live-volume export has a user PVC to mark as being exported; a snapshot export detaches
+	// nothing, and userPVCName is empty for it.
+	if mode == pvPatchRebind {
+		if err := r.ensureUserPVCExportingAnnotationAndFinalizer(ctx, dataExport.Namespace, userPVCName); err != nil {
+			return err
+		}
 	}
 
 	// Check if PV already has all required annotations with correct values.
@@ -841,24 +882,36 @@ func (r *DataexportReconciler) ensureExportPVReady(ctx context.Context, pv *core
 	_, err := parsePVRecoveryInfo(pv, dataExport.Namespace, dataExport.Name)
 	infoIsValid := err == nil
 
-	// PV spec must also be in export-ready state:
-	// ReclaimPolicy=Retain protects data, ClaimRef binds PV to exportPVC.
-	specReady := pv.Spec.PersistentVolumeReclaimPolicy == corev1.PersistentVolumeReclaimRetain &&
-		pv.Spec.ClaimRef != nil &&
-		pv.Spec.ClaimRef.Name == exportPVC.Name &&
-		pv.Spec.ClaimRef.Namespace == exportPVC.Namespace
+	// A rebound PV must also be in export-ready state: ReclaimPolicy=Retain protects data, ClaimRef binds
+	// PV to exportPVC. A track-only PV is left alone in both respects, so its metadata is all there is to
+	// check.
+	specReady := true
+	if mode == pvPatchRebind {
+		specReady = pv.Spec.PersistentVolumeReclaimPolicy == corev1.PersistentVolumeReclaimRetain &&
+			pv.Spec.ClaimRef != nil &&
+			pv.Spec.ClaimRef.Name == exportPVC.Name &&
+			pv.Spec.ClaimRef.Namespace == exportPVC.Namespace
+	}
 
 	// If both annotations and spec are already correct, skip patching
 	if infoIsValid && specReady {
 		return nil
 	}
 
-	if err := r.patchPVLabelAnnotationsClaimRef(ctx, pv, exportPVC, dataExport, generatedNames, userPVCName); err != nil {
+	if err := r.patchPVLabelAnnotationsClaimRef(ctx, pv, exportPVC, dataExport, generatedNames, userPVCName, mode); err != nil {
 		log.Printf("failed to patch PV %s: %v", pv.Name, err)
 		return err
 	}
 
 	return nil
+}
+
+// isLiveVolumeTarget reports whether the export target is a volume that exists in its own right -- a PVC or
+// the PVC behind a VirtualDisk -- as opposed to a snapshot, which the export restores into a volume of its
+// own. The two need opposite handling of the export PV, and the ordering of the export differs with them
+// too: see implementDataExportProviding.
+func isLiveVolumeTarget(targetKindShort string) bool {
+	return targetKindShort == dev1alpha1.KindPVCShort || targetKindShort == dev1alpha1.KindVirtualDiskShort
 }
 
 func (r *DataexportReconciler) detachPVC(ctx context.Context, userPVC *corev1.PersistentVolumeClaim, pv *corev1.PersistentVolume, exportPVCName, dataExportName string) (*corev1.PersistentVolumeClaim, error) {
@@ -900,7 +953,25 @@ func (r *DataexportReconciler) detachPVC(ctx context.Context, userPVC *corev1.Pe
 // - Annotations for tracking original userPVC, DataExport name, and original reclaimPolicy
 // - Label for cache filtering (only labeled PVs are cached) and orphan PV discovery
 // - ReclaimPolicy set to Retain to protect data if exportPVC is accidentally deleted
-func (r *DataexportReconciler) patchPVLabelAnnotationsClaimRef(ctx context.Context, pv *corev1.PersistentVolume, exportPVC *corev1.PersistentVolumeClaim, dataExport *dev1alpha1.DataExport, names Names, userPVCName string) error {
+// pvPatchMode says which of the two kinds of export PV is being patched, because they need different
+// things done to them and only one of them is the user's data.
+type pvPatchMode int
+
+const (
+	// pvPatchRebind is the live-volume export (PVC, VirtualDisk): the PV already exists and holds the
+	// user's data, and the export works by taking it over -- the ClaimRef is repointed at the export PVC
+	// and the reclaim policy is forced to Retain so that deleting the export PVC cannot destroy the
+	// volume. Both are undone by restoreOriginalPVState when the export ends.
+	pvPatchRebind pvPatchMode = iota
+	// pvPatchTrackOnly is the snapshot export: the PV was provisioned for this export alone, from the
+	// snapshot artifact via a VolumeRestoreRequest, and is already bound to the export PVC. Nothing about
+	// the volume needs taking over, so only the tracking metadata is written. In particular the reclaim
+	// policy is left as the storage class set it: the bytes also exist in the snapshot, so Retain would
+	// protect a copy nobody needs at the price of a volume nothing deletes.
+	pvPatchTrackOnly
+)
+
+func (r *DataexportReconciler) patchPVLabelAnnotationsClaimRef(ctx context.Context, pv *corev1.PersistentVolume, exportPVC *corev1.PersistentVolumeClaim, dataExport *dev1alpha1.DataExport, names Names, userPVCName string, mode pvPatchMode) error {
 	updatedPv := pv.DeepCopy()
 
 	if len(updatedPv.Annotations) == 0 {
@@ -911,11 +982,13 @@ func (r *DataexportReconciler) patchPVLabelAnnotationsClaimRef(ctx context.Conte
 		updatedPv.Labels = make(map[string]string)
 	}
 
-	updatedPv.Spec.ClaimRef = &corev1.ObjectReference{
-		Namespace:       exportPVC.Namespace,
-		Name:            exportPVC.Name,
-		UID:             exportPVC.UID,
-		ResourceVersion: exportPVC.ResourceVersion,
+	if mode == pvPatchRebind {
+		updatedPv.Spec.ClaimRef = &corev1.ObjectReference{
+			Namespace:       exportPVC.Namespace,
+			Name:            exportPVC.Name,
+			UID:             exportPVC.UID,
+			ResourceVersion: exportPVC.ResourceVersion,
+		}
 	}
 
 	// Used for tracking original userPVC
@@ -930,11 +1003,16 @@ func (r *DataexportReconciler) patchPVLabelAnnotationsClaimRef(ctx context.Conte
 	updatedPv.Annotations[dev1alpha1.AnnotationPVTargetKindShortKey] = names.TargetKindShort
 	updatedPv.Annotations[dev1alpha1.AnnotationPVHashSuffixKey] = names.HashSuffix
 
-	// Save original reclaimPolicy before changing it
+	// Record the reclaim policy the PV arrived with. Written in both modes even though only pvPatchRebind
+	// changes the policy: parsePVRecoveryInfo treats a missing or unparseable value as an inconsistent PV
+	// and refuses to clean up, and restoreOriginalPVState reads it back. In track-only mode it restores
+	// the same value it recorded, which is the point -- the restore path needs no special case.
 	updatedPv.Annotations[dev1alpha1.AnnotationOriginalReclaimPolicyKey] = string(pv.Spec.PersistentVolumeReclaimPolicy)
 
-	// Set Retain to protect data during export
-	updatedPv.Spec.PersistentVolumeReclaimPolicy = corev1.PersistentVolumeReclaimRetain
+	if mode == pvPatchRebind {
+		// Set Retain to protect data during export
+		updatedPv.Spec.PersistentVolumeReclaimPolicy = corev1.PersistentVolumeReclaimRetain
+	}
 
 	// Add labels for efficient List queries with MatchingLabels
 	updatedPv.Labels[dev1alpha1.LabelPVDataExporter] = "true"
@@ -1442,6 +1520,31 @@ func validateUserPVCInWorkingState(pvc *corev1.PersistentVolumeClaim, pv *corev1
 	return nil
 }
 
+// setConditionReadyServerReady marks the export as serving. It is called once the deployment is up, the
+// exporter has reported serverState=Ready AND the export PV carries its tracking metadata, because Ready is
+// what tells the next reconcile there is nothing left to finish (see implementDataExportProviding).
+//
+// The Expired guard is carried over from where this lived before: an export whose idle window has already
+// closed must not be flipped back to Ready by a late pass.
+//
+// It takes no context and returns no error because it does not talk to the API server: the condition is
+// written to the in-memory object and persisted by the status updater at the end of Reconcile, which is how
+// every other condition in this controller is written.
+func setConditionReadyServerReady(dataExport *dev1alpha1.DataExport) {
+	readyCond := meta.FindStatusCondition(dataExport.Status.Conditions, string(ConditionReady))
+	if readyCond != nil && readyCond.Reason == string(ReasonExpired) {
+		return
+	}
+
+	meta.SetStatusCondition(&dataExport.Status.Conditions, metav1.Condition{
+		Type:               string(ConditionReady),
+		Status:             metav1.ConditionTrue,
+		Reason:             string(ReasonServerReady),
+		Message:            "Server is ready and export started",
+		ObservedGeneration: dataExport.Generation,
+	})
+}
+
 // TODO: remove copy-paste, reuse common/deployment.go
 func (r *DataexportReconciler) createDeployment(ctx context.Context, dataExport *dev1alpha1.DataExport, exportPVC *corev1.PersistentVolumeClaim, generatedNames Names) error {
 	// Get dataExport image name from configMap
@@ -1527,16 +1630,9 @@ func (r *DataexportReconciler) waitingForDeploymentLaunch(ctx context.Context, d
 				log.Printf("Deployment %q available; awaiting exporter serverState=Ready\n", deployName)
 				return false, nil
 			}
-			readyCond := meta.FindStatusCondition(dataExport.Status.Conditions, string(ConditionReady))
-			if readyCond == nil || readyCond.Reason != string(ReasonExpired) {
-				meta.SetStatusCondition(&dataExport.Status.Conditions, metav1.Condition{
-					Type:               string(ConditionReady),
-					Status:             metav1.ConditionTrue,
-					Reason:             string(ReasonServerReady),
-					Message:            "Server is ready and export started",
-					ObservedGeneration: dataExport.Generation,
-				})
-			}
+			// The condition itself is set by the caller, after the export PV has been given its tracking
+			// metadata -- see implementDataExportProviding for why the order matters. This poll only
+			// establishes that the server is up.
 			return true, nil
 		}
 
@@ -1577,7 +1673,8 @@ func makeExportDeploySpec(pvMode *corev1.PersistentVolumeMode, dataExport *dev1a
 				ServiceAccountName: ServiceAccountServer,
 				ImagePullSecrets:   []corev1.LocalObjectReference{{Name: ImagePullSecretsName}},
 				Containers:         makeContainerList(pvMode, dataExportPodImageName, ttl, dataExport.Namespace, dataExport.Name, controllerNamespace, generatedNames),
-				Volumes:            makeVolumeList(generatedNames.ExportPVCName),
+				// Read-only for a live volume, read-write for a snapshot restore -- see makeVolumeList.
+				Volumes: makeVolumeList(generatedNames.ExportPVCName, isLiveVolumeTarget(generatedNames.TargetKindShort)),
 			},
 		},
 	}
@@ -1599,7 +1696,8 @@ func makeContainerList(pvMode *corev1.PersistentVolumeMode, image, ttl, dataExpo
 	switch *pvMode {
 	case corev1.PersistentVolumeBlock:
 		var rootUser int64
-		securityContext := corev1.SecurityContext{RunAsUser: &rootUser}
+		readOnlyRootFilesystem := true
+		securityContext := corev1.SecurityContext{RunAsUser: &rootUser, ReadOnlyRootFilesystem: &readOnlyRootFilesystem}
 		containers = []corev1.Container{
 			{
 				Name:  "data-exporter",
@@ -1628,7 +1726,8 @@ func makeContainerList(pvMode *corev1.PersistentVolumeMode, image, ttl, dataExpo
 
 	case corev1.PersistentVolumeFilesystem:
 		var rootUser int64
-		securityContext := corev1.SecurityContext{RunAsUser: &rootUser}
+		readOnlyRootFilesystem := true
+		securityContext := corev1.SecurityContext{RunAsUser: &rootUser, ReadOnlyRootFilesystem: &readOnlyRootFilesystem}
 		containers = []corev1.Container{
 			{
 				Name:  "data-exporter",
@@ -1658,14 +1757,23 @@ func makeContainerList(pvMode *corev1.PersistentVolumeMode, image, ttl, dataExpo
 	return containers
 }
 
-func makeVolumeList(pvcName string) []corev1.Volume {
+// makeVolumeList builds the exporter pod's volume list.
+//
+// readOnly is not a constant because the two kinds of export PV are not the same thing. A live-volume
+// export serves the user's own volume, and mounting it read-only is the guarantee that an export cannot
+// alter what it exports. A snapshot export serves a volume that was provisioned for this export alone, and
+// there mounting read-only is not a guarantee but an obstacle: a filesystem freshly restored from a
+// snapshot may carry a dirty journal, and a driver that has to replay it -- DRBD/replicated among them --
+// cannot mount it read-only at all, so the exporter pod never starts. Nothing is lost by mounting it
+// read-write, because the exporter only ever reads and the volume is discarded when the export ends.
+func makeVolumeList(pvcName string, readOnly bool) []corev1.Volume {
 	volumes := []corev1.Volume{
 		{
 			Name: "export-pvc",
 			VolumeSource: corev1.VolumeSource{
 				PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{
 					ClaimName: pvcName,
-					ReadOnly:  true,
+					ReadOnly:  readOnly,
 				},
 			},
 		},
@@ -2157,7 +2265,12 @@ func (r *DataexportReconciler) removeOrphanResources(ctx context.Context, dataEx
 // For PVC/VirtualDisk exports, we restore the PV binding to the original user PVC.
 func (r *DataexportReconciler) recoverOrphanedUserPVC(ctx context.Context, pv *corev1.PersistentVolume, userPVCNamespace, userPVCName, dataExportName string) error {
 	// For snapshot-based exports, no user PVC was detached, so we only clean up PV annotations
-	if userPVCNamespace == "" && userPVCName == "" {
+	// Keyed on the name alone. The namespace annotation is written for every export, snapshot ones
+	// included, so requiring both to be empty made this branch unreachable -- a snapshot orphan would have
+	// fallen through to the live-volume path and gone looking for a PVC with an empty name. It could not
+	// be observed until now only because a snapshot export's PV carried no tracking label at all, so
+	// orphan discovery never reached it.
+	if userPVCName == "" {
 		log.Printf("No user PVC to recover (snapshot-based export), cleaning up PV annotations only")
 
 		if err := r.restoreOriginalPVState(ctx, pv); err != nil {
