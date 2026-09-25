@@ -30,13 +30,24 @@ spec:
               
               Подробнее: https://kubernetes.io/docs/concepts/storage/volume-snapshots#volumesnapshots
             properties:
+              mode:
+                description: |-
+                  Определяет, как этот VolumeSnapshot получает содержимое; после установки неизменяемо.
+                  
+                  Capture (по умолчанию) — динамический CSI-снимок из spec.source. Import — артефакт данных
+                  производит объект DataImport в том же неймспейсе (обратный поиск по DataImport.spec.snapshotRef);
+                  spec.source не указывается (он обязателен, только когда mode != Import), и штатный
+                  snapshot-controller не обрабатывает такой VolumeSnapshot — его привязывает общий контроллер
+                  state-snapshotter (заполняет status).
+                  
+                  Расширение Deckhouse: аналог spec.mode у всех остальных видов снимков state-snapshotter.
               source:
                 description: |-
                   Указывает источник создания снимка.
-                  
+                  Обязателен, если mode не равен Import (у импортируемого VolumeSnapshot его нет: артефакт данных
+                  приходит из DataImport — так же, как у остальных видов снимков).
                   Может быть пустым для намерения восстановления (backup controller проставляет volumeSnapshotContentName после restore).
-                  Иначе должен быть указан ровно один из persistentVolumeClaimName, volumeSnapshotContentName или import.
-                  
+                  Иначе должен быть указан ровно один из persistentVolumeClaimName или volumeSnapshotContentName.
                   Неизменяемо после создания (кроме одноразовой установки volumeSnapshotContentName из пустого).
                 properties:
                   persistentVolumeClaimName:
@@ -57,13 +68,6 @@ spec:
                       его представление в Kubernetes.
                       
                       Для намерения восстановления backup controller может один раз установить это поле из пустого после успешного restore.
-                  import:
-                    description: |-
-                      Пустой объект-маркер: его наличие помечает этот VolumeSnapshot как цель импорта. Артефакт данных
-                      производит объект DataImport (state-snapshotter.deckhouse.io) в том же неймспейсе, определяемый обратным поиском (DataImport.spec.targetRef).
-                      
-                      Если задано, штатный snapshot-controller НЕ обрабатывает этот VolumeSnapshot.
-                      Расширение Deckhouse.
               volumeSnapshotClassName:
                 description: |-
                   Имя VolumeSnapshotClass, запрошенного VolumeSnapshot.
@@ -101,6 +105,106 @@ spec:
                   **Примечание:** для предотвращения проблем с безопасностью перед использованием необходимо проверить
                   успешность привязки между объектами VolumeSnapshot и VolumeSnapshotContent, убедившись,
                   что оба объекта указывают друг на друга.
+              captureState:
+                description: |-
+                  Сигналы захвата state-snapshotter, зеркалируемые на этот VolumeSnapshot, когда он является
+                  узлом доменного снимка: commonController содержит записываемые ядром флаги-защёлки этапов захвата,
+                  а domainSpecificController — записываемые доменом ссылки планирования и жизненный цикл.
+                  Записывается контроллерами state-snapshotter. Расширение Deckhouse.
+                properties:
+                  commonController:
+                    description: |-
+                      Записываемые ядром флаги-защёлки успешного завершения этапов захвата.
+                      Единственный писатель — ядро state-snapshotter.
+                    properties:
+                      dataCaptured:
+                        description: |-
+                          Флаг-защёлка успешного захвата данных; объявляется только там, где есть линия данных.
+                      manifestCaptured:
+                        description: |-
+                          Флаг-защёлка успешного захвата манифестов (объявляется на каждом узле захвата).
+                      subtreeManifestsPersisted:
+                        description: |-
+                          Записываемое ядром зеркало рекурсивного флага-защёлки привязанного SnapshotContent
+                          «этот узел и все его потомки заархивировали свои манифесты». Монотонный (false -> true).
+                      subtreePlanned:
+                        description: |-
+                          Вычисляемый ядром монотонный рекурсивный флаг-защёлка: принимает значение true, когда этот узел
+                          достиг барьера захвата 1 (domainSpecificController.phase >= Planned) и собственный subtreePlanned
+                          каждого прямого потомка равен true (планирование всего поддерева завершено). Домены только читают его.
+                          Монотонный (false -> true).
+                  domainSpecificController:
+                    description: |-
+                      Записываемые доменом ссылки планирования и жизненный цикл.
+                      Единственный писатель — домен (SDK).
+                    properties:
+                      excludedRefs:
+                        description: |-
+                          Прямые исключения, наложенные доменом на этом узле (исходные объекты, которые он
+                          отбросил по метке исключения при перечислении своих потомков).
+                        items:
+                          description: |-
+                            Ссылка на исключённый исходный объект ({apiVersion,kind,name}); неймспейс подразумевается
+                            (неймспейс снимка).
+                      manifestCaptureRequestName:
+                        description: |-
+                          Временный MCR, которым владеет доменный узел, пока выполняется захват его собственной области.
+                      message:
+                        description: |-
+                          Человекочитаемые подробности для phase=Failed.
+                      phase:
+                        description: |-
+                          Барьер жизненного цикла домена (Planning|Planned|Finished|Failed).
+                      reason:
+                        description: |-
+                          Короткая машиночитаемая причина для phase=Failed (произвольная строка домена).
+                      volumeCaptureRequestName:
+                        description: |-
+                          Временный VCR, которым владеет доменный узел-лист с данными, пока выполняется этап захвата данных.
+              childrenSnapshotRefs:
+                description: |-
+                  Прямые рёбра к дочерним снимкам, когда этот VolumeSnapshot участвует в дереве снимка.
+                  VolumeSnapshot является листом данных, поэтому обычно поле пустое; оно сохраняется
+                  для единообразия между видами снимков. Расширение Deckhouse.
+                items:
+                  description: |-
+                    Ссылка на дочерний объект снимка ({apiVersion,kind,name}) в дереве запуска; неймспейс
+                    подразумевается (неймспейс родительского Snapshot).
+              conditions:
+                description: |-
+                  Условия отражают готовность протокола state-snapshotter (conditions[Ready] — единственное
+                  пользовательское условие, вычисляемое ядром) и отличаются от сигнала привязки CSI readyToUse.
+                  Записываются ядром state-snapshotter. Расширение Deckhouse.
+                items:
+                  description: |-
+                    Условие содержит подробности одного аспекта текущего состояния этого ресурса API.
+                  properties:
+                    lastTransitionTime:
+                      description: |-
+                        Время последнего перехода условия из одного статуса в другой.
+                        Оно должно соответствовать моменту изменения базового условия. Если этот момент неизвестен, допустимо использовать время изменения поля API.
+                    message:
+                      description: |-
+                        Человекочитаемое сообщение с подробностями о переходе.
+                        Может быть пустой строкой.
+                    observedGeneration:
+                      description: |-
+                        Значение `.metadata.generation`, на основе которого было выставлено условие.
+                        Например, если `.metadata.generation` сейчас равно 12, а `.status.conditions[x].observedGeneration` — 9, условие устарело
+                        относительно текущего состояния экземпляра.
+                    reason:
+                      description: |-
+                        Программный идентификатор причины последнего перехода условия.
+                        Производители конкретных типов условий могут определять ожидаемые значения и смысл этого поля,
+                        а также то, считаются ли эти значения гарантированной частью API.
+                        Значение должно быть строкой в формате CamelCase.
+                        Поле не может быть пустым.
+                    status:
+                      description: |-
+                        Статус условия — True, False или Unknown.
+                    type:
+                      description: |-
+                        Тип условия в формате CamelCase или foo.example.com/CamelCase.
               creationTime:
                 description: |-
                   Временная метка создания точечного снимка нижележащей системой хранения.
@@ -176,6 +280,19 @@ spec:
                   быть меньше `restoreSize`, если он указан, иначе восстановление завершится ошибкой.
                   
                   Если не указано, размер неизвестен.
+              sourceRef:
+                description: |-
+                  Полная ссылка на захваченный живой исходный объект (исходный PVC), которую записывает доменный
+                  контроллер state-snapshotter (PublishSnapshotSource). Самодостаточна для воссоздания в режиме
+                  импорта. Расширение Deckhouse.
+                properties:
+                  namespace:
+                    description: |-
+                      Неймспейс исходного объекта (только для namespaced-источников).
+                  uid:
+                    description: |-
+                      UID захваченного живого исходного объекта (заполняется по возможности; используется d8-cli
+                      для воссоздания в режиме импорта).
               volumeGroupSnapshotName:
                 description: |-
                   Имя VolumeGroupSnapshot, частью которого является этот VolumeSnapshot.
@@ -236,13 +353,6 @@ spec:
                       его представление в Kubernetes.
                       
                       Для намерения восстановления backup controller может один раз установить это поле из пустого после успешного restore.
-                  import:
-                    description: |-
-                      Пустой объект-маркер: его наличие помечает этот VolumeSnapshot как цель импорта. Артефакт данных
-                      производит объект DataImport (state-snapshotter.deckhouse.io) в том же неймспейсе, определяемый обратным поиском (DataImport.spec.targetRef).
-                      
-                      Если задано, штатный snapshot-controller НЕ обрабатывает этот VolumeSnapshot.
-                      Расширение Deckhouse.
               volumeSnapshotClassName:
                 description: |-
                   Имя VolumeSnapshotClass, запрошенного VolumeSnapshot.
@@ -265,13 +375,6 @@ spec:
               Перед использованием необходимо проверить успешность привязки между объектами VolumeSnapshot и
               VolumeSnapshotContent, убедившись, что оба объекта указывают друг на друга.
             properties:
-              boundSnapshotContentName:
-                description: |-
-                  Имя кластерного объекта SnapshotContent (state-snapshotter.deckhouse.io) state-snapshotter,
-                  который обеспечивает этот VolumeSnapshot как логический узел в дереве снимка.
-                  
-                  Записывается общим контроллером state-snapshotter в дополнение к boundVolumeSnapshotContentName.
-                  Расширение Deckhouse.
               boundVolumeSnapshotContentName:
                 description: |-
                   Имя объекта VolumeSnapshotContent, к которому привязан этот объект VolumeSnapshot.
@@ -292,25 +395,6 @@ spec:
                   возвращаемым из вызова gRPC `ListSnapshots` CSI, если драйвер поддерживает это.
                   
                   Если не указано, время создания снимка неизвестно.
-              data:
-                description: |-
-                  Самодостаточная привязка данных (sourceRef + artifactRef + метаданные тома), зеркалируемая
-                  из привязанного SnapshotContent.status.data state-snapshotter, чтобы d8 определял
-                  дескриптор захваченного тома из этого namespaced VolumeSnapshot. Записывается общим
-                  контроллером state-snapshotter. Расширение Deckhouse.
-                properties:
-                  artifactRef:
-                    description: Durable-артефакт данных (VolumeSnapshotContent).
-                  fsType:
-                    description: Тип файловой системы источника (только для томов Filesystem).
-                  size:
-                    description: Реальный выделенный размер захваченного тома (например, "10Gi").
-                  sourceRef:
-                    description: Захваченный источник PersistentVolumeClaim (uid — идентичность тома).
-                  storageClassName:
-                    description: StorageClass исходного захваченного тома.
-                  volumeMode:
-                    description: Режим тома источника (Block или Filesystem).
               error:
                 description: |-
                   Последняя наблюдаемая ошибка при создании снимка, если есть.
