@@ -28,8 +28,7 @@ import (
 
 // crdStatusProperties returns status.properties of the named hand-curated CRD at the given served version.
 // The dataexports/dataimports CRDs are NOT generated from these Go types (hack/generate_code.sh deletes the
-// controller-gen output for them, because they carry a non-standard `download` subresource and CEL rules
-// markers cannot express), so a field added to the Go struct reaches the API only if it is also added here
+// controller-gen output for them, because they carry CEL rules markers cannot express), so a field added to the Go struct reaches the API only if it is also added here
 // by hand. That gap is exactly what the tests below watch.
 func crdStatusProperties(t *testing.T, crdFile, version string) map[string]interface{} {
 	t.Helper()

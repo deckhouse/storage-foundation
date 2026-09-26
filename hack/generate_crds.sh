@@ -105,11 +105,10 @@ echo "Enriching the CRDs"
 # anyway, so the drift gate would pass on a render that lost the marker.
 "${tools_dir}/crd-enricher" paths="${api_paths//;/,}" crds="${render_dir}" strict
 
-# DataExport and DataImport are hand-curated in crds/ rather than generated: they
-# carry a non-standard `download` subresource, which is a CRD-level field no
-# marker reaches. Their rendered duplicates are dropped here -- shipping both
-# would put two CRDs with the same metadata.name in the bundle. This replaces the
-# `rm -f` that used to follow the render.
+# DataExport and DataImport are hand-curated in crds/ rather than generated. Their
+# rendered duplicates are dropped here -- shipping both would put two CRDs with the
+# same metadata.name in the bundle. This replaces the `rm -f` that used to follow the
+# render.
 hand_curated=(
     storage-foundation.deckhouse.io_dataexports.yaml
     storage-foundation.deckhouse.io_dataimports.yaml
