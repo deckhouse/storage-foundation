@@ -84,7 +84,12 @@ func (r *DataImportReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 	err = r.Client.Get(ctx, req.NamespacedName, dataImport)
 	if err != nil {
 		if kubeerrors.IsNotFound(err) {
-			logger.Error(err, "DataImport resource not found, it may have been deleted")
+			logger.Info("DataImport resource not found, it may have been deleted; releasing what it left behind")
+			// A DataImport deleted inside its first reconcile is gone before its own finalizer was ever
+			// written, so its deletion branch never ran. See releaseOrphanedResources.
+			if err := r.releaseOrphanedResources(ctx, req.NamespacedName); err != nil {
+				return ctrl.Result{}, err
+			}
 			return ctrl.Result{}, nil
 		}
 		logger.Error(err, "failed to get DataImport resource from cache")
