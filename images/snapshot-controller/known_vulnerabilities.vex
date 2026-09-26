@@ -2,7 +2,7 @@
   "@context": "https://openvex.dev/ns/v0.2.0",
   "@id": "https://openvex.dev/docs/public/vex-storage-foundation-snapshot-controller",
   "author": "Deckhouse <contact@deckhouse.io>",
-  "version": 2,
+  "version": 3,
   "statements": [
     {
       "vulnerability": {
@@ -10,13 +10,13 @@
       },
       "products": [
         {
-          "@id": "pkg:golang/golang.org/x/crypto@v0.57.0"
+          "@id": "pkg:golang/golang.org/x/crypto@v0.56.0"
         }
       ],
       "status": "not_affected",
       "justification": "vulnerable_code_not_in_execute_path",
-      "impact_statement": "Advisory covers the unmaintained golang.org/x/crypto/openpgp subpackage. In the snapshot-controller binary golang.org/x/crypto is pulled in transitively via k8s.io/apiserver/pkg/server, which uses golang.org/x/crypto/cryptobyte (ASN.1/TLS parsing) and golang.org/x/crypto/chacha20poly1305 (AEAD cipher suite); `go mod why golang.org/x/crypto/openpgp` reports the main module does not need the openpgp package, so it is not compiled into the binary and the vulnerable code is not in the execution path. golang.org/x/crypto has no release that drops openpgp, so the finding cannot be resolved by upgrading."
+      "impact_statement": "Advisory covers the unmaintained golang.org/x/crypto/openpgp subpackage. In the snapshot-controller binary golang.org/x/crypto is pulled in transitively via k8s.io/apiserver/pkg/server, which uses golang.org/x/crypto/cryptobyte and golang.org/x/crypto/cryptobyte/asn1 (ASN.1/TLS parsing) — `go list -deps` lists exactly those two as the packages resolved from this module's golang.org/x/crypto; `go mod why golang.org/x/crypto/openpgp` reports the main module does not need the openpgp package, so it is not compiled into the binary and the vulnerable code is not in the execution path. golang.org/x/crypto has no release that drops openpgp, so the finding cannot be resolved by upgrading."
     }
   ],
-  "timestamp": "2026-09-16T00:00:00Z"
+  "timestamp": "2026-09-26T00:00:00Z"
 }

@@ -492,7 +492,7 @@ func TestGetExportPVCFromSnapshot_FormerRWXSourceExports(t *testing.T) {
 // asserted here instead of being left as a comment. Limit: this is a text check on the patch — it
 // proves the default is written, not that the patched binary runs it (that belongs to e2e).
 func TestProvisionerPatchStillDefaultsAccessModes(t *testing.T) {
-	const patchPath = "../../../../csi-external-provisioner/patches/v6.2.0/002-vrr-executor.patch"
+	const patchPath = "../../../../csi-external-provisioner/patches/v6.3.0/002-vrr-executor.patch"
 
 	raw, err := os.ReadFile(patchPath)
 	require.NoError(t, err, "the provisioner patch must stay readable: the export PVC has no access modes of its own and depends on its default")

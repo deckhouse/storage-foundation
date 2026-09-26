@@ -280,7 +280,7 @@ func (r *DataexportReconciler) ensureVolumeRestoreRequest(ctx context.Context, d
 	// mounted by exactly one exporter pod, so the source volume's modes carry no meaning here — the
 	// live-PVC export path narrows them to ReadWriteOncePod for the same reason (see detachPVC). An empty
 	// list is a supported VRR input: the patched external-provisioner substitutes ReadWriteOnce in
-	// effectiveAccessModes (images/csi-external-provisioner/patches/v6.2.0/002-vrr-executor.patch), and
+	// effectiveAccessModes (images/csi-external-provisioner/patches/v6.3.0/002-vrr-executor.patch), and
 	// that value is what the CSI volume capability, the provisioned PV and the bound PVC all carry. So a
 	// source that was ReadWriteMany still exports; it just exports through a ReadWriteOnce transit volume.
 	// SnapshotContent.status.data has no accessModes field at all any more (dropped from the

@@ -2,7 +2,7 @@
 
 Builds a patched `kubernetes-csi/external-provisioner` (`werf.inc.yaml`, versions resolved from
 `oss.yaml`), published as `csi-external-provisioner-ForK8SGE-<k8s>`. See `patches/<version>/README.md`
-for what each patch does; `patches/v6.2.0/README.md` also documents the VolumeRestoreRequest executor
+for what each patch does; `patches/v6.3.0/README.md` also documents the VolumeRestoreRequest executor
 this build carries.
 
 ## Bump checklist

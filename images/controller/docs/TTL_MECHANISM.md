@@ -94,7 +94,7 @@ the adoption window only when that owner would otherwise have the later removal 
   `volumerestorerequest_controller.go`; the DataImport bridge is in
   `images/data-manager-controller/internal/controllers/data-import/object_keeper.go`; the conditional
   VRR keeper annotation is consumed only by
-  `images/csi-external-provisioner/patches/v6.2.0/002-vrr-executor.patch`.
+  `images/csi-external-provisioner/patches/v6.3.0/002-vrr-executor.patch`.
 
 `docs/CR.md` is the current consumer summary. Current behavior is determined by the generated CRDs
 and the implementation files above.

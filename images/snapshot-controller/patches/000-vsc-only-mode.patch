@@ -1,5 +1,5 @@
 diff --git a/pkg/common-controller/snapshot_controller.go b/pkg/common-controller/snapshot_controller.go
-index 67fdc6c5e..a1457eb01 100644
+index 8c1ba60b..e853c00d 100644
 --- a/pkg/common-controller/snapshot_controller.go
 +++ b/pkg/common-controller/snapshot_controller.go
 @@ -92,6 +92,7 @@ func (ctrl *csiSnapshotCommonController) syncContent(content *crdv1.VolumeSnapsh
@@ -31,7 +31,7 @@ index 67fdc6c5e..a1457eb01 100644
  	// that VolumeSnapshot has not yet been bound to this VolumeSnapshotContent;
  	// syncSnapshot will handle it.
 diff --git a/pkg/sidecar-controller/csi_handler.go b/pkg/sidecar-controller/csi_handler.go
-index 9658e3179..7f7e09233 100644
+index f11a23d4..cb1d3ef2 100644
 --- a/pkg/sidecar-controller/csi_handler.go
 +++ b/pkg/sidecar-controller/csi_handler.go
 @@ -28,6 +28,7 @@ import (
@@ -105,8 +105,37 @@ index 9658e3179..7f7e09233 100644
  	if len(snapshotUID) == 0 {
  		return "", fmt.Errorf("Corrupted snapshot object, it is missing UID")
  	}
+diff --git a/pkg/sidecar-controller/csi_handler_test.go b/pkg/sidecar-controller/csi_handler_test.go
+index 42f26a38..42579469 100644
+--- a/pkg/sidecar-controller/csi_handler_test.go
++++ b/pkg/sidecar-controller/csi_handler_test.go
+@@ -25,6 +25,7 @@ import (
+ 	"github.com/container-storage-interface/spec/lib/go/csi"
+ 	groupsnapshotv1 "github.com/kubernetes-csi/external-snapshotter/client/v8/apis/volumegroupsnapshot/v1"
+ 	"github.com/kubernetes-csi/external-snapshotter/v8/pkg/group_snapshotter"
++	"github.com/kubernetes-csi/external-snapshotter/v8/pkg/vscmode"
+ 	corev1 "k8s.io/api/core/v1"
+ 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+ )
+@@ -63,6 +64,7 @@ func newCSIHandlerWithFakeGroupSnapshotter(f group_snapshotter.GroupSnapshotter)
+ 		8,
+ 		"group-snapshot",
+ 		8,
++		vscmode.NewLegacyVSCMode(),
+ 	)
+ }
+ 
+@@ -143,7 +145,7 @@ func TestCreateGroupSnapshot(t *testing.T) {
+ 	})
+ 
+ 	t.Run("makeGroupSnapshotName with UUIDLength -1", func(t *testing.T) {
+-		h := NewCSIHandler(nil, &fakeGroupSnapshotter{}, 5*time.Second, "snap", 8, "grp-snap", -1)
++		h := NewCSIHandler(nil, &fakeGroupSnapshotter{}, 5*time.Second, "snap", 8, "grp-snap", -1, vscmode.NewLegacyVSCMode())
+ 		content := &groupsnapshotv1.VolumeGroupSnapshotContent{
+ 			ObjectMeta: metav1.ObjectMeta{Name: "gsc-5"},
+ 			Spec: groupsnapshotv1.VolumeGroupSnapshotContentSpec{
 diff --git a/pkg/sidecar-controller/framework_test.go b/pkg/sidecar-controller/framework_test.go
-index a8bf8b74a..57c201b61 100644
+index 690c4702..d315b23b 100644
 --- a/pkg/sidecar-controller/framework_test.go
 +++ b/pkg/sidecar-controller/framework_test.go
 @@ -333,6 +333,12 @@ func (r *snapshotReactor) checkContents(expectedContents []*crdv1.VolumeSnapshot
@@ -136,7 +165,7 @@ index a8bf8b74a..57c201b61 100644
  			v.Status.CreationTime = nil
  			if v.Status.Error != nil {
 diff --git a/pkg/sidecar-controller/snapshot_controller.go b/pkg/sidecar-controller/snapshot_controller.go
-index ec67be7cc..62c25c1c2 100644
+index ec67be7c..62c25c1c 100644
 --- a/pkg/sidecar-controller/snapshot_controller.go
 +++ b/pkg/sidecar-controller/snapshot_controller.go
 @@ -88,7 +88,17 @@ func (ctrl *csiSnapshotSideCarController) syncContent(content *crdv1.VolumeSnaps
@@ -256,7 +285,7 @@ index ec67be7cc..62c25c1c2 100644
  		return false
  	}
 diff --git a/pkg/sidecar-controller/snapshot_controller_base.go b/pkg/sidecar-controller/snapshot_controller_base.go
-index d25b0bb99..bfd85da6c 100644
+index eac95a5b..d0ce8d0e 100644
 --- a/pkg/sidecar-controller/snapshot_controller_base.go
 +++ b/pkg/sidecar-controller/snapshot_controller_base.go
 @@ -46,6 +46,7 @@ import (
@@ -317,7 +346,7 @@ index d25b0bb99..bfd85da6c 100644
  		if content.Spec.Driver != ctrl.driverName {
 diff --git a/pkg/sidecar-controller/vsc_only_contract_test.go b/pkg/sidecar-controller/vsc_only_contract_test.go
 new file mode 100644
-index 000000000..a813352ce
+index 00000000..a813352c
 --- /dev/null
 +++ b/pkg/sidecar-controller/vsc_only_contract_test.go
 @@ -0,0 +1,307 @@
@@ -630,7 +659,7 @@ index 000000000..a813352ce
 +}
 diff --git a/pkg/sidecar-controller/vsc_only_edge_cases_test.go b/pkg/sidecar-controller/vsc_only_edge_cases_test.go
 new file mode 100644
-index 000000000..318ed72f5
+index 00000000..318ed72f
 --- /dev/null
 +++ b/pkg/sidecar-controller/vsc_only_edge_cases_test.go
 @@ -0,0 +1,205 @@
@@ -841,7 +870,7 @@ index 000000000..318ed72f5
 +}
 diff --git a/pkg/sidecar-controller/vsc_test_helpers.go b/pkg/sidecar-controller/vsc_test_helpers.go
 new file mode 100644
-index 000000000..0c4a64526
+index 00000000..0c4a6452
 --- /dev/null
 +++ b/pkg/sidecar-controller/vsc_test_helpers.go
 @@ -0,0 +1,52 @@
@@ -899,7 +928,7 @@ index 000000000..0c4a64526
 +}
 diff --git a/pkg/vscmode/config.go b/pkg/vscmode/config.go
 new file mode 100644
-index 000000000..6175fcf5a
+index 00000000..6175fcf5
 --- /dev/null
 +++ b/pkg/vscmode/config.go
 @@ -0,0 +1,53 @@
@@ -958,7 +987,7 @@ index 000000000..6175fcf5a
 +}
 diff --git a/pkg/vscmode/legacy.go b/pkg/vscmode/legacy.go
 new file mode 100644
-index 000000000..c5ae881d4
+index 00000000..c5ae881d
 --- /dev/null
 +++ b/pkg/vscmode/legacy.go
 @@ -0,0 +1,147 @@
@@ -1111,7 +1140,7 @@ index 000000000..c5ae881d4
 +}
 diff --git a/pkg/vscmode/testing/helpers.go b/pkg/vscmode/testing/helpers.go
 new file mode 100644
-index 000000000..adcdf6dec
+index 00000000..adcdf6de
 --- /dev/null
 +++ b/pkg/vscmode/testing/helpers.go
 @@ -0,0 +1,112 @@
@@ -1229,7 +1258,7 @@ index 000000000..adcdf6dec
 +}
 diff --git a/pkg/vscmode/vsc_only.go b/pkg/vscmode/vsc_only.go
 new file mode 100644
-index 000000000..f69589102
+index 00000000..aabda0e8
 --- /dev/null
 +++ b/pkg/vscmode/vsc_only.go
 @@ -0,0 +1,174 @@
@@ -1409,7 +1438,7 @@ index 000000000..f69589102
 +}
 diff --git a/pkg/vscmode/vscmode.go b/pkg/vscmode/vscmode.go
 new file mode 100644
-index 000000000..0cc522460
+index 00000000..0cc52246
 --- /dev/null
 +++ b/pkg/vscmode/vscmode.go
 @@ -0,0 +1,72 @@
@@ -1487,7 +1516,7 @@ index 000000000..0cc522460
 +}
 diff --git a/pkg/vscmode/vscmode_test.go b/pkg/vscmode/vscmode_test.go
 new file mode 100644
-index 000000000..060eb1e6b
+index 00000000..060eb1e6
 --- /dev/null
 +++ b/pkg/vscmode/vscmode_test.go
 @@ -0,0 +1,699 @@
