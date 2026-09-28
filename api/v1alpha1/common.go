@@ -18,14 +18,28 @@ package v1alpha1
 
 import metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
+// DataExportImportStatus is shared by DataExport and DataImport. The two kinds
+// describe it differently and admit different phases, server states and
+// condition vocabularies, so the descriptions and those enums are set per kind,
+// with crd-enricher markers on the DataExport and DataImport root types; the
+// comments on the fields below are for developers and are kept out of the CRD
+// by the blank line that follows each of them.
+
 // +k8s:deepcopy-gen=true
 type DataExportImportStatus struct {
-	URL             string             `json:"url"`
-	CA              string             `json:"ca,omitempty"`
-	PublicURL       string             `json:"publicURL"`
-	AccessTimestamp metav1.Time        `json:"accessTimestamp"`
-	Conditions      []metav1.Condition `json:"conditions,omitempty"`
-	VolumeMode      string             `json:"volumeMode,omitempty"`
+	// +optional
+	URL string `json:"url"`
+	// +optional
+	CA string `json:"ca,omitempty"`
+	// +optional
+	PublicURL string `json:"publicURL"`
+	// +optional
+	AccessTimestamp metav1.Time `json:"accessTimestamp"`
+	// +optional
+	Conditions []metav1.Condition `json:"conditions,omitempty"`
+	// +optional
+	// +kubebuilder:validation:Enum=Block;Filesystem
+	VolumeMode string `json:"volumeMode,omitempty"`
 
 	// Phase is the coarse-grained lifecycle state of the execution object, written EXCLUSIVELY by the
 	// data-manager controller (never by the server pod). It mirrors the VMOP status model:
@@ -34,6 +48,7 @@ type DataExportImportStatus struct {
 	// Terminating denotes DeletionTimestamp != nil and is a transient state, not an outcome.
 	// The catalog of allowed values lives in the common module (common.Phase*); the CRD schema pins the
 	// per-kind enum (DataImport vs DataExport differ). Empty until the controller first reconciles.
+
 	// +optional
 	Phase string `json:"phase,omitempty"`
 
@@ -41,6 +56,7 @@ type DataExportImportStatus struct {
 	// The controller sets it exactly once, when the phase first becomes terminal; the garbage collector
 	// measures the object's retention age from this timestamp (not from creationTimestamp, because a
 	// transfer may run for hours before it finishes). Nil while the object is non-terminal.
+
 	// +optional
 	CompletionTimestamp *metav1.Time `json:"completionTimestamp,omitempty"`
 
@@ -49,6 +65,7 @@ type DataExportImportStatus struct {
 	// DataImport reports Ready | Finished | IdleExpired; DataExport reports Ready | IdleExpired
 	// (it never produces an artifact, so it has no Finished state). The catalog of allowed values lives
 	// in the common module (common.ServerState*). Empty until the server pod first reports.
+
 	// +optional
 	ServerState string `json:"serverState,omitempty"`
 
@@ -56,6 +73,7 @@ type DataExportImportStatus struct {
 	// data.artifactRef (VolumeSnapshotContent or PersistentVolume). It is written once the backing
 	// VolumeCaptureRequest completes; the state-snapshotter import orchestrator reads data.artifactRef to
 	// populate SnapshotContent.status.data.artifactRef. Empty for DataExport.
+
 	// +optional
 	Data *DataExportImportData `json:"data,omitempty"`
 }
@@ -88,9 +106,12 @@ type DataExportImportData struct {
 // PersistentVolume) by its apiVersion/kind/name.
 // +k8s:deepcopy-gen=true
 type DataArtifactReference struct {
+	// +optional
 	APIVersion string `json:"apiVersion"`
-	Kind       string `json:"kind"`
-	Name       string `json:"name"`
+	// +optional
+	Kind string `json:"kind"`
+	// +optional
+	Name string `json:"name"`
 	// UID is the durable data artifact UID (for example the VolumeSnapshotContent UID). It makes the
 	// artifact reference self-contained, symmetric with VolumeCaptureRequest's status.data.artifactRef.uid.
 	// Optional: producers fill it best-effort (the artifact may be referenced before its UID is known).

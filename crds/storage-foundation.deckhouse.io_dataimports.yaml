@@ -1,0 +1,399 @@
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  labels:
+    backup.deckhouse.io/cluster-config: "true"
+    heritage: deckhouse
+    module: storage-foundation
+  name: dataimports.storage-foundation.deckhouse.io
+spec:
+  group: storage-foundation.deckhouse.io
+  names:
+    kind: DataImport
+    plural: dataimports
+    shortNames:
+    - di
+    singular: dataimport
+  preserveUnknownFields: false
+  scope: Namespaced
+  versions:
+  - additionalPrinterColumns:
+    - jsonPath: .status.url
+      name: URL
+      type: string
+    - jsonPath: .status.publicURL
+      name: Public URL
+      type: string
+    - jsonPath: .spec.ttl
+      name: TTL
+      priority: 1
+      type: string
+    - jsonPath: .spec.mode
+      name: Mode
+      priority: 1
+      type: string
+    - jsonPath: .spec.storageParams.storageClassName
+      name: Storage Class
+      priority: 1
+      type: string
+    - jsonPath: .spec.waitForFirstConsumer
+      name: Wait For Consumer
+      priority: 1
+      type: boolean
+    - description: The status of the DataImport resource.
+      jsonPath: .status.phase
+      name: Status
+      type: string
+    - jsonPath: .metadata.creationTimestamp
+      name: Age
+      type: date
+    name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        description: |-
+          Resource for importing data into a newly created PVC (CreatePVC) or producing a durable data
+          artifact for an already-existing snapshot node (PopulateData).
+        properties:
+          spec:
+            properties:
+              mode:
+                default: CreatePVC
+                description: |-
+                  Discriminator selecting what the import does with the bytes:
+
+                  - `CreatePVC`: write into a preserved, newly created PVC (`pvcTemplate`). No durable
+                    artifact.
+                  - `PopulateData`: stage the bytes into a transient scratch volume (`storageParams`) and
+                    capture them into a durable VolumeSnapshotContent for the already-existing snapshot node
+                    referenced by `snapshotRef`.
+                enum:
+                - CreatePVC
+                - PopulateData
+                type: string
+              publish:
+                default: false
+                description: Expose the importer pod outside the cluster.
+                type: boolean
+              pvcTemplate:
+                description: |-
+                  CreatePVC only. PersistentVolumeClaim template fully describing the target PVC the
+                  imported bytes are written into; the PVC is preserved after the import.
+                properties:
+                  metadata:
+                    description: PersistentVolumeClaim metadata.
+                    properties:
+                      annotations:
+                        additionalProperties:
+                          type: string
+                        description: PersistentVolumeClaim annotations.
+                        type: object
+                      labels:
+                        additionalProperties:
+                          type: string
+                        description: PersistentVolumeClaim labels.
+                        type: object
+                      name:
+                        description: PersistentVolumeClaim name.
+                        type: string
+                    type: object
+                  spec:
+                    description: PersistentVolumeClaim specification.
+                    properties:
+                      accessModes:
+                        description: Desired access modes for the volume.
+                        items:
+                          enum:
+                          - ReadWriteOnce
+                          - ReadOnlyMany
+                          - ReadWriteMany
+                          - ReadWriteOncePod
+                          type: string
+                        type: array
+                      resources:
+                        description: Minimum resource requirements for the volume.
+                        properties:
+                          requests:
+                            additionalProperties:
+                              anyOf:
+                              - type: integer
+                              - type: string
+                              pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                              x-kubernetes-int-or-string: true
+                            description: Minimum amount of compute resources required.
+                            type: object
+                        type: object
+                      storageClassName:
+                        description: |-
+                          Name of the StorageClass required by the PersistentVolumeClaim. When omitted,
+                          the cluster's default StorageClass is used — also when it is marked default
+                          later; the import waits until then. An empty string is not supported: the
+                          volume has to be dynamically provisioned.
+                        minLength: 1
+                        type: string
+                      volumeMode:
+                        description: Volume mode required by the PersistentVolumeClaim.
+                        enum:
+                        - Block
+                        - Filesystem
+                        type: string
+                    type: object
+                type: object
+              snapshotRef:
+                description: |-
+                  PopulateData only. Reference to the already-existing xxxSnapshot node the produced
+                  durable artifact belongs to (namespace implicit = the DataImport namespace). Set by the
+                  external creator (d8/user/backup); the DataImport controller does not read it — it exists
+                  so the state-snapshotter reverse-lookup can match the leaf against `spec.snapshotRef`.
+                properties:
+                  apiVersion:
+                    description: Group/version of the snapshot node (e.g. `snapshot.storage.k8s.io/v1`).
+                    type: string
+                  kind:
+                    description: Kind of the snapshot node (e.g. `VolumeSnapshot`,
+                      `VirtualDiskSnapshot`).
+                    minLength: 1
+                    type: string
+                  name:
+                    description: Name of the snapshot node.
+                    minLength: 1
+                    type: string
+                required:
+                - kind
+                - name
+                type: object
+                x-kubernetes-validations:
+                - message: snapshotRef is immutable
+                  rule: self == oldSelf
+              storageParams:
+                description: |-
+                  PopulateData only. Parameters of the transient scratch volume the imported bytes are
+                  staged into before capture; it is destroyed after the durable VolumeSnapshotContent is
+                  produced. Its StorageClass must be snapshot-capable (it references a VolumeSnapshotClass
+                  via the `storage.deckhouse.io/volumesnapshotclass` annotation).
+                properties:
+                  size:
+                    description: Requested size of the scratch PVC (a Kubernetes quantity,
+                      e.g. `10Gi`).
+                    minLength: 1
+                    type: string
+                  storageClassName:
+                    description: StorageClass of the scratch PVC (must be snapshot-capable).
+                    minLength: 1
+                    type: string
+                  volumeMode:
+                    description: Volume mode of the scratch PVC. Defaults to `Filesystem`
+                      when omitted.
+                    enum:
+                    - Block
+                    - Filesystem
+                    type: string
+                required:
+                - size
+                - storageClassName
+                type: object
+              ttl:
+                description: |-
+                  Time-to-live duration after the last user request.
+
+                  Acceptable values:
+
+                  - `<number>s`
+                  - `<number>m`
+                  - `<number>h`
+
+                  For example, `5m`, `2h45m`, or `1d`.
+                pattern: ^([0-9]+(\.[0-9]+)?h)?([0-9]+(\.[0-9]+)?m)?([0-9]+s)?$
+                type: string
+              waitForFirstConsumer:
+                default: true
+                description: |-
+                  Controls what the import waits for before it starts moving data into the target PVC.
+                  When the target PVC's StorageClass has `volumeBindingMode: WaitForFirstConsumer` and
+                  this field is `true` (the default), the import waits until a pod that mounts the
+                  target PVC is scheduled, then places the imported volume on the node that pod was
+                  scheduled to. When `false`, the import does not wait for a consumer: it proceeds
+                  immediately and becomes the volume's first consumer itself. Has no effect when the
+                  target PVC's StorageClass does not delay binding until a consumer appears.
+                type: boolean
+            required:
+            - ttl
+            type: object
+            x-kubernetes-validations:
+            - message: mode PopulateData requires snapshotRef and storageParams.
+              rule: self.mode != 'PopulateData' || (has(self.snapshotRef) && has(self.storageParams))
+            - message: mode PopulateData forbids pvcTemplate.
+              rule: self.mode != 'PopulateData' || !has(self.pvcTemplate)
+            - message: mode CreatePVC requires pvcTemplate.
+              rule: self.mode != 'CreatePVC' || has(self.pvcTemplate)
+            - message: mode CreatePVC forbids snapshotRef and storageParams.
+              rule: self.mode != 'CreatePVC' || (!has(self.snapshotRef) && !has(self.storageParams))
+            - message: pvcTemplate requires metadata.name.
+              rule: '!has(self.pvcTemplate) || (has(self.pvcTemplate.metadata) &&
+                has(self.pvcTemplate.metadata.name) && size(self.pvcTemplate.metadata.name)
+                > 0)'
+            - message: mode is immutable
+              rule: self.mode == oldSelf.mode
+          status:
+            description: DataImport resource status details.
+            properties:
+              accessTimestamp:
+                description: Last access timestamp updated by the importer pod.
+                format: date-time
+                type: string
+              ca:
+                description: Base64-encoded CA certificate for establishing a TLS
+                  connection to the importer pod.
+                type: string
+              completionTimestamp:
+                description: |-
+                  Time the DataImport reached a terminal phase (Completed, Expired or Failed). Set once by
+                  the controller; the garbage collector measures retention age from this timestamp.
+                format: date-time
+                type: string
+              conditions:
+                items:
+                  description: Array of conditions describing the current state of
+                    the DataImport resource.
+                  properties:
+                    lastTransitionTime:
+                      description: |-
+                        Last time the condition transitioned from one status to another.
+
+                        This should be when the underlying condition changed.
+                        If the last transition time is not known, then using the time when the API field changed is acceptable.
+                      format: date-time
+                      type: string
+                    message:
+                      description: |-
+                        Human-readable message indicating details about the transition.
+
+                        This may be an empty string.
+                      maxLength: 32768
+                      type: string
+                    observedGeneration:
+                      description: |-
+                        The `.metadata.generation` that the condition was set based upon.
+
+                        For instance, if `.metadata.generation` is currently 12, but the `.status.conditions[x].observedGeneration` is 9, the condition is out of date.
+                        with respect to the current state of the instance.
+                      format: int64
+                      minimum: 0
+                      type: integer
+                    reason:
+                      description: Current condition status reason.
+                      enum:
+                      - Pending
+                      - PVCCreated
+                      - ServerReady
+                      - InProgress
+                      - Expired
+                      - Deleted
+                      - UploadFinished
+                      - Completed
+                      - Failed
+                      - TargetFailed
+                      - CleanupFailed
+                      maxLength: 1024
+                      minLength: 1
+                      pattern: ^[A-Za-z]([A-Za-z0-9_,:]*[A-Za-z0-9_])?$
+                      type: string
+                    status:
+                      description: Condition status.
+                      enum:
+                      - "True"
+                      - "False"
+                      - Unknown
+                      type: string
+                    type:
+                      description: Condition type.
+                      enum:
+                      - Ready
+                      - UploadFinished
+                      - Completed
+                      maxLength: 316
+                      pattern: ^([a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*/)?(([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9])$
+                      type: string
+                  required:
+                  - lastTransitionTime
+                  - message
+                  - reason
+                  - status
+                  - type
+                  type: object
+                type: array
+              data:
+                description: |-
+                  Captured-data block for this import. Carries the durable cluster-scoped data artifact
+                  under data.artifactRef (a VolumeSnapshotContent). Populated once the backing
+                  VolumeCaptureRequest completes.
+                properties:
+                  artifactRef:
+                    description: |-
+                      Reference to the durable cluster-scoped data artifact produced by this import
+                      (a VolumeSnapshotContent).
+                    properties:
+                      apiVersion:
+                        type: string
+                      kind:
+                        type: string
+                      name:
+                        type: string
+                      uid:
+                        description: |-
+                          UID of the durable data artifact (for example the VolumeSnapshotContent UID),
+                          making the reference self-contained. Optional; producers fill it best-effort.
+                        type: string
+                    type: object
+                  fsType:
+                    description: |-
+                      Filesystem the imported bytes were actually written onto, observed on the scratch
+                      volume's PersistentVolume (`spec.csi.fsType`) before that volume was destroyed. The
+                      scratch volume is deleted right after capture and the artifact itself records no
+                      filesystem type, so this is the only surviving record of it.
+
+                      Empty means "not known", never "default": a Block import carries no filesystem at
+                      all, and a CSI driver may record no filesystem type on the volume.
+                    type: string
+                type: object
+              phase:
+                description: |-
+                  Coarse-grained lifecycle state, written exclusively by the controller:
+                  Pending → Ready → Completed | Expired | Failed. `Terminating` denotes an object with a
+                  deletion timestamp and is a transient state, not an outcome. `Expired` is a normal
+                  terminal outcome (the idle-TTL window elapsed), not a failure.
+                enum:
+                - Pending
+                - Ready
+                - Completed
+                - Expired
+                - Failed
+                - Terminating
+                type: string
+              publicURL:
+                description: Public URL of the importer service.
+                type: string
+              serverState:
+                description: |-
+                  Raw progress signal reported by the importer server pod (the only writer): `Ready` when
+                  the server is serving, `Finished` when the client upload finished durably, `IdleExpired`
+                  when the idle-TTL window elapsed. The controller derives phase and conditions from it.
+                enum:
+                - Ready
+                - Finished
+                - IdleExpired
+                type: string
+              url:
+                description: Internal URL of the importer service.
+                type: string
+              volumeMode:
+                description: Volume mode of the exported data.
+                enum:
+                - Block
+                - Filesystem
+                type: string
+            type: object
+        type: object
+    served: true
+    storage: true
+    subresources:
+      status: {}

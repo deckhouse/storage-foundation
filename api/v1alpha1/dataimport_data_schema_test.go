@@ -26,10 +26,11 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-// crdStatusProperties returns status.properties of the named hand-curated CRD at the given served version.
-// The dataexports/dataimports CRDs are NOT generated from these Go types (hack/generate_code.sh deletes the
-// controller-gen output for them, because they carry CEL rules markers cannot express), so a field added to the Go struct reaches the API only if it is also added here
-// by hand. That gap is exactly what the tests below watch.
+// crdStatusProperties returns status.properties of the named CRD in crds/ at the given served version.
+// The DataExport and DataImport CRDs are generated from these Go types, but their status is shared and its
+// per-kind schema is shaped by crd-enricher markers on the root types (DataExport drops status.data), so a
+// field added to the shared struct can still be taken out of one kind's API by a marker. That is what the
+// tests below watch.
 func crdStatusProperties(t *testing.T, crdFile, version string) map[string]interface{} {
 	t.Helper()
 
@@ -72,7 +73,7 @@ func crdStatusProperties(t *testing.T, crdFile, version string) map[string]inter
 // destroyed right after capture and the produced artifact carries no filesystem metadata. Undeclared here
 // means lost forever, with no error anywhere.
 func TestDataImportCRD_StatusDataDeclaresFSType(t *testing.T) {
-	statusProps := crdStatusProperties(t, "dataimports.yaml", "v1alpha1")
+	statusProps := crdStatusProperties(t, "storage-foundation.deckhouse.io_dataimports.yaml", "v1alpha1")
 
 	data, ok := statusProps["data"].(map[string]interface{})
 	if !ok {
@@ -115,7 +116,7 @@ func TestDataImportCRD_StatusDataDeclaresFSType(t *testing.T) {
 	// The Russian documentation is a parallel, hand-written mirror of the same schema (crds/doc-ru-*.yaml)
 	// from which the module docs are rendered. A field missing there is not a validation failure anywhere, so
 	// nothing but this check notices it.
-	ruProps := crdStatusProperties(t, "doc-ru-dataimports.yaml", "v1alpha1")
+	ruProps := crdStatusProperties(t, "doc-ru-storage-foundation.deckhouse.io_dataimports.yaml", "v1alpha1")
 	ruData, ok := ruProps["data"].(map[string]interface{})
 	if !ok {
 		t.Fatal("doc-ru-dataimports.yaml: status.data must be documented")
@@ -140,7 +141,7 @@ func TestDataImportCRD_StatusDataDeclaresFSType(t *testing.T) {
 // artifact and owns no scratch volume whose filesystem could be observed. A `data` block appearing here means
 // import-only fields have leaked into the export's published API.
 func TestDataExportCRD_StatusDeclaresNoDataBlock(t *testing.T) {
-	statusProps := crdStatusProperties(t, "dataexports.yaml", "v1alpha1")
+	statusProps := crdStatusProperties(t, "storage-foundation.deckhouse.io_dataexports.yaml", "v1alpha1")
 
 	if _, ok := statusProps["data"]; ok {
 		t.Fatalf("dataexports.yaml: status must not declare a data block; an export produces no artifact (status keys: %v)",

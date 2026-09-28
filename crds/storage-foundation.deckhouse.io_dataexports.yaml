@@ -1,0 +1,224 @@
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  labels:
+    backup.deckhouse.io/cluster-config: "true"
+    heritage: deckhouse
+    module: storage-foundation
+  name: dataexports.storage-foundation.deckhouse.io
+spec:
+  group: storage-foundation.deckhouse.io
+  names:
+    kind: DataExport
+    plural: dataexports
+    shortNames:
+    - de
+    singular: dataexport
+  preserveUnknownFields: false
+  scope: Namespaced
+  versions:
+  - additionalPrinterColumns:
+    - jsonPath: .status.url
+      name: URL
+      type: string
+    - jsonPath: .status.publicURL
+      name: Public URL
+      type: string
+    - jsonPath: .spec.ttl
+      name: TTL
+      priority: 1
+      type: string
+    - jsonPath: .spec.targetRef.kind
+      name: Target Kind
+      priority: 1
+      type: string
+    - jsonPath: .spec.targetRef.name
+      name: Target Name
+      priority: 1
+      type: string
+    - description: The status of the DataExport resource.
+      jsonPath: .status.phase
+      name: Status
+      type: string
+    - jsonPath: .metadata.creationTimestamp
+      name: Age
+      type: date
+    name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        description: Resource for exporting persistent volume files and blocks.
+        properties:
+          spec:
+            properties:
+              publicIngress:
+                description: Type of public ingress for external access.
+                enum:
+                - KubernetesAPI
+                - ConsoleFrontend
+                type: string
+              publish:
+                description: Enable external access to the exporter pod outside the
+                  cluster.
+                type: boolean
+              targetRef:
+                description: |-
+                  GroupKind reference to the target resource for export (namespace is implicit =
+                  the DataExport's own namespace). Live PersistentVolumeClaim and VirtualDisk are
+                  exported directly; any other (snapshot) kind is resolved generically through the
+                  leaf's bound SnapshotContent.dataRef and restored via a VolumeRestoreRequest. A bare
+                  cluster-scoped VolumeSnapshotContent is rejected.
+                properties:
+                  group:
+                    description: |-
+                      API group of the target resource ("" / omitted for the core group, e.g.
+                      for PersistentVolumeClaim).
+                    type: string
+                  kind:
+                    description: |-
+                      Kind of the target (e.g. PersistentVolumeClaim, VirtualDisk, VolumeSnapshot,
+                      VirtualDiskSnapshot).
+                    minLength: 1
+                    type: string
+                  name:
+                    description: Name of the target resource for export.
+                    minLength: 1
+                    type: string
+                required:
+                - kind
+                - name
+                type: object
+              ttl:
+                description: Time-to-live duration after the last user request. Acceptable
+                  values - <number>s, <number>m, <number>h, e.g. 5m, 2h45m, 1d
+                pattern: ^([0-9]+(\.[0-9]+)?h)?([0-9]+(\.[0-9]+)?m)?([0-9]+s)?$
+                type: string
+            required:
+            - targetRef
+            - ttl
+            type: object
+            x-kubernetes-validations:
+            - message: spec.targetRef is immutable
+              rule: 'self.targetRef.kind == oldSelf.targetRef.kind && self.targetRef.name
+                == oldSelf.targetRef.name && (has(self.targetRef.group) ? self.targetRef.group
+                : "") == (has(oldSelf.targetRef.group) ? oldSelf.targetRef.group :
+                "")'
+          status:
+            description: Status information for the DataExport resource.
+            properties:
+              accessTimestamp:
+                description: Timestamp of the last access to the exported data.
+                format: date-time
+                type: string
+              ca:
+                description: Base64 encoded CA certificate for TLS connection to the
+                  exporter pod.
+                type: string
+              completionTimestamp:
+                description: |-
+                  Time the DataExport reached a terminal phase (Expired or Failed). Set once by the
+                  controller; the garbage collector measures retention age from this timestamp.
+                format: date-time
+                type: string
+              conditions:
+                description: Array of conditions describing the current state of the
+                  DataExport resource.
+                items:
+                  properties:
+                    lastTransitionTime:
+                      description: Last time the condition transitioned from one status
+                        to another.
+                      format: date-time
+                      type: string
+                    message:
+                      description: Message describing the condition.
+                      maxLength: 32768
+                      type: string
+                    observedGeneration:
+                      description: Observed generation of the resource when the condition
+                        was last updated.
+                      format: int64
+                      minimum: 0
+                      type: integer
+                    reason:
+                      description: Reason for the current condition status.
+                      enum:
+                      - Pending
+                      - ServerReady
+                      - ValidationFailed
+                      - TargetNotReady
+                      - TargetNotFound
+                      - PVConflict
+                      - DeploymentFailed
+                      - CleanupFailed
+                      - PublishFailed
+                      - Expired
+                      maxLength: 1024
+                      minLength: 1
+                      pattern: ^[A-Za-z]([A-Za-z0-9_,:]*[A-Za-z0-9_])?$
+                      type: string
+                    status:
+                      description: Status of the condition.
+                      enum:
+                      - "True"
+                      - "False"
+                      - Unknown
+                      type: string
+                    type:
+                      description: Type of the condition.
+                      enum:
+                      - Ready
+                      maxLength: 316
+                      pattern: ^([a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*/)?(([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9])$
+                      type: string
+                  required:
+                  - type
+                  - status
+                  - reason
+                  - message
+                  - observedGeneration
+                  - lastTransitionTime
+                  type: object
+                type: array
+              phase:
+                description: |-
+                  Coarse-grained lifecycle state, written exclusively by the controller:
+                  Pending → Ready → Expired | Failed (a DataExport has no Completed phase). `Terminating`
+                  denotes an object with a deletion timestamp and is a transient state, not an outcome.
+                  `Expired` is a normal terminal outcome (the idle-TTL window elapsed), not a failure.
+                enum:
+                - Pending
+                - Ready
+                - Expired
+                - Failed
+                - Terminating
+                type: string
+              publicURL:
+                description: |-
+                  Public URL for external access (e.g., https://api.<public-domain>/<namespace>/<target-kind>/<target-name>/).
+                  Here <target-kind> is the short kind of the export target: pvc, vd or snap (any snapshot-backed target),
+                  and <target-name> is the value of spec.targetRef.name.
+                type: string
+              serverState:
+                description: |-
+                  Raw progress signal reported by the exporter server pod (the only writer): `Ready` when
+                  the server is serving, `IdleExpired` when the idle-TTL window elapsed. The controller
+                  derives phase and conditions from it.
+                enum:
+                - Ready
+                - IdleExpired
+                type: string
+              url:
+                description: Internal URL of the exporter pod (e.g., https://X.X.X.X:8085).
+                type: string
+              volumeMode:
+                description: Volume mode of the exported data.
+                enum:
+                - Block
+                - Filesystem
+                type: string
+            type: object
+        type: object
+    served: true
+    storage: true
+    subresources:
+      status: {}

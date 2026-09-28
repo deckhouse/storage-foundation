@@ -14,7 +14,10 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# Regenerates crds/internal from the Go types in api/.
+# Regenerates the CRDs in crds/ and crds/internal from the Go types in api/.
+#
+# DataExport and DataImport are the module's user-facing API and go into crds/;
+# the other kinds are internal and go into crds/internal.
 #
 # controller-gen renders the OpenAPI schema from the kubebuilder markers;
 # crd-enricher then folds in what controller-gen cannot emit -- the x-doc-*
@@ -105,30 +108,8 @@ echo "Enriching the CRDs"
 # anyway, so the drift gate would pass on a render that lost the marker.
 "${tools_dir}/crd-enricher" paths="${api_paths//;/,}" crds="${render_dir}" strict
 
-# DataExport and DataImport are hand-curated in crds/ rather than generated. Their
-# rendered duplicates are dropped here -- shipping both would put two CRDs with the
-# same metadata.name in the bundle. This replaces the `rm -f` that used to follow the
-# render.
-hand_curated=(
-    storage-foundation.deckhouse.io_dataexports.yaml
-    storage-foundation.deckhouse.io_dataimports.yaml
-)
-
-# The names in hand_curated are keyed on what the render produces, so a kind that
-# is renamed or changes group leaves a stale entry that quietly stops matching.
-# Checked before anything is installed: without this the skip silently stops
-# skipping, and the drift the gate then reports points at the manifests rather
-# than at the list that caused it.
-for listed in "${hand_curated[@]}"; do
-    if [ ! -f "${render_dir}/${listed}" ]; then
-        echo "error: ${listed} is listed in hack/generate_crds.sh but the render does not" \
-             "produce it; the list is stale" >&2
-        exit 1
-    fi
-done
-
 # A kind that disappears from the Go types leaves its manifest behind here; that
-# is deliberate, since crds/ is not ours alone to prune -- the hand-curated
+# is deliberate, since crds/ is not ours alone to prune -- the vendored
 # manifests and the doc-ru-*.yaml overlays live there too. Removing a retired CRD
 # stays a manual, reviewed step.
 
@@ -142,19 +123,13 @@ if [ ${#rendered_files[@]} -eq 0 ]; then
     exit 1
 fi
 
-echo "Installing the CRDs into crds/internal"
+echo "Installing the CRDs into crds and crds/internal"
 for rendered in "${rendered_files[@]}"; do
     name=$(basename "${rendered}")
-    skip=""
-    for curated in "${hand_curated[@]}"; do
-        if [ "${name}" = "${curated}" ]; then
-            skip=yes
-            break
-        fi
-    done
-    if [ -n "${skip}" ]; then
-        echo "  skipping ${name} (hand-curated in crds/)"
-        continue
-    fi
-    cp "${rendered}" "${root_dir}/crds/internal/${name}"
+    case "${name}" in
+    storage-foundation.deckhouse.io_dataexports.yaml | storage-foundation.deckhouse.io_dataimports.yaml)
+        dest="${root_dir}/crds" ;;
+    *) dest="${root_dir}/crds/internal" ;;
+    esac
+    cp "${rendered}" "${dest}/${name}"
 done

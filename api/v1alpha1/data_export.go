@@ -22,13 +22,61 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
+// The whole DataExport object is intentionally NOT immutable (it was once locked
+// with the Deckhouse-only x-kubernetes-immutable extension): only spec.targetRef
+// -- the export identity -- is locked after creation, by the CEL transition rule
+// on DataExportSpec. The other spec fields (ttl, publish, publicIngress) may still
+// change. This mirrors DataImport, which locks only spec.mode and spec.snapshotRef.
+//
+// The status is the DataExportImportStatus shared with DataImport; its
+// DataExport-specific descriptions and enums are set here. status.data is
+// DataImport's only and is not part of this kind's schema.
+
+// Resource for exporting persistent volume files and blocks.
+//
 // +kubebuilder:object:root=true
 // +kubebuilder:subresource:status
+// +kubebuilder:resource:shortName=de
+// +kubebuilder:metadata:labels={"heritage=deckhouse","module=storage-foundation","backup.deckhouse.io/cluster-config=true"}
+// +kubebuilder:printcolumn:name="URL",type="string",JSONPath=".status.url"
+// +kubebuilder:printcolumn:name="Public URL",type="string",JSONPath=".status.publicURL"
+// +kubebuilder:printcolumn:name="TTL",type="string",JSONPath=".spec.ttl",priority=1
+// +kubebuilder:printcolumn:name="Target Kind",type="string",JSONPath=".spec.targetRef.kind",priority=1
+// +kubebuilder:printcolumn:name="Target Name",type="string",JSONPath=".spec.targetRef.name",priority=1
+// +kubebuilder:printcolumn:name="Status",type="string",JSONPath=".status.phase",description="The status of the DataExport resource."
+// +kubebuilder:printcolumn:name="Age",type="date",JSONPath=".metadata.creationTimestamp"
+// +crd-enricher:crd:minimal=true
+// +crd-enricher:crd:preserveUnknownFields=false
+// +crd-enricher:raw:properties.status.description=Status information for the DataExport resource.
+// +crd-enricher:unset:properties.status.properties.data
+// +crd-enricher:raw:properties.status.properties.url.description=Internal URL of the exporter pod (e.g., https://X.X.X.X:8085).
+// +crd-enricher:raw:properties.status.properties.ca.description=Base64 encoded CA certificate for TLS connection to the exporter pod.
+// +crd-enricher:raw:properties.status.properties.publicURL.description="Public URL for external access (e.g., https://api.<public-domain>/<namespace>/<target-kind>/<target-name>/).\nHere <target-kind> is the short kind of the export target: pvc, vd or snap (any snapshot-backed target),\nand <target-name> is the value of spec.targetRef.name."
+// +crd-enricher:raw:properties.status.properties.accessTimestamp.description=Timestamp of the last access to the exported data.
+// +crd-enricher:raw:properties.status.properties.volumeMode.description=Volume mode of the exported data.
+// +crd-enricher:raw:properties.status.properties.phase.enum=[Pending, Ready, Expired, Failed, Terminating]
+// +crd-enricher:raw:properties.status.properties.phase.description="Coarse-grained lifecycle state, written exclusively by the controller:\nPending → Ready → Expired | Failed (a DataExport has no Completed phase). `Terminating`\ndenotes an object with a deletion timestamp and is a transient state, not an outcome.\n`Expired` is a normal terminal outcome (the idle-TTL window elapsed), not a failure."
+// +crd-enricher:raw:properties.status.properties.completionTimestamp.description="Time the DataExport reached a terminal phase (Expired or Failed). Set once by the\ncontroller; the garbage collector measures retention age from this timestamp."
+// +crd-enricher:raw:properties.status.properties.serverState.enum=[Ready, IdleExpired]
+// +crd-enricher:raw:properties.status.properties.serverState.description="Raw progress signal reported by the exporter server pod (the only writer): `Ready` when\nthe server is serving, `IdleExpired` when the idle-TTL window elapsed. The controller\nderives phase and conditions from it."
+// +crd-enricher:raw:properties.status.properties.conditions.description=Array of conditions describing the current state of the DataExport resource.
+// +crd-enricher:unset:properties.status.properties.conditions.items.description
+// +crd-enricher:raw:properties.status.properties.conditions.items.required=[type, status, reason, message, observedGeneration, lastTransitionTime]
+// +crd-enricher:raw:properties.status.properties.conditions.items.properties.type.description=Type of the condition.
+// +crd-enricher:raw:properties.status.properties.conditions.items.properties.type.enum=[Ready]
+// +crd-enricher:raw:properties.status.properties.conditions.items.properties.status.description=Status of the condition.
+// +crd-enricher:raw:properties.status.properties.conditions.items.properties.reason.description=Reason for the current condition status.
+// +crd-enricher:raw:properties.status.properties.conditions.items.properties.reason.enum=[Pending, ServerReady, ValidationFailed, TargetNotReady, TargetNotFound, PVConflict, DeploymentFailed, CleanupFailed, PublishFailed, Expired]
+// +crd-enricher:raw:properties.status.properties.conditions.items.properties.message.description=Message describing the condition.
+// +crd-enricher:raw:properties.status.properties.conditions.items.properties.lastTransitionTime.description=Last time the condition transitioned from one status to another.
+// +crd-enricher:raw:properties.status.properties.conditions.items.properties.observedGeneration.description=Observed generation of the resource when the condition was last updated.
 type DataExport struct {
 	metav1.TypeMeta   `json:",inline"`
 	metav1.ObjectMeta `json:"metadata,omitempty"`
 
-	Spec   DataExportSpec         `json:"spec"`
+	// +optional
+	Spec DataExportSpec `json:"spec"`
+	// +optional
 	Status DataExportImportStatus `json:"status"`
 }
 
@@ -40,14 +88,35 @@ type DataExportList struct {
 	Items []DataExport `json:"items"`
 }
 
+// targetRef is the export identity (what is exported): set once at creation and
+// never changed. The other spec fields (ttl, publish, publicIngress) may be
+// updated freely. The rule compares the identity field by field and normalizes
+// the optional group (absent == core group == ""): the controller round-trips
+// targetRef through a Go struct whose group is `json:",omitempty"`, so a create
+// that sent group:"" is written back with group omitted. A whole-object
+// self.targetRef == oldSelf.targetRef would wrongly flag that serialization no-op
+// as a mutation and reject the controller's own finalizer/status update, wedging
+// reconciliation.
+
 // +k8s:deepcopy-gen=true
+// +kubebuilder:validation:XValidation:rule="self.targetRef.kind == oldSelf.targetRef.kind && self.targetRef.name == oldSelf.targetRef.name && (has(self.targetRef.group) ? self.targetRef.group : \"\") == (has(oldSelf.targetRef.group) ? oldSelf.targetRef.group : \"\")",message="spec.targetRef is immutable"
 type DataExportSpec struct {
-	TTL     string `json:"ttl"`
-	Publish bool   `json:"publish"`
-	// PublicIngress selects which cluster ingress to expose public URL through
-	// allowed values: KubernetesAPI, ConsoleFrontend
-	PublicIngress string                  `json:"publicIngress,omitempty"`
-	TargetRef     DataExportTargetRefSpec `json:"targetRef"`
+	// Time-to-live duration after the last user request. Acceptable values - <number>s, <number>m, <number>h, e.g. 5m, 2h45m, 1d
+	// +kubebuilder:validation:Pattern=`^([0-9]+(\.[0-9]+)?h)?([0-9]+(\.[0-9]+)?m)?([0-9]+s)?$`
+	TTL string `json:"ttl"`
+	// Enable external access to the exporter pod outside the cluster.
+	// +optional
+	Publish bool `json:"publish"`
+	// Type of public ingress for external access.
+	// +optional
+	// +kubebuilder:validation:Enum=KubernetesAPI;ConsoleFrontend
+	PublicIngress string `json:"publicIngress,omitempty"`
+	// GroupKind reference to the target resource for export (namespace is implicit =
+	// the DataExport's own namespace). Live PersistentVolumeClaim and VirtualDisk are
+	// exported directly; any other (snapshot) kind is resolved generically through the
+	// leaf's bound SnapshotContent.dataRef and restored via a VolumeRestoreRequest. A bare
+	// cluster-scoped VolumeSnapshotContent is rejected.
+	TargetRef DataExportTargetRefSpec `json:"targetRef"`
 }
 
 // DataExportTargetRefSpec references the export target by GroupKind + name (namespace is implicit = the
@@ -59,12 +128,16 @@ type DataExportSpec struct {
 // exfiltration).
 // +k8s:deepcopy-gen=true
 type DataExportTargetRefSpec struct {
-	// Group is the API group of the target resource ("" = core group, e.g. for PersistentVolumeClaim).
+	// API group of the target resource ("" / omitted for the core group, e.g.
+	// for PersistentVolumeClaim).
+	// +optional
 	Group string `json:"group,omitempty"`
-	// Kind is the target object kind (e.g. "PersistentVolumeClaim", "VirtualDisk", "VolumeSnapshot",
-	// "VirtualDiskSnapshot").
+	// Kind of the target (e.g. PersistentVolumeClaim, VirtualDisk, VolumeSnapshot,
+	// VirtualDiskSnapshot).
+	// +kubebuilder:validation:MinLength=1
 	Kind string `json:"kind"`
-	// Name is the target object name.
+	// Name of the target resource for export.
+	// +kubebuilder:validation:MinLength=1
 	Name string `json:"name"`
 }
 
