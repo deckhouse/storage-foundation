@@ -20,6 +20,7 @@ import (
 	"context"
 	"crypto/x509"
 	"encoding/base64"
+	"errors"
 	"fmt"
 	"net/http"
 	"strings"
@@ -27,6 +28,11 @@ import (
 	dev1alpha1 "github.com/deckhouse/storage-foundation/api/v1alpha1"
 	"github.com/deckhouse/storage-foundation/common"
 )
+
+// ErrUnsupportedAuthMethod marks a credential the exporter cannot authenticate with, as opposed to a
+// failure while authenticating a supported one. The distinction is what the response status turns on:
+// the former is the client's fault (401), the latter is ours (500).
+var ErrUnsupportedAuthMethod = errors.New("unsupported authentication method")
 
 func Authorize(next http.Handler, client UserAuthorizer, operation common.Operation, namespace string) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -43,6 +49,15 @@ func Authorize(next http.Handler, client UserAuthorizer, operation common.Operat
 
 		authenticated, username, groups, err := AuthenticateUser(r.Context(), client, *authData)
 		if err != nil {
+			// Same reasoning as above: a credential the exporter cannot authenticate with — a Basic header,
+			// say — is a client authentication failure, so it must not be reported as an internal error. Only
+			// a failure while authenticating a supported credential (a TokenReview call that did not go
+			// through, for instance) is ours to own as a 500.
+			if errors.Is(err, ErrUnsupportedAuthMethod) {
+				http.Error(w, "unauthorized: "+err.Error(), http.StatusUnauthorized)
+				return
+			}
+
 			http.Error(w, "failed to authenticate user: "+err.Error(), http.StatusInternalServerError)
 			return
 		}
@@ -118,11 +133,11 @@ func AuthenticateUser(ctx context.Context, client UserAuthorizer, authData dev1a
 	case dev1alpha1.AuthTypeBearer:
 		return client.AuthenticateUserByToken(ctx, authData.Token)
 	case dev1alpha1.AuthTypeBasic:
-		return false, "", nil, fmt.Errorf("basic auth is not supported")
+		return false, "", nil, fmt.Errorf("%w: basic auth", ErrUnsupportedAuthMethod)
 	case dev1alpha1.AuthTypeCert:
 		return AuthenticateUserByCert(authData.ClientCert)
 	default:
-		return false, "", nil, fmt.Errorf("unsupported authentication method")
+		return false, "", nil, fmt.Errorf("%w: %q", ErrUnsupportedAuthMethod, authData.AuthType)
 	}
 }
 

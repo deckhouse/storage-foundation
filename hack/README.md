@@ -2,6 +2,11 @@
 
 This folder contains auxiliary scripts for development and project maintenance.
 
+## fuzzing/
+
+Fuzzing harness for the `data-exporter` HTTP handlers: `make -C hack/fuzzing all`.
+See [fuzzing/README.md](fuzzing/README.md) for the runbook.
+
 ## git_commits_after_tag.py
 
 Script for getting a list of commits that are not included in the latest tag.
