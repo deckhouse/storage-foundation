@@ -1,3 +1,89 @@
+{{- if eq (include "storage-foundation.rbacv2_new_scheme" .) "true" }}
+# Permissions to move the contents of a volume in and out of the cluster over HTTP.
+#
+# The two `download` subresources are what the data-exporter pod actually authorizes every HTTP
+# request against: both directions use `download`, the import one included, so a role granting an
+# `upload` subresource would grant nothing. The pairing of resource and subresource is held by
+# TestTransferVolumeDataRoleGrantsAuthorizedSubresources, which builds the expected rules from the
+# very constants the authorization code passes to the SubjectAccessReview.
+#
+# Aggregates into the namespace lineage at the `admin` level and at no other level or lineage. The
+# namespace lineage is granted per namespace through a RoleBinding, not cluster-wide like the
+# `kubernetes` axis of the legacy scheme, so the permission reaches the administrators of a namespace
+# and only inside that namespace. Admin is the level that runs the namespace, and a namespace admin
+# can already reach the contents of a volume there (pods/exec into the pod that mounts it), so moving
+# those bytes out of the cluster or back in gives that level nothing new in kind. The lower levels
+# (viewer, user, manager) do not get it: the neighbouring view and edit capabilities stop at the
+# transfer objects themselves and grant neither `download` subresource. Anybody else has to be granted
+# this role by an explicit RoleBinding, and it grants them nothing until that binding exists. The
+# level cannot simply be dropped to make the role narrower either: the 1.78 contract refuses a
+# capability that aggregates into no platform role.
+#
+# The `state-snapshotter.deckhouse.io/aggregate-to-backup-agent` label below adds exactly one more
+# holder and no wider reach. It lies outside `rbac.deckhouse.io/`, so no platform role selects on it.
+# It is collected by a single ClusterRole of the state-snapshotter module,
+# `d8:state-snapshotter:backup-agent` (its legacy name
+# `d8:use:capability:module:state-snapshotter:backup_agent` is kept there as an alias of it), which in
+# turn grants nothing until somebody binds it -- so through that label this role still reaches only a
+# named subject, and only through an explicit binding. What the label buys is that setting up an
+# external backup agent takes one binding instead of a handful, and a forgotten one can no longer
+# leave that agent authorized for everything except the volume data.
+#
+# So do not "tighten" this role by deleting either label. TestNoAggregatedRoleGrantsVolumeDataTransfer
+# keeps every OTHER level and lineage banned for this role, and
+# TestTransferVolumeDataCapabilityAggregatesOnlyIntoNamespaceAdminAndBackupAgent pins these two, their
+# values included. The module label has to be the one the aggregating role selects on, and that role
+# lives in another module's chart, so nothing here can verify the pair: a rename on either side
+# silently drops this role out of the aggregated set and the transfer answers 403 to a backup agent
+# whose binding looks correct. When that module is absent, the label selects nothing and this role
+# behaves exactly as it would without it.
+#
+# The module label belongs to THIS role and to no other role under `templates/rbacv2`: the aggregating
+# role selects on it together with `rbac.deckhouse.io/kind: capability`, which the neighbouring view
+# and edit capabilities carry too, so a copy of it there would hand their rules to the same backup
+# agent. That much is held by TestBackupAgentAggregationIsCarriedOnlyByTransferVolumeDataRole -- which
+# also spells out how far its reach goes, because the ClusterRoles this chart defines outside that
+# directory are not examined at all.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  labels:
+    heritage: deckhouse
+    module: storage-foundation
+    rbac.deckhouse.io/aggregate-to-namespace-as: admin
+    rbac.deckhouse.io/kind: capability
+    rbac.deckhouse.io/capability: "namespace-capability.storage-foundation.transfer_volume_data"
+    rbac.deckhouse.io/scope: namespace
+    state-snapshotter.deckhouse.io/aggregate-to-backup-agent: "true"
+  name: d8:namespace-capability:storage-foundation:transfer_volume_data
+  annotations:
+    en.meta.deckhouse.io/title: "Module storage-foundation: transfer volume data"
+    ru.meta.deckhouse.io/title: "Модуль storage-foundation: перенос данных томов"
+    en.meta.deckhouse.io/description: "Move the contents of a volume out of the cluster and back in over HTTP: create, read and delete DataExport and DataImport resources in a namespace and call their download subresources."
+    ru.meta.deckhouse.io/description: "Перенос содержимого тома из кластера и обратно по HTTP: создание, чтение и удаление ресурсов DataExport и DataImport в пространстве имён и обращение к их субресурсам download."
+rules:
+  # The transfer objects themselves: the client creates them, waits for one to become ready and
+  # deletes it when the transfer is over.
+  - apiGroups:
+      - storage-foundation.deckhouse.io
+    resources:
+      - dataexports
+      - dataimports
+    verbs:
+      - create
+      - get
+      - list
+      - watch
+      - delete
+  # The HTTP endpoints of a running transfer.
+  - apiGroups:
+      - storage-foundation.deckhouse.io
+    resources:
+      - dataexports/download
+      - dataimports/download
+    verbs:
+      - create
+{{- else }}
 # Permissions to move the contents of a volume in and out of the cluster over HTTP.
 #
 # The two `download` subresources are what the data-exporter pod actually authorizes every HTTP
@@ -68,3 +154,4 @@ rules:
       - dataimports/download
     verbs:
       - create
+{{- end }}

@@ -224,9 +224,18 @@ Grant the permissions to the ServiceAccount in one of the two ways below.
 
 ##### Binding the built-in role (preferred)
 
-The module ships the `d8:use:capability:module:storage-foundation:transfer_volume_data` ClusterRole. It grants `create` on both `download` subresources, and it also allows creating, reading and deleting the `DataExport` and `DataImport` resources themselves, which is what a client needs to run a transfer on its own. The role is not folded into any of the cluster-wide access levels, so holding such a level does not bring the permission along with it.
+The module ships the `d8:namespace-capability:storage-foundation:transfer_volume_data` ClusterRole. It grants `create` on both `download` subresources, and it also allows creating, reading and deleting the `DataExport` and `DataImport` resources themselves, which is what a client needs to run a transfer on its own.
 
-The role is, however, part of the set aggregated by the `d8:use:capability:module:state-snapshotter:backup_agent` ClusterRole — a single role granted to an external backup agent in place of several separate ones. That aggregate is only granted by an explicit binding too, so the permission still reaches nobody on its own; but it does take effect in every namespace where either this role or that aggregate is bound. Keep that in mind when auditing who can read a volume out of the cluster or write one back into it: the bindings whose `roleRef` names this role are not the whole answer, because the bindings of the aggregate grant the same thing. In a cluster without the module that defines the aggregate, the aggregate does not exist and only the bindings of this role matter.
+On DKP 1.78 and later the role is part of the namespace `admin` access level: whoever administers a namespace (holds `d8:namespace:admin` there, or a namespace or project role above that level) can transfer volume data in that namespace without any extra binding. It is not part of the lower namespace levels (viewer, user, manager), nor of any cluster-wide access level, so every other subject needs an explicit binding of this role.
+
+The role is also part of the set aggregated by the `d8:state-snapshotter:backup-agent` ClusterRole — a single role granted to an external backup agent in place of several separate ones. That aggregate is only granted by an explicit binding too, so it hands the permission to nobody on its own; but it does take effect in every namespace where this role, that aggregate or the namespace `admin` level is bound. Keep that in mind when auditing who can read a volume out of the cluster or write one back into it: the bindings whose `roleRef` names this role are not the whole answer, because the bindings of the aggregate and of the namespace admin level grant the same thing. In a cluster without the module that defines the aggregate, the aggregate does not exist.
+
+On clusters running DKP below 1.78 the module ships the same permissions under the legacy names, and the role is not part of any namespace access level there:
+
+| DKP 1.78 and later | DKP below 1.78 |
+|---|---|
+| `d8:namespace-capability:storage-foundation:transfer_volume_data` | `d8:use:capability:module:storage-foundation:transfer_volume_data` |
+| `d8:state-snapshotter:backup-agent` | `d8:use:capability:module:state-snapshotter:backup_agent` |
 
 Bind the role to the ServiceAccount:
 
@@ -243,10 +252,12 @@ subjects:
   namespace: ${NAMESPACE}
 roleRef:
   kind: ClusterRole
-  name: d8:use:capability:module:storage-foundation:transfer_volume_data
+  name: d8:namespace-capability:storage-foundation:transfer_volume_data
   apiGroup: rbac.authorization.k8s.io
 EOF
 ```
+
+On DKP below 1.78, put `d8:use:capability:module:storage-foundation:transfer_volume_data` into `roleRef.name` instead.
 
 ##### Defining a role manually
 
