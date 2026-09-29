@@ -1,7 +1,6 @@
 module github.com/deckhouse/storage-foundation/images/controller
 
 go 1.27.1
-
 require (
 	github.com/deckhouse/sds-common-lib v0.15.0
 	github.com/deckhouse/state-snapshotter/api v0.0.0-20260925062244-5cb3c9c59628
