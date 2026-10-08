@@ -11,7 +11,7 @@
   {{- end }}
 ---
 image: {{ $.ModuleNamePrefix }}{{ $.ImageName }}-ForK8SGE-{{ $version | replace "." "-" }}
-from: {{ index $.Images "builder/distroless" }}
+from: {{ index $.Images "base/distroless" }}
 git:
 {{- include "image mount points" $ }}
 import:

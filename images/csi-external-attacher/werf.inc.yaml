@@ -11,7 +11,7 @@
   {{- end }}
 ---
 image: {{ $.ModuleNamePrefix }}{{ $.ImageName }}-ForK8SGE-{{ $version | replace "." "-" }}
-from: {{ index $.Images "builder/distroless" }}
+from: {{ index $.Images "base/distroless" }}
 import:
 - image: {{ $.ModuleNamePrefix }}{{ $.ImageName }}-artifact-{{ $version | replace "." "-" }}
   add: /csi-attacher
