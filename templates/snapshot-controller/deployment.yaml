@@ -71,7 +71,7 @@ spec:
       - name: snapshot-controller
         {{- include "helm_lib_module_container_security_context_read_only_root_filesystem_capabilities_drop_all_pss_restricted" . | nindent 8 }}
         args:
-        - --v=5
+        - --v={{ include "storage-foundation.klog_verbosity" . }}
         - --leader-election=true
         - --http-endpoint=127.0.0.1:8080
         image: {{ include "helm_lib_module_image" (list . "snapshotController") }}

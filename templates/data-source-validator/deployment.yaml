@@ -70,7 +70,7 @@ spec:
           image: {{ include "helm_lib_module_image" (list . "dataSourceValidator") }}
           imagePullPolicy: IfNotPresent
           args:
-            - "--v=5"
+            - "--v={{ include "storage-foundation.klog_verbosity" . }}"
             - "--leader-election=false"
             - "--http-endpoint=:8080"
           readinessProbe:
