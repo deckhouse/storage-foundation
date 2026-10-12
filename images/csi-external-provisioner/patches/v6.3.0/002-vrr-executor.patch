@@ -289,10 +289,10 @@ index 6ef3c9f1..617f9784 100644
  golang.org/x/xerrors v0.0.0-20191204190536-9bdfabe68543/go.mod h1:I/5z698sn9Ka8TeJc9MKroUUfqBBauWjQqLJ2OPfmY0=
 diff --git a/pkg/controller/vrr_handler.go b/pkg/controller/vrr_handler.go
 new file mode 100644
-index 00000000..0a71a453
+index 00000000..72408ecd
 --- /dev/null
 +++ b/pkg/controller/vrr_handler.go
-@@ -0,0 +1,929 @@
+@@ -0,0 +1,940 @@
 +/*
 +Copyright 2025 Flant JSC
 +
@@ -963,6 +963,17 @@ index 00000000..0a71a453
 +		provisionerSecretRef)
 +	if err != nil {
 +		return nil, fmt.Errorf("failed to build PV object from CSI response: %w", err)
++	}
++
++	// Pre-bind the PV to the target PVC by namespace and name (the PVC does not exist yet,
++	// so there is no UID). Without claimRef the PV is published as Available until the PVC
++	// below binds it, and in that window the persistentvolume-controller or the scheduler
++	// may hand the restored data to any pending claim of the same StorageClass.
++	pv.Spec.ClaimRef = &v1.ObjectReference{
++		Kind:       "PersistentVolumeClaim",
++		APIVersion: "v1",
++		Namespace:  vrrTargetNamespace(vrr),
++		Name:       vrrTargetPVCName(vrr),
 +	}
 +
 +	createdPV, err := e.kubeClient.CoreV1().PersistentVolumes().Create(ctx, pv, metav1.CreateOptions{})
