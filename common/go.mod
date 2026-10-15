@@ -1,6 +1,6 @@
 module github.com/deckhouse/storage-foundation/common
 
-go 1.27.1
+go 1.27.2
 require (
 	github.com/deckhouse/sds-common-lib v0.15.0
 	github.com/deckhouse/storage-foundation/api v0.0.0-00010101000000-000000000000
