@@ -22,6 +22,9 @@
     #                            VolumeCapabilities built from VRR spec).
     #   003-fix-cve.patch      - CVE dependency bumps (cel-go, x/crypto,
     #                            x/mod, grpc, otel).
+    #   004-snapshot-finalizer-merge-patch.patch - VolumeSnapshot finalizer
+    #                            written as a metadata.finalizers merge patch,
+    #                            not a full Update that drops spec.mode.
     # 002 is the source of truth for the executor (a plain diff applied to
     # the v6.3.0 tag, excluding vendor; no long-lived fork branch). The
     # storage-foundation/api dependency is resolved with a directory replace
