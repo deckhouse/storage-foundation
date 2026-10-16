@@ -58,6 +58,11 @@ const (
 // ServiceAccount runs the patched csi-provisioner VRR executor and therefore needs cluster-wide
 // get/list/watch on volumerestorerequests. Binding to a namespace/ServiceAccount that does not
 // exist yet is harmless (it takes effect once the module is enabled). For now only sds-local-volume.
+//
+// This hook-side binding is unconditional. Driver modules rendered through lib-helm
+// (helm_lib_csi_controller_rbac, deckhouse_lib_helm >= 1.72.13) also receive the same rules in
+// their own provisioner ClusterRole, but only when the VolumeRestoreRequest API already exists at
+// the time the driver module is rendered.
 var VRRExecutorNamespaces = []string{
 	"d8-sds-local-volume",
 }

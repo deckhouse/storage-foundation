@@ -202,6 +202,15 @@ collector не удаляет.
 | Controller storage-foundation | CRUD VCR/VRR плюс оба `/status` subresource; пишет request status и управляет следующими за request ObjectKeeper |
 
 Из-за user-facing grants эти ресурсы фактически не controller-only, несмотря на предназначение
-служебного API. Хук `040-vrr-provisioner-rbac` сейчас bind'ит executor-grant только ServiceAccount
-`csi` в `d8-sds-local-volume`. Generic cross-driver VRR требует расширения общего
-CSI deployment/RBAC-контракта.
+служебного API.
+
+Права исполнителя попадают в модуль CSI-драйвера двумя путями:
+
+- Каждый модуль драйвера, который рендерит контроллер через `lib-helm` (`helm_lib_csi_controller_manifests`
+  и `helm_lib_csi_controller_rbac`, `deckhouse_lib_helm` 1.72.13 или новее), запускает патченный provisioner
+  из storage-foundation, как только storage-foundation включён, а его ClusterRole provisioner-а получает
+  правила VRR `get`, `list`, `watch` и PVC `create`, `patch`. Этот блок правил рендерится, только если API
+  `VolumeRestoreRequest` группы `storage-foundation.deckhouse.io/v1alpha1` уже есть в кластере в момент
+  рендера модуля драйвера.
+- Хук `040-vrr-provisioner-rbac` безусловно, со стороны storage-foundation, привязывает те же права к
+  ServiceAccount `csi` каждого namespace из своего списка. Сейчас в списке только `d8-sds-local-volume`.

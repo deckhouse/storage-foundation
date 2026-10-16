@@ -19,8 +19,10 @@ limitations under the License.
 // as a sidecar inside each backend CSI driver controller Pod under ServiceAccount "csi" and starts a
 // dynamic informer on volumerestorerequests across ALL namespaces. A namespaced Role is therefore
 // insufficient: the SA needs a ClusterRole + ClusterRoleBinding with get/list/watch on
-// volumerestorerequests. storage-foundation builds that sidecar image but the backend driver modules
-// do not ship this grant, so we reconcile it here for a hardcoded list of module namespaces.
+// volumerestorerequests. storage-foundation builds that sidecar image; driver modules rendered through
+// lib-helm (helm_lib_csi_controller_rbac, deckhouse_lib_helm >= 1.72.13) ship the same rules in their
+// provisioner ClusterRole, but only when the VolumeRestoreRequest API exists at their render time.
+// This hook reconciles the grant unconditionally for a hardcoded list of module namespaces.
 //
 // The executor needs two net-new grants on top of a backend driver's stock provisioner role:
 //   - volumerestorerequests get/list/watch: it watches VRRs from a cluster-wide informer and never

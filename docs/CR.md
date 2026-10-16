@@ -200,6 +200,16 @@ webhook performing `SelfSubjectAccessReview`.
 | storage-foundation controller | VCR/VRR CRUD plus both `/status` subresources; it is the request status writer and manages the request-following ObjectKeepers |
 
 The user-facing grants mean these resources are not effectively controller-only today, despite their
-intended service-resource role. The `040-vrr-provisioner-rbac` hook currently binds the executor grant
-only to the `csi` ServiceAccount in `d8-sds-local-volume`. Generic cross-driver VRR support requires
-extending the shared CSI deployment/RBAC contract.
+intended service-resource role.
+
+The executor grant reaches a CSI driver module in two ways:
+
+- Every driver module that renders its controller through `lib-helm` (`helm_lib_csi_controller_manifests`
+  and `helm_lib_csi_controller_rbac`, `deckhouse_lib_helm` 1.72.13 or later) runs the patched provisioner
+  from storage-foundation as soon as storage-foundation is enabled, and its provisioner ClusterRole carries
+  the VRR `get`, `list`, `watch` and PVC `create`, `patch` rules. That rule block is rendered only when the
+  `storage-foundation.deckhouse.io/v1alpha1` `VolumeRestoreRequest` API exists at the time the driver
+  module is rendered.
+- The `040-vrr-provisioner-rbac` hook binds the same grant unconditionally, from storage-foundation's side,
+  to the `csi` ServiceAccount of every namespace in its list. The list currently holds only
+  `d8-sds-local-volume`.
