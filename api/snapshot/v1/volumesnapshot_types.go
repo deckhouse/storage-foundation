@@ -102,9 +102,8 @@ type VolumeSnapshotList struct {
 // mode discriminator plus the snapshot source (PVC name vs pre-provisioned content). It is never
 // written by the domain reconciler.
 type VolumeSnapshotSpec struct {
-	// Mode selects how this VolumeSnapshot obtains its content (Capture | Import), immutable once set;
-	// default Capture (fork extension: parity with spec.mode on every other snapshot kind). Import
-	// disables capture planning — the data artifact comes from a DataImport and spec.source stays empty.
+	// Mode selects how this VolumeSnapshot obtains its content (Capture | Import), immutable once set; when
+	// omitted, the mutating webhook sets Capture on create and restores the stored value on update.
 	// +optional
 	Mode string `json:"mode,omitempty"`
 	// Source identifies where the snapshot comes from.
@@ -114,10 +113,12 @@ type VolumeSnapshotSpec struct {
 	VolumeSnapshotClassName *string `json:"volumeSnapshotClassName,omitempty"`
 }
 
-// VolumeSnapshotModeImport is the spec.mode value marking an import-mode VolumeSnapshot (fork
-// extension). String-typed locally to keep this package free of a state-snapshotter api dependency for
-// one constant; the value matches storagev1alpha1.SnapshotModeImport verbatim.
-const VolumeSnapshotModeImport = "Import"
+// VolumeSnapshotModeCapture and VolumeSnapshotModeImport are the spec.mode values, shared with every
+// state-snapshotter snapshot kind.
+const (
+	VolumeSnapshotModeCapture = string(storagev1alpha1.SnapshotModeCapture)
+	VolumeSnapshotModeImport  = string(storagev1alpha1.SnapshotModeImport)
+)
 
 // VolumeSnapshotSource is the CSI snapshot source. Exactly one of PersistentVolumeClaimName /
 // VolumeSnapshotContentName is set on a stock CSI VolumeSnapshot. Fork: source is required only when

@@ -17,10 +17,21 @@ limitations under the License.
 package handlers
 
 import (
+	"context"
+	"encoding/json"
+	"os"
+	"path/filepath"
+	"regexp"
+	"strconv"
+	"strings"
 	"testing"
 
-	snapshotv1 "github.com/kubernetes-csi/external-snapshotter/client/v6/apis/volumesnapshot/v1"
+	"github.com/google/cel-go/cel"
+	"github.com/slok/kubewebhook/v2/pkg/model"
+	kwhmutating "github.com/slok/kubewebhook/v2/pkg/webhook/mutating"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+
+	snapv1 "github.com/deckhouse/storage-foundation/api/snapshot/v1"
 )
 
 // TestVolumeSnapshotProvenanceWireLiterals pins the key and the value this webhook writes. Both are read by
@@ -43,8 +54,8 @@ func ptr[T any](v T) *T { return &v }
 
 // volumeSnapshotWithMeta builds a VolumeSnapshot carrying the given labels and owner references, which is
 // everything stateOriginOnCreate looks at.
-func volumeSnapshotWithMeta(labels map[string]string, owners []metav1.OwnerReference) *snapshotv1.VolumeSnapshot {
-	return &snapshotv1.VolumeSnapshot{
+func volumeSnapshotWithMeta(labels map[string]string, owners []metav1.OwnerReference) *snapv1.VolumeSnapshot {
+	return &snapv1.VolumeSnapshot{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:            "snap",
 			Namespace:       "test-ns",
@@ -172,8 +183,8 @@ func TestStateOriginOnCreate(t *testing.T) {
 	t.Logf("checked %d CREATE payload shapes", len(cases))
 }
 
-// TestStateOriginOnCreateIsIdempotent pins what a second pass must do, which is nothing. Admission is
-// registered on CREATE only, so a second pass over the same object is not an ordinary event — but a webhook
+// TestStateOriginOnCreateIsIdempotent pins what a second pass must do, which is nothing. The origin is
+// stamped on CREATE only, so a second pass over the same object is not an ordinary event — but a webhook
 // whose second call differs from its first is one whose result depends on how many times the API server
 // happened to call it, and that is never the intended contract.
 func TestStateOriginOnCreateIsIdempotent(t *testing.T) {
@@ -193,5 +204,209 @@ func TestStateOriginOnCreateIsIdempotent(t *testing.T) {
 	}
 	if len(snapshot.Labels) != 1 {
 		t.Fatalf("the second pass added labels: %#v", snapshot.Labels)
+	}
+}
+
+// reviewVS runs a request through the real kubewebhook pipeline and returns the spec.mode its patch writes
+// ("" if untouched) and the paths the patch changes.
+func reviewVS(t *testing.T, op model.AdmissionReviewOp, oldRaw, newRaw string) (string, []string, error) {
+	t.Helper()
+
+	wh, err := kwhmutating.NewWebhook(kwhmutating.WebhookConfig{
+		ID:      "vs",
+		Obj:     new(snapv1.VolumeSnapshot),
+		Mutator: kwhmutating.MutatorFunc(VolumeSnapshotMutate),
+	})
+	if err != nil {
+		t.Fatalf("build the webhook: %v", err)
+	}
+
+	res, err := wh.Review(context.Background(), model.AdmissionReview{
+		Operation:    op,
+		OldObjectRaw: []byte(oldRaw),
+		NewObjectRaw: []byte(newRaw),
+	})
+	if err != nil {
+		return "", nil, err
+	}
+
+	resp, ok := res.(*model.MutatingAdmissionResponse)
+	if !ok {
+		t.Fatalf("unexpected response type %T", res)
+	}
+
+	var ops []struct {
+		Path  string          `json:"path"`
+		Value json.RawMessage `json:"value"`
+	}
+	if err := json.Unmarshal(resp.JSONPatchPatch, &ops); err != nil {
+		t.Fatalf("decode the patch: %v", err)
+	}
+
+	mode := ""
+	paths := make([]string, 0, len(ops))
+	for _, o := range ops {
+		paths = append(paths, o.Path)
+		if o.Path != "/spec/mode" {
+			continue
+		}
+		if err := json.Unmarshal(o.Value, &mode); err != nil {
+			t.Fatalf("decode the patched spec.mode: %v", err)
+		}
+	}
+	return mode, paths, nil
+}
+
+// TestVolumeSnapshotMutateMode pins how spec.mode is filled, including the upstream-client update that the
+// CRD immutability rule used to reject for an import-mode snapshot.
+func TestVolumeSnapshotMutateMode(t *testing.T) {
+	t.Parallel()
+
+	// upstreamUpdate is what a client built on the upstream type sends: no mode, an empty source, a finalizer.
+	const upstreamUpdate = `{"metadata":{"finalizers":["provisioner.storage.kubernetes.io/volumesnapshot-as-source-protection"]},` +
+		`"spec":{"source":{}},"status":{"readyToUse":true}}`
+
+	tests := []struct {
+		name     string
+		op       model.AdmissionReviewOp
+		oldRaw   string
+		newRaw   string
+		wantMode string
+		wantErr  bool
+	}{
+		{
+			name:     "success: upstream-client update keeps Import",
+			op:       model.OperationUpdate,
+			oldRaw:   `{"spec":{"mode":"Import"}}`,
+			newRaw:   upstreamUpdate,
+			wantMode: snapv1.VolumeSnapshotModeImport,
+		},
+		{
+			name:     "success: upstream-client update keeps Capture",
+			op:       model.OperationUpdate,
+			oldRaw:   `{"spec":{"mode":"Capture","source":{}}}`,
+			newRaw:   upstreamUpdate,
+			wantMode: snapv1.VolumeSnapshotModeCapture,
+		},
+		{
+			name:     "success: update of an object stored without mode gets Capture",
+			op:       model.OperationUpdate,
+			oldRaw:   `{"spec":{"source":{}}}`,
+			newRaw:   upstreamUpdate,
+			wantMode: snapv1.VolumeSnapshotModeCapture,
+		},
+		{
+			name:   "success: explicit mode is left for the CRD rule",
+			op:     model.OperationUpdate,
+			oldRaw: `{"spec":{"mode":"Import"}}`,
+			newRaw: `{"spec":{"mode":"Capture","source":{}}}`,
+		},
+		{
+			name:     "success: create without mode gets Capture",
+			op:       model.OperationCreate,
+			newRaw:   `{"spec":{"source":{"volumeSnapshotContentName":"vsc"}}}`,
+			wantMode: snapv1.VolumeSnapshotModeCapture,
+		},
+		{
+			name:    "error: malformed stored object",
+			op:      model.OperationUpdate,
+			oldRaw:  `not json`,
+			newRaw:  upstreamUpdate,
+			wantErr: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			mode, paths, err := reviewVS(t, tt.op, tt.oldRaw, tt.newRaw)
+			if tt.wantErr {
+				if err == nil {
+					t.Fatal("expected an error")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("review: %v", err)
+			}
+			if mode != tt.wantMode {
+				t.Fatalf("spec.mode = %q, want %q", mode, tt.wantMode)
+			}
+			for _, p := range paths {
+				if strings.HasPrefix(p, "/metadata/labels") || strings.HasPrefix(p, "/metadata/finalizers") {
+					t.Fatalf("patch changes %s: only a PVC-source create may get labels, finalizers are never touched", p)
+				}
+			}
+		})
+	}
+}
+
+// TestVolumeSnapshotMatchCondition evaluates the matchCondition read from the chart template, so a change to
+// the expression is checked against the requests the mutator must and must not see.
+func TestVolumeSnapshotMatchCondition(t *testing.T) {
+	t.Parallel()
+
+	raw, err := os.ReadFile(filepath.Join("..", "..", "..", "templates", "webhooks", "webhook.yaml"))
+	if err != nil {
+		t.Fatalf("read the webhook template: %v", err)
+	}
+	m := regexp.MustCompile(`name: pvc-source-create-or-missing-mode\s+expression: ("(?:[^"\\]|\\.)*")`).FindSubmatch(raw)
+	if m == nil {
+		t.Fatal("matchCondition pvc-source-create-or-missing-mode not found in the template")
+	}
+	expr, err := strconv.Unquote(string(m[1]))
+	if err != nil {
+		t.Fatalf("unquote the expression: %v", err)
+	}
+
+	env, err := cel.NewEnv(cel.Variable("object", cel.DynType), cel.Variable("request", cel.DynType))
+	if err != nil {
+		t.Fatalf("build the CEL environment: %v", err)
+	}
+	ast, iss := env.Compile(expr)
+	if iss.Err() != nil {
+		t.Fatalf("compile the expression: %v", iss.Err())
+	}
+	prg, err := env.Program(ast)
+	if err != nil {
+		t.Fatalf("plan the expression: %v", err)
+	}
+
+	tests := []struct {
+		name   string
+		op     string
+		object string
+		want   bool
+	}{
+		{name: "success: PVC-source create reaches the webhook", op: "CREATE", object: `{"spec":{"mode":"Capture","source":{"persistentVolumeClaimName":"pvc"}}}`, want: true},
+		{name: "success: create without mode but with a source reaches the webhook", op: "CREATE", object: `{"spec":{"source":{}}}`, want: true},
+		{name: "success: create with neither mode nor source is left to the schema", op: "CREATE", object: `{"spec":{}}`},
+		{name: "success: import create skips the webhook", op: "CREATE", object: `{"spec":{"mode":"Import"}}`},
+		{name: "success: update without mode reaches the webhook", op: "UPDATE", object: `{"spec":{"source":{}}}`, want: true},
+		{name: "success: update with mode skips the webhook", op: "UPDATE", object: `{"spec":{"mode":"Import"}}`},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			// CEL takes the request as untyped data, the way the API server hands it over.
+			object := map[string]any{}
+			if err := json.Unmarshal([]byte(tt.object), &object); err != nil {
+				t.Fatalf("decode the object: %v", err)
+			}
+			out, _, err := prg.Eval(map[string]any{"object": object, "request": map[string]any{"operation": tt.op}})
+			if err != nil {
+				t.Fatalf("evaluate the expression: %v", err)
+			}
+			got, ok := out.Value().(bool)
+			if !ok {
+				t.Fatalf("the expression returned %v, not a bool", out.Value())
+			}
+			if got != tt.want {
+				t.Fatalf("reaches the webhook = %v, want %v", got, tt.want)
+			}
+		})
 	}
 }

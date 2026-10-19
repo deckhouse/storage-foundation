@@ -8,15 +8,15 @@ index 36f60dc95..e2592e6a5 100644
  	VolumeSnapshotClassName *string `json:"volumeSnapshotClassName,omitempty" protobuf:"bytes,2,opt,name=volumeSnapshotClassName"`
 +
 +	// mode selects how this VolumeSnapshot obtains its content (Capture | Import) and is immutable
-+	// once set. Capture (default): dynamic CSI snapshot from spec.source. Import: the data artifact
++	// once set. Capture: dynamic CSI snapshot from spec.source. Import: the data artifact
 +	// is produced by a DataImport (storage-foundation.deckhouse.io) in the same namespace, resolved
 +	// via reverse-lookup (DataImport.spec.targetRef); spec.source is OMITTED (required only when
 +	// mode != Import — full parity with the other snapshot kinds, where Import carries no source
 +	// fields; a typed client may still serialize an empty source, which stays legal) and the upstream
 +	// snapshot-controller does NOT reconcile such a VolumeSnapshot — the state-snapshotter common
 +	// controller binds it (sets status). Deckhouse fork extension.
++	// No schema default: an omitted mode is filled by the storage-foundation mutating webhook.
 +	// +optional
-+	// +kubebuilder:default=Capture
 +	// +kubebuilder:validation:Enum=Capture;Import
 +	// +kubebuilder:validation:XValidation:rule="self == oldSelf",message="mode is immutable"
 +	Mode string `json:"mode,omitempty" protobuf:"bytes,3,opt,name=mode"`
@@ -492,15 +492,15 @@ index 36f60dc95..e2592e6a5 100644
  	VolumeSnapshotClassName *string `json:"volumeSnapshotClassName,omitempty" protobuf:"bytes,2,opt,name=volumeSnapshotClassName"`
 +
 +	// mode selects how this VolumeSnapshot obtains its content (Capture | Import) and is immutable
-+	// once set. Capture (default): dynamic CSI snapshot from spec.source. Import: the data artifact
++	// once set. Capture: dynamic CSI snapshot from spec.source. Import: the data artifact
 +	// is produced by a DataImport (storage-foundation.deckhouse.io) in the same namespace, resolved
 +	// via reverse-lookup (DataImport.spec.targetRef); spec.source is OMITTED (required only when
 +	// mode != Import — full parity with the other snapshot kinds, where Import carries no source
 +	// fields; a typed client may still serialize an empty source, which stays legal) and the upstream
 +	// snapshot-controller does NOT reconcile such a VolumeSnapshot — the state-snapshotter common
 +	// controller binds it (sets status). Deckhouse fork extension.
++	// No schema default: an omitted mode is filled by the storage-foundation mutating webhook.
 +	// +optional
-+	// +kubebuilder:default=Capture
 +	// +kubebuilder:validation:Enum=Capture;Import
 +	// +kubebuilder:validation:XValidation:rule="self == oldSelf",message="mode is immutable"
 +	Mode string `json:"mode,omitempty" protobuf:"bytes,3,opt,name=mode"`

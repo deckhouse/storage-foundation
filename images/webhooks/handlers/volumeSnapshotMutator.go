@@ -18,6 +18,7 @@ package handlers
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -35,6 +36,7 @@ import (
 	d8commonapi "github.com/deckhouse/sds-common-lib/api/v1alpha1"
 	"github.com/deckhouse/sds-common-lib/kubeclient"
 	"github.com/deckhouse/sds-common-lib/logger"
+	snapv1 "github.com/deckhouse/storage-foundation/api/snapshot/v1"
 )
 
 const (
@@ -70,7 +72,7 @@ const (
 //
 // Everything else is a snapshot a client of the cluster API is creating unclaimed, and its origin is
 // recorded so that later readers can tell it from a snapshot the cluster already contained.
-func stateOriginOnCreate(snapshot *snapshotv1.VolumeSnapshot) bool {
+func stateOriginOnCreate(snapshot *snapv1.VolumeSnapshot) bool {
 	if _, stated := snapshot.Labels[provenanceLabelName]; stated {
 		return false
 	}
@@ -86,27 +88,80 @@ func stateOriginOnCreate(snapshot *snapshotv1.VolumeSnapshot) bool {
 	return true
 }
 
-func VolumeSnapshotMutate(ctx context.Context, _ *model.AdmissionReview, obj metav1.Object) (*kwhmutating.MutatorResult, error) {
+// defaultModeOnCreate gives a VolumeSnapshot created without spec.mode the Capture mode. The schema
+// declares no default for the field (see restoreModeOnUpdate for why), so the default lives here.
+func defaultModeOnCreate(snapshot *snapv1.VolumeSnapshot) {
+	if snapshot.Spec.Mode == "" {
+		snapshot.Spec.Mode = snapv1.VolumeSnapshotModeCapture
+	}
+}
+
+// volumeSnapshotModeOnly decodes only spec.mode of the stored object, skipping metadata and status.
+type volumeSnapshotModeOnly struct {
+	Spec struct {
+		Mode string `json:"mode"`
+	} `json:"spec"`
+}
+
+// restoreModeOnUpdate restores spec.mode dropped by an upstream-typed client's full update (e.g. the
+// external-provisioner's finalizer write).
+func restoreModeOnUpdate(oldRaw []byte, snapshot *snapv1.VolumeSnapshot) error {
+	// An explicit mode is not compared with the stored one on purpose: a change is rejected by the CRD rule.
+	if snapshot.Spec.Mode != "" {
+		return nil
+	}
+
+	oldVS := new(volumeSnapshotModeOnly)
+	if err := json.Unmarshal(oldRaw, oldVS); err != nil {
+		return fmt.Errorf("decode the stored VolumeSnapshot: %w", err)
+	}
+
+	if oldVS.Spec.Mode == "" {
+		snapshot.Spec.Mode = snapv1.VolumeSnapshotModeCapture
+		return nil
+	}
+
+	snapshot.Spec.Mode = oldVS.Spec.Mode
+	return nil
+}
+
+func VolumeSnapshotMutate(ctx context.Context, ar *model.AdmissionReview, obj metav1.Object) (*kwhmutating.MutatorResult, error) {
 	log := Log().Named("volume-snapshot-mutator")
 
 	log.Debug("VolumeSnapshotMutate called")
-	snapshot, ok := obj.(*snapshotv1.VolumeSnapshot)
+	snapshot, ok := obj.(*snapv1.VolumeSnapshot)
 	if !ok {
 		// The only branch that returns no object, and the only one where that is right: this handler has
 		// nothing to say about a kind it cannot read, and admitting it unchanged is the outcome that changes
-		// nothing. Every other successful branch returns the snapshot, because by then it carries its origin.
+		// nothing. Every other successful branch returns the snapshot, because by then it carries what this
+		// handler added to it: its mode, and for a PVC-source create its origin.
 		return &kwhmutating.MutatorResult{}, nil
 	}
 
 	log.Info("VolumeSnapshotMutate: object is VolumeSnapshot", "name", snapshot.Name, "namespace", snapshot.Namespace)
 
+	// Update only restores spec.mode: the create-time logic below must not run, as the source PVC may already be gone.
+	if ar.Operation == model.OperationUpdate {
+		err := restoreModeOnUpdate(ar.OldObjectRaw, snapshot)
+		if err != nil {
+			return &kwhmutating.MutatorResult{}, err
+		}
+		return &kwhmutating.MutatorResult{MutatedObject: snapshot}, nil
+	}
+
 	// The origin is recorded first, before anything that can fail or return early: this admission is the one
 	// moment at which the fact is knowable, and every path below that lets the object be created must carry
-	// it. The webhook is registered on CREATE only, so there is no UPDATE through which an already-stated
-	// origin could be revised here.
-	if stateOriginOnCreate(snapshot) {
+	// it. Updates returned above. Only a PVC-source snapshot gets it; others come here just for the default mode.
+	if snapshot.Spec.Source.PersistentVolumeClaimName != nil && stateOriginOnCreate(snapshot) {
 		log.Info("VolumeSnapshotMutate: recorded the in-cluster origin of a VolumeSnapshot created by a client",
 			"snapshot", snapshot.Name, "namespace", snapshot.Namespace)
+	}
+
+	defaultModeOnCreate(snapshot)
+
+	if snapshot.Spec.Source.PersistentVolumeClaimName == nil {
+		log.Warn("VolumeSnapshotMutate: VolumeSnapshot PersistentVolumeClaimName is nil. Skipping class defaulting", "snapshot", snapshot.Name)
+		return &kwhmutating.MutatorResult{MutatedObject: snapshot}, nil
 	}
 
 	client, err := kubeclient.New(d8commonapi.AddToScheme,
@@ -119,11 +174,6 @@ func VolumeSnapshotMutate(ctx context.Context, _ *model.AdmissionReview, obj met
 	if err != nil {
 		log.Error("VolumeSnapshotMutate: failed to create kube client", logger.Err(err))
 		return &kwhmutating.MutatorResult{}, err
-	}
-
-	if snapshot.Spec.Source.PersistentVolumeClaimName == nil {
-		log.Warn("VolumeSnapshotMutate: VolumeSnapshot PersistentVolumeClaimName is nil. Skipping class defaulting", "snapshot", snapshot.Name)
-		return &kwhmutating.MutatorResult{MutatedObject: snapshot}, nil
 	}
 
 	namespace := snapshot.Namespace

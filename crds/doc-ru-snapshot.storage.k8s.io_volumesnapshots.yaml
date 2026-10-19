@@ -33,8 +33,9 @@ spec:
               mode:
                 description: |-
                   Определяет, как этот VolumeSnapshot получает содержимое; после установки неизменяемо.
+                  Если поле не указано, при создании устанавливается Capture, а при обновлении сохраняется прежнее значение.
                   
-                  Capture (по умолчанию) — динамический CSI-снимок из spec.source. Import — артефакт данных
+                  Capture — динамический CSI-снимок из spec.source. Import — артефакт данных
                   производит объект DataImport в том же неймспейсе (обратный поиск по DataImport.spec.snapshotRef);
                   spec.source не указывается (он обязателен, только когда mode != Import), и штатный
                   snapshot-controller не обрабатывает такой VolumeSnapshot — его привязывает общий контроллер

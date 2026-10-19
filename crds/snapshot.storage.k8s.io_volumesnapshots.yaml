@@ -88,10 +88,10 @@ spec:
               More info: https://kubernetes.io/docs/concepts/storage/volume-snapshots#volumesnapshots
             properties:
               mode:
-                default: Capture
                 description: |-
                   mode selects how this VolumeSnapshot obtains its content and is immutable once set.
-                  Capture (default): dynamic CSI snapshot from spec.source. Import: the data artifact is
+                  When omitted, it is set to Capture on creation and keeps its stored value on update.
+                  Capture: dynamic CSI snapshot from spec.source. Import: the data artifact is
                   produced by a DataImport in the same namespace (reverse-lookup by DataImport.spec.snapshotRef);
                   spec.source is omitted (required only when mode != Import) and the upstream
                   snapshot-controller does not reconcile such a VolumeSnapshot - the state-snapshotter
@@ -164,6 +164,10 @@ spec:
                   rule: size(self) > 0
             type: object
             x-kubernetes-validations:
+            # A set mode cannot be removed: the rule on the field skips an absent value, and the webhook
+            # that restores an omitted mode can be bypassed.
+            - message: mode is required once set
+              rule: '!has(oldSelf.mode) || has(self.mode)'
             # Symmetry with every other snapshot kind: source is a Capture-family concern. An import
             # VolumeSnapshot omits it entirely (the data artifact comes from a DataImport); everything
             # else (dynamic capture, pre-provisioned, restore intent with an empty source) must carry it.

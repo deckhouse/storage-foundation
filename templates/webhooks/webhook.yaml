@@ -9,7 +9,7 @@ metadata:
   annotations:
     # Deploy the webhook only after its backing Service+Deployment are ready: with failurePolicy: Fail a
     # partial rollout (network issue, OOM) must not leave the webhook without a backend, which would block
-    # every matching VolumeSnapshot CREATE.
+    # every matching VolumeSnapshot CREATE and UPDATE.
     werf.io/deploy-dependency-deployment: state=ready,kind=Deployment,name=webhooks,namespace=d8-{{ .Chart.Name }}
     werf.io/deploy-dependency-service: state=present,kind=Service,name=webhooks,namespace=d8-{{ .Chart.Name }}
 webhooks:
@@ -18,19 +18,14 @@ webhooks:
     rules:
       - apiGroups: ["snapshot.storage.k8s.io"]
         apiVersions: ["v1"]
-        operations: ["CREATE"]
+        operations: ["CREATE", "UPDATE"]
         resources: ["volumesnapshots"]
         scope: "Namespaced"
-    # The mutator only defaults spec.volumeSnapshotClassName from the source PVC's StorageClass, so it is
-    # meaningful only for PVC-source VolumeSnapshots. Restrict invocation to them: the mutator decodes the
-    # object into the upstream typed VolumeSnapshot (which lacks Deckhouse extension fields such as
-    # spec.source.import), and kubewebhook computes the patch as a diff against that re-serialized
-    # typed object — so firing on a non-PVC-source VS (import-mode spec.source.import marker, or pre-provisioned
-    # volumeSnapshotContentName) would silently strip those extension fields. Scoping to PVC source both
-    # matches the mutator's only purpose and prevents that data loss.
+    # Only PVC-source creates (origin, snapshot class) and requests without spec.mode (no schema default) reach
+    # the mutator; a create with neither mode nor source is left to the schema, which rejects it.
     matchConditions:
-      - name: only-pvc-source-volumesnapshots
-        expression: "has(object.spec.source) && has(object.spec.source.persistentVolumeClaimName)"
+      - name: pvc-source-create-or-missing-mode
+        expression: "(request.operation == 'CREATE' && has(object.spec.source) && has(object.spec.source.persistentVolumeClaimName)) || (!has(object.spec.mode) && (request.operation == 'UPDATE' || has(object.spec.source)))"
     clientConfig:
       service:
         namespace: "d8-{{ .Chart.Name }}"

@@ -22,10 +22,9 @@ import (
 	"net/http"
 	"os"
 
-	snapshotv1 "github.com/kubernetes-csi/external-snapshotter/client/v6/apis/volumesnapshot/v1"
-
 	"github.com/deckhouse/sds-common-lib/logger"
 	"github.com/deckhouse/sds-common-lib/logger/kwhlogger"
+	snapv1 "github.com/deckhouse/storage-foundation/api/snapshot/v1"
 	dev1alpha1 "github.com/deckhouse/storage-foundation/api/v1alpha1"
 	"github.com/deckhouse/storage-foundation/images/webhooks/handlers"
 )
@@ -84,7 +83,8 @@ func main() {
 		os.Exit(1)
 	}
 
-	volumeSnapshotMutatingWebHookHandler, err := handlers.GetMutatingWebhookHandler(handlers.VolumeSnapshotMutate, volumeSnapshotMutatorID, &snapshotv1.VolumeSnapshot{}, kwhLog)
+	volumeSnapshotObj := new(snapv1.VolumeSnapshot)
+	volumeSnapshotMutatingWebHookHandler, err := handlers.GetMutatingWebhookHandler(handlers.VolumeSnapshotMutate, volumeSnapshotMutatorID, volumeSnapshotObj, kwhLog)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error creating volumeSnapshotMutatingWebHookHandler: %s", err)
 		os.Exit(1)
