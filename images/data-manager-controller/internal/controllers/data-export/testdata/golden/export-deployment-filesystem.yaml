@@ -19,6 +19,7 @@ spec:
         storage-foundation.deckhouse.io/storage-manager-namespace: test-ns
       labels:
         app: data-exporter
+        security.deckhouse.io/security-policy-exception: data-manager-server
         storage-foundation.deckhouse.io/storage-manager-deployment-name: deploy-for-pvc-10lreb7bdr3f9ubq
     spec:
       containers:
@@ -46,8 +47,17 @@ spec:
           name: http
         resources: {}
         securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            add:
+            - DAC_OVERRIDE
+            drop:
+            - ALL
           readOnlyRootFilesystem: true
+          runAsNonRoot: false
           runAsUser: 0
+          seccompProfile:
+            type: RuntimeDefault
         volumeMounts:
         - mountPath: /mnt/filesystem-storage
           name: export-pvc

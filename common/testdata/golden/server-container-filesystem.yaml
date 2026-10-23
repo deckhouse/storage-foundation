@@ -23,8 +23,19 @@ ports:
   name: http
 resources: {}
 securityContext:
+  allowPrivilegeEscalation: false
+  capabilities:
+    add:
+    - CHOWN
+    - DAC_OVERRIDE
+    - FOWNER
+    drop:
+    - ALL
   readOnlyRootFilesystem: true
+  runAsNonRoot: false
   runAsUser: 0
+  seccompProfile:
+    type: RuntimeDefault
 volumeMounts:
 - mountPath: /mnt/filesystem-storage
   name: export-pvc

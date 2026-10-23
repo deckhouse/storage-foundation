@@ -1663,6 +1663,7 @@ func makeExportDeploySpec(pvMode *corev1.PersistentVolumeMode, dataExport *dev1a
 				Labels: map[string]string{
 					dev1alpha1.LabelApplicationKey:                  dev1alpha1.LabelDataExportValue,
 					dev1alpha1.LabelStorageManagerDeploymentNameKey: generatedNames.DeployName,
+					SecurityPolicyExceptionLabelKey:                 ServerSecurityPolicyException,
 				},
 				Annotations: map[string]string{
 					dev1alpha1.AnnotationStorageManagerNamespaceKey: dataExport.Namespace,
@@ -1695,9 +1696,6 @@ func makeContainerList(pvMode *corev1.PersistentVolumeMode, image, ttl, dataExpo
 
 	switch *pvMode {
 	case corev1.PersistentVolumeBlock:
-		var rootUser int64
-		readOnlyRootFilesystem := true
-		securityContext := corev1.SecurityContext{RunAsUser: &rootUser, ReadOnlyRootFilesystem: &readOnlyRootFilesystem}
 		containers = []corev1.Container{
 			{
 				Name:  "data-exporter",
@@ -1720,14 +1718,11 @@ func makeContainerList(pvMode *corev1.PersistentVolumeMode, image, ttl, dataExpo
 					},
 				},
 				Ports:           []corev1.ContainerPort{{Name: "http", ContainerPort: FileServerPort}},
-				SecurityContext: &securityContext,
+				SecurityContext: ServerSecurityContext(ServerModeExport, *pvMode),
 			},
 		}
 
 	case corev1.PersistentVolumeFilesystem:
-		var rootUser int64
-		readOnlyRootFilesystem := true
-		securityContext := corev1.SecurityContext{RunAsUser: &rootUser, ReadOnlyRootFilesystem: &readOnlyRootFilesystem}
 		containers = []corev1.Container{
 			{
 				Name:  "data-exporter",
@@ -1750,7 +1745,7 @@ func makeContainerList(pvMode *corev1.PersistentVolumeMode, image, ttl, dataExpo
 					},
 				},
 				Ports:           []corev1.ContainerPort{{Name: "http", ContainerPort: FileServerPort}},
-				SecurityContext: &securityContext,
+				SecurityContext: ServerSecurityContext(ServerModeExport, *pvMode),
 			},
 		}
 	}

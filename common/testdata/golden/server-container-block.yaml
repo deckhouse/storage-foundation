@@ -23,8 +23,15 @@ ports:
   name: http
 resources: {}
 securityContext:
+  allowPrivilegeEscalation: false
+  capabilities:
+    drop:
+    - ALL
   readOnlyRootFilesystem: true
+  runAsNonRoot: false
   runAsUser: 0
+  seccompProfile:
+    type: RuntimeDefault
 volumeDevices:
 - devicePath: /mnt/block-storage
   name: export-pvc

@@ -38,6 +38,11 @@ const (
 	ServerModeImport ServerMode = "import"
 )
 
+const (
+	SecurityPolicyExceptionLabelKey = "security.deckhouse.io/security-policy-exception"
+	ServerSecurityPolicyException   = "data-manager-server"
+)
+
 type DeploymentCfg struct {
 	PodSpec               corev1.PodSpec
 	DeploymentName        types.NamespacedName
@@ -154,6 +159,7 @@ func makeDeployment(cfg DeploymentCfg) *appsv1.Deployment {
 					Labels: map[string]string{
 						dev1alpha1.LabelApplicationKey:                  cfg.LabelApplicationValue, // To watch resource by controller
 						dev1alpha1.LabelStorageManagerDeploymentNameKey: cfg.DeploymentName.Name,
+						SecurityPolicyExceptionLabelKey:                 ServerSecurityPolicyException,
 					},
 					Annotations: map[string]string{
 						// To identify which import/export resource is managing this deployment

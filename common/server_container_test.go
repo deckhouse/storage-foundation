@@ -110,3 +110,30 @@ func TestMakeServerContainer_MissingImage(t *testing.T) {
 	})
 	require.Error(t, err)
 }
+
+func TestServerSecurityContext(t *testing.T) {
+	cases := []struct {
+		name       string
+		serverMode ServerMode
+		volumeMode corev1.PersistentVolumeMode
+		add        []corev1.Capability
+	}{
+		{"filesystem export", ServerModeExport, corev1.PersistentVolumeFilesystem, []corev1.Capability{"DAC_OVERRIDE"}},
+		{"filesystem import", ServerModeImport, corev1.PersistentVolumeFilesystem, []corev1.Capability{"CHOWN", "DAC_OVERRIDE", "FOWNER"}},
+		{"block export", ServerModeExport, corev1.PersistentVolumeBlock, nil},
+		{"block import", ServerModeImport, corev1.PersistentVolumeBlock, nil},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			sc := ServerSecurityContext(tc.serverMode, tc.volumeMode)
+			require.NotNil(t, sc.Capabilities)
+			assert.Equal(t, []corev1.Capability{"ALL"}, sc.Capabilities.Drop)
+			assert.Equal(t, tc.add, sc.Capabilities.Add)
+			assert.Equal(t, int64(0), *sc.RunAsUser)
+			assert.False(t, *sc.RunAsNonRoot)
+			assert.False(t, *sc.AllowPrivilegeEscalation)
+			assert.True(t, *sc.ReadOnlyRootFilesystem)
+			assert.Equal(t, corev1.SeccompProfileTypeRuntimeDefault, sc.SeccompProfile.Type)
+		})
+	}
+}

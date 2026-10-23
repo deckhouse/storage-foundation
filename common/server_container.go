@@ -61,7 +61,6 @@ func MakeServerContainer(ctx context.Context, client client.Client, cfg ServerCo
 
 	var mode string
 	var path string
-	var securityContext *corev1.SecurityContext
 	var volumeMounts []corev1.VolumeMount
 	var volumeDevices []corev1.VolumeDevice
 
@@ -69,7 +68,6 @@ func MakeServerContainer(ctx context.Context, client client.Client, cfg ServerCo
 	case corev1.PersistentVolumeBlock:
 		mode = "block"
 		path = BlockMountPath
-		securityContext = &corev1.SecurityContext{RunAsUser: &[]int64{0}[0], ReadOnlyRootFilesystem: &[]bool{true}[0]}
 		volumeDevices = []corev1.VolumeDevice{
 			{
 				Name:       cfg.VolumeName,
@@ -79,7 +77,6 @@ func MakeServerContainer(ctx context.Context, client client.Client, cfg ServerCo
 	case corev1.PersistentVolumeFilesystem:
 		mode = "filesystem"
 		path = FilesystemMountPath
-		securityContext = &corev1.SecurityContext{RunAsUser: &[]int64{0}[0], ReadOnlyRootFilesystem: &[]bool{true}[0]}
 		volumeMounts = []corev1.VolumeMount{
 			{
 				Name:      cfg.VolumeName,
@@ -120,6 +117,29 @@ func MakeServerContainer(ctx context.Context, client client.Client, cfg ServerCo
 		VolumeMounts:    volumeMounts,
 		VolumeDevices:   volumeDevices,
 		Ports:           []corev1.ContainerPort{{Name: "http", ContainerPort: FileServerPort}},
-		SecurityContext: securityContext,
+		SecurityContext: ServerSecurityContext(cfg.ServerMode, cfg.VolumeMode),
 	}, nil
+}
+
+func ServerSecurityContext(serverMode ServerMode, volumeMode corev1.PersistentVolumeMode) *corev1.SecurityContext {
+	var add []corev1.Capability
+	if volumeMode == corev1.PersistentVolumeFilesystem {
+		if serverMode == ServerModeImport {
+			add = []corev1.Capability{"CHOWN", "DAC_OVERRIDE", "FOWNER"}
+		} else {
+			add = []corev1.Capability{"DAC_OVERRIDE"}
+		}
+	}
+
+	return &corev1.SecurityContext{
+		RunAsUser:                &[]int64{0}[0],
+		RunAsNonRoot:             &[]bool{false}[0],
+		ReadOnlyRootFilesystem:   &[]bool{true}[0],
+		AllowPrivilegeEscalation: &[]bool{false}[0],
+		Capabilities: &corev1.Capabilities{
+			Drop: []corev1.Capability{"ALL"},
+			Add:  add,
+		},
+		SeccompProfile: &corev1.SeccompProfile{Type: corev1.SeccompProfileTypeRuntimeDefault},
+	}
 }

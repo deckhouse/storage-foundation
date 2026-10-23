@@ -1,0 +1,34 @@
+{{- if .Values.global.enabledModules | has "admission-policy-engine-crd" }}
+---
+apiVersion: deckhouse.io/v1alpha1
+kind: SecurityPolicyException
+metadata:
+  name: data-manager-server
+  namespace: d8-{{ .Chart.Name }}
+  {{- include "helm_lib_module_labels" (list . (dict "app" "data-exporter")) | nindent 2 }}
+spec:
+  securityContext:
+    runAsUser:
+      allowedValues:
+        - 0
+      metadata:
+        description: |
+          Allow running as root (UID 0) for the DataExport and DataImport servers.
+          The server reads and writes the data of a user volume, whose files and directories belong to arbitrary users, and a block volume device that belongs to root. A capability takes effect only for a root process.
+    runAsNonRoot:
+      allowedValue: false
+      metadata:
+        description: |
+          Allow running as root for the DataExport and DataImport servers.
+          The server reads and writes the data of a user volume, whose files and directories belong to arbitrary users, and a block volume device that belongs to root.
+    capabilities:
+      allowedValues:
+        add:
+          - CHOWN
+          - DAC_OVERRIDE
+          - FOWNER
+      metadata:
+        description: |
+          Allow the capabilities the DataExport and DataImport servers keep after dropping all others.
+          DAC_OVERRIDE lets an export read every file and directory of the exported filesystem whatever its owner and mode, and lets an import write into the target filesystem. CHOWN and FOWNER let an import restore the owner, mode and modification time of every file it receives.
+{{- end }}
