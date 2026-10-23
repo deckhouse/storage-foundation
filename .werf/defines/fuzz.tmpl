@@ -71,7 +71,7 @@ git:
     to: {{ $fuzzSrcAdd }}/Taskfile.yml
     stageDependencies:
       install:
-        - Taskfile.fuzz.yml
+        - "**/*"
 import:
   - image: {{ $fuzzSrcImage }}
     add: {{ $fuzzSrcAdd }}

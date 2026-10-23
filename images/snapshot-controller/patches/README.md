@@ -114,17 +114,19 @@ the modules Trivy flags in the upstream `go.mod` of v8.6.0 to their minimal fixe
 releases:
 
 - `github.com/google/cel-go` `v0.28.1 -> v0.29.0` (GHSA-gcjh-h69q-9w9g)
-- `golang.org/x/crypto` `v0.52.0 -> v0.56.0` (CVE-2026-56854,
+- `golang.org/x/crypto` `v0.52.0 -> v0.57.0` (CVE-2026-56854,
   CVE-2026-56855, CVE-2026-78662)
 - `google.golang.org/grpc` `v1.81.1 -> v1.83.2` (GHSA-hrxh-6v49-42gf,
   CVE-2026-84303, CVE-2026-84304, CVE-2026-84445)
 - `go.opentelemetry.io/otel/sdk`, `.../exporters/otlp/otlptrace`,
   `.../exporters/otlp/otlptrace/otlptracegrpc` `v1.43.0 -> v1.45.0`
   (CVE-2026-81870)
+- `golang.org/x/net` -> `v0.60.0` (CVE-2026-78669) and `golang.org/x/text`
+  -> `v0.42.0` (CVE-2026-56851)
+- `github.com/klauspost/compress` -> `v1.18.7` (CVE-2026-63209)
 
-Minimal version selection moves the rest of the set along (`golang.org/x/net`
--> `v0.58.0`, `golang.org/x/text` -> `v0.41.0`, which also clears the x/net and
-x/text findings of the tag). The remaining `golang.org/x/crypto` advisory
+Minimal version selection moves the rest of the set along (`golang.org/x/sys` /
+`sync` / `term`, the remaining otel modules). The remaining `golang.org/x/crypto` advisory
 GO-2026-5932 has no fixed release and is covered by `../known_vulnerabilities.vex`.
 Touches only `go.mod` / `go.sum` (the build re-runs `go mod download` /
 `go mod vendor`).

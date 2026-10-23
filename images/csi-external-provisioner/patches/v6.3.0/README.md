@@ -197,9 +197,11 @@ Bumps the modules Trivy still flags after `002` (upstream v6.3.0 plus the
 - `go.opentelemetry.io/otel/sdk`, `.../exporters/otlp/otlptrace`,
   `.../exporters/otlp/otlptrace/otlptracegrpc` `v1.44.0 -> v1.45.0`
   (CVE-2026-81870)
+- `golang.org/x/net` `-> v0.60.0` (CVE-2026-78669, CVE-2026-78659,
+  CVE-2026-78660, CVE-2026-78663, CVE-2026-97032), the version `api/` requires
 
-Minimal version selection moves the rest of the set along (`golang.org/x/net`
--> `v0.58.0`, `golang.org/x/text` -> `v0.41.0`, `golang.org/x/sys` / `sync` /
+Minimal version selection moves the rest of the set along (`golang.org/x/text`
+-> `v0.42.0`, `golang.org/x/sys` / `sync` /
 `term` / `tools`, the remaining `go.opentelemetry.io/otel*` modules,
 `go.opentelemetry.io/proto/otlp`, `google.golang.org/genproto/googleapis/*`,
 `github.com/go-logr/logr`). The remaining `golang.org/x/crypto` advisory
