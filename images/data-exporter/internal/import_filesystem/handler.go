@@ -37,6 +37,7 @@ import (
 
 var (
 	errPathMustBeAbsolute = errors.New("path must be absolute")
+	errPathOutsideRoot    = errors.New("path must name a file inside the import root")
 )
 
 const (
@@ -139,8 +140,12 @@ func (h *ImportFilesystemHandler) CreateFile(w http.ResponseWriter, r *http.Requ
 		return
 	}
 
-	urlPath := filepath.Clean(r.URL.Path)
-	absPath := filepath.Join(h.path, urlPath)
+	absPath, err := h.resolvePath(r.URL.Path)
+	if err != nil {
+		h.logger.Error("refused upload path", "path", r.URL.Path, "error", err)
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
 	tempPath := absPath + ".tempupload"
 	parentDir := filepath.Dir(absPath)
 
@@ -273,8 +278,13 @@ func (h *ImportFilesystemHandler) CompleteImport(w http.ResponseWriter, _ *http.
 }
 
 func (h *ImportFilesystemHandler) HeadFile(w http.ResponseWriter, r *http.Request) {
-	urlPath := filepath.Clean(r.URL.Path)
-	absPath := filepath.Join(h.path, urlPath)
+	absPath, err := h.resolvePath(r.URL.Path)
+	if err != nil {
+		h.logger.Error("refused upload path", "path", r.URL.Path, "error", err)
+		w.Header().Set("Content-Length", "0")
+		w.WriteHeader(http.StatusBadRequest)
+		return
+	}
 	tempPath := absPath + ".tempupload"
 
 	tfi, err := h.fs.Lstat(tempPath)
@@ -303,6 +313,15 @@ func (h *ImportFilesystemHandler) HeadFile(w http.ResponseWriter, r *http.Reques
 
 	w.Header().Set("Content-Length", strconv.FormatInt(fi.Size(), 10))
 	w.WriteHeader(http.StatusOK)
+}
+
+func (h *ImportFilesystemHandler) resolvePath(urlPath string) (string, error) {
+	resolved := filepath.Join(h.path, filepath.Clean("/"+urlPath))
+	if !strings.HasPrefix(resolved, h.path+string(filepath.Separator)) {
+		return "", errPathOutsideRoot
+	}
+
+	return resolved, nil
 }
 
 func checkIsDir(fsys fs.OS, path string) error {
