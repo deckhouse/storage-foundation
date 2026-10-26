@@ -5,7 +5,7 @@ go 1.27.3
 require (
 	github.com/deckhouse/sds-common-lib v0.15.0
 	github.com/deckhouse/storage-foundation/api v0.0.0-00010101000000-000000000000
-	github.com/google/cel-go v0.26.0
+	github.com/google/cel-go v0.29.0
 	github.com/kubernetes-csi/external-snapshotter/client/v6 v6.3.0
 	github.com/slok/kubewebhook/v2 v2.7.0
 	k8s.io/api v0.34.3
@@ -17,10 +17,10 @@ require (
 replace github.com/deckhouse/storage-foundation/api => ../../api
 
 require (
-	cel.dev/expr v0.24.0 // indirect
+	cel.dev/expr v0.25.1 // indirect
 	github.com/deckhouse/state-snapshotter/api v0.0.0-20261022094718-f1260fa12809 // indirect
 	github.com/DataDog/gostackparse v0.7.0 // indirect
-	github.com/antlr4-go/antlr/v4 v4.13.0 // indirect
+	github.com/antlr4-go/antlr/v4 v4.13.1 // indirect
 	github.com/davecgh/go-spew v1.1.2-0.20180830191138-d8f796af33cc // indirect
 	github.com/deckhouse/deckhouse/pkg/log v0.2.1 // indirect
 	github.com/emicklei/go-restful/v3 v3.13.0 // indirect
