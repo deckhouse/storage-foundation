@@ -94,6 +94,21 @@ module. The executor only:
   (explicit binding, no `dataSourceRef`, no temporary `VolumeSnapshot`);
 - emits Kubernetes events; is idempotent / retry-safe.
 
+The PV carries the same StorageClass secret references as one upstream
+`prepareProvision` creates: `controllerPublish`, `nodeStage`,
+`nodePublish`, `controllerExpand` and `nodeExpand` in `spec.csi`, the
+provisioner secret in the deletion annotations and the controller-modify
+secret in the modify annotations. Templates resolve against the PV name and
+the target PVC name and namespace; the PVC is created without annotations,
+so a `${pvc.annotations[...]}` template does not resolve. A template that
+does not resolve is reported as `VRRInvalidStorageClass` and not retried,
+and no volume is created. `spec.csi` is immutable, so a PV created without
+these references stays broken: ceph-csi refuses `NodeStageVolume` with
+`stage secrets cannot be nil or empty`, and the claim is Bound but cannot
+be mounted. When the executor reuses such a PV from an earlier attempt, it
+reports `VRRPVMissingSecretRefs` on the VolumeRestoreRequest with every
+missing field.
+
 The executor **never writes VRR status** — that is owned by the
 storage-foundation VRR controller, which observes the bound target PVC
 and sets `Ready`. No `volumerestorerequests/status` RBAC is required for

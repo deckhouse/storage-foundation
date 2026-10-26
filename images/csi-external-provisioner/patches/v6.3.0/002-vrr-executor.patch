@@ -1,5 +1,5 @@
 diff --git a/cmd/csi-provisioner/csi-provisioner.go b/cmd/csi-provisioner/csi-provisioner.go
-index 9529fd36..d806086b 100644
+index 9529fd3..d806086 100644
 --- a/cmd/csi-provisioner/csi-provisioner.go
 +++ b/cmd/csi-provisioner/csi-provisioner.go
 @@ -30,6 +30,7 @@ import (
@@ -126,7 +126,7 @@ index 9529fd36..d806086b 100644
  		if utilfeature.DefaultFeatureGate.Enabled(features.CrossNamespaceVolumeDataSource) {
  			if gatewayFactory != nil {
 diff --git a/deploy/kubernetes/rbac.yaml b/deploy/kubernetes/rbac.yaml
-index bdf4f46e..91d49cea 100644
+index bdf4f46..91d49ce 100644
 --- a/deploy/kubernetes/rbac.yaml
 +++ b/deploy/kubernetes/rbac.yaml
 @@ -29,9 +29,12 @@ rules:
@@ -169,7 +169,7 @@ index bdf4f46e..91d49cea 100644
    - apiGroups: ["storage.k8s.io"]
      resources: ["csinodes"]
 diff --git a/go.mod b/go.mod
-index 083c6354..0941f627 100644
+index 083c635..0941f62 100644
 --- a/go.mod
 +++ b/go.mod
 @@ -39,6 +39,7 @@ require (
@@ -213,7 +213,7 @@ index 083c6354..0941f627 100644
 +
 +replace github.com/deckhouse/storage-foundation/api => ../api
 diff --git a/go.sum b/go.sum
-index 6ef3c9f1..617f9784 100644
+index 6ef3c9f..617f978 100644
 --- a/go.sum
 +++ b/go.sum
 @@ -276,45 +276,45 @@ go.yaml.in/yaml/v3 v3.0.4/go.mod h1:DhzuOOF2ATzADvBadXxruRBLzYTpT36CKvDb3+aBEFg=
@@ -289,10 +289,10 @@ index 6ef3c9f1..617f9784 100644
  golang.org/x/xerrors v0.0.0-20191204190536-9bdfabe68543/go.mod h1:I/5z698sn9Ka8TeJc9MKroUUfqBBauWjQqLJ2OPfmY0=
 diff --git a/pkg/controller/vrr_handler.go b/pkg/controller/vrr_handler.go
 new file mode 100644
-index 00000000..72408ecd
+index 0000000..dbe5a59
 --- /dev/null
 +++ b/pkg/controller/vrr_handler.go
-@@ -0,0 +1,940 @@
+@@ -0,0 +1,1036 @@
 +/*
 +Copyright 2025 Flant JSC
 +
@@ -608,10 +608,10 @@ index 00000000..72408ecd
 +	// fsType), not the driver, so they are stripped before CreateVolume exactly as
 +	// upstream prepareProvision does: a driver that validates parameters strictly
 +	// (csi-driver-nfs) rejects the whole request with InvalidArgument and the restore
-+	// never materializes. ensurePV still resolves the provisioner secret from the raw
-+	// sc.Parameters. An unknown key under the reserved prefix is a StorageClass typo,
-+	// not a transient fault - upstream treats it as ProvisioningFinished - so it is
-+	// reported and dropped without a requeue, like the spec validations above.
++	// never materializes. Secret references are resolved from the raw sc.Parameters
++	// below. An unknown key under the reserved prefix is a StorageClass typo, not a
++	// transient fault - upstream treats it as ProvisioningFinished - so it is reported
++	// and dropped without a requeue, like the spec validations above.
 +	csiParameters, err := removePrefixedParameters(sc.Parameters)
 +	if err != nil {
 +		e.eventRecorder.Eventf(vrr, v1.EventTypeWarning, "VRRInvalidStorageClass",
@@ -621,11 +621,22 @@ index 00000000..72408ecd
 +		return nil
 +	}
 +
++	// A secret template that does not resolve is a StorageClass error as well; upstream
++	// fails provisioning on it instead of creating a PV the node plugin cannot stage.
++	secretRefs, err := resolveVRRSecretRefs(sc, pvName, vrr)
++	if err != nil {
++		e.eventRecorder.Eventf(vrr, v1.EventTypeWarning, "VRRInvalidStorageClass",
++			"StorageClass %s has an invalid secret reference: %v", sc.Name, err)
++		klog.Warningf("VRR %s/%s: StorageClass %s has an invalid secret reference: %v, ignoring",
++			vrr.Namespace, vrr.Name, sc.Name, err)
++		return nil
++	}
++
 +	switch vrr.Spec.SourceRef.Kind {
 +	case "VolumeSnapshotContent":
-+		return e.restoreFromVSC(ctx, vrr, sc, csiParameters, pvName)
++		return e.restoreFromVSC(ctx, vrr, sc, csiParameters, secretRefs, pvName)
 +	case "PersistentVolume":
-+		return e.restoreFromPV(ctx, vrr, sc, csiParameters, pvName)
++		return e.restoreFromPV(ctx, vrr, sc, csiParameters, secretRefs, pvName)
 +	default:
 +		e.eventRecorder.Eventf(vrr, v1.EventTypeWarning, "VRRInvalidSource",
 +			"Unsupported source kind: %s", vrr.Spec.SourceRef.Kind)
@@ -638,7 +649,7 @@ index 00000000..72408ecd
 +//
 +// It does not wait for the PVC to become Bound and does not update VRR status;
 +// those are the responsibility of the storage-foundation controller.
-+func (e *VRRExecutor) restoreFromVSC(ctx context.Context, vrr *storagev1alpha1.VolumeRestoreRequest, sc *storagev1.StorageClass, csiParameters map[string]string, pvName string) error {
++func (e *VRRExecutor) restoreFromVSC(ctx context.Context, vrr *storagev1alpha1.VolumeRestoreRequest, sc *storagev1.StorageClass, csiParameters map[string]string, secretRefs vrrSecretRefs, pvName string) error {
 +	vsc, err := e.snapshotClient.SnapshotV1().VolumeSnapshotContents().Get(ctx, vrr.Spec.SourceRef.Name, metav1.GetOptions{})
 +	if err != nil {
 +		if apierrors.IsNotFound(err) {
@@ -706,7 +717,7 @@ index 00000000..72408ecd
 +		},
 +	}
 +
-+	pv, err := e.ensurePV(ctx, vrr, sc, csiParameters, pvName, volumeCaps, capacityBytes, contentSource, e.resolveFSType(vrr),
++	pv, err := e.ensurePV(ctx, vrr, sc, csiParameters, secretRefs, pvName, volumeCaps, capacityBytes, contentSource, e.resolveFSType(vrr),
 +		fmt.Sprintf("Successfully created PV %s from snapshot", pvName), effectiveAccessModes(vrr))
 +	if err != nil {
 +		return err
@@ -839,7 +850,7 @@ index 00000000..72408ecd
 +}
 +
 +// restoreFromPV restores a volume by cloning an existing PersistentVolume and creates PV + PVC.
-+func (e *VRRExecutor) restoreFromPV(ctx context.Context, vrr *storagev1alpha1.VolumeRestoreRequest, sc *storagev1.StorageClass, csiParameters map[string]string, pvName string) error {
++func (e *VRRExecutor) restoreFromPV(ctx context.Context, vrr *storagev1alpha1.VolumeRestoreRequest, sc *storagev1.StorageClass, csiParameters map[string]string, secretRefs vrrSecretRefs, pvName string) error {
 +	sourcePV, err := e.kubeClient.CoreV1().PersistentVolumes().Get(ctx, vrr.Spec.SourceRef.Name, metav1.GetOptions{})
 +	if err != nil {
 +		if apierrors.IsNotFound(err) {
@@ -888,7 +899,7 @@ index 00000000..72408ecd
 +		},
 +	}
 +
-+	pv, err := e.ensurePV(ctx, vrr, sc, csiParameters, pvName, volumeCaps, capacityBytes, contentSource, e.getFSTypeFromPV(sourcePV),
++	pv, err := e.ensurePV(ctx, vrr, sc, csiParameters, secretRefs, pvName, volumeCaps, capacityBytes, contentSource, e.getFSTypeFromPV(sourcePV),
 +		fmt.Sprintf("Successfully created PV %s from PersistentVolume %s", pvName, sourcePV.Name), sourcePV.Spec.AccessModes)
 +	if err != nil {
 +		return err
@@ -901,12 +912,13 @@ index 00000000..72408ecd
 +// is already present, otherwise it calls CSI CreateVolume and creates the PV object.
 +//
 +// csiParameters is sc.Parameters with the reserved csi.storage.k8s.io/* keys already
-+// removed; the raw sc.Parameters stay the source for the provisioner secret reference.
++// removed; secretRefs are the secret references resolved from the raw sc.Parameters.
 +func (e *VRRExecutor) ensurePV(
 +	ctx context.Context,
 +	vrr *storagev1alpha1.VolumeRestoreRequest,
 +	sc *storagev1.StorageClass,
 +	csiParameters map[string]string,
++	secretRefs vrrSecretRefs,
 +	pvName string,
 +	volumeCaps []*csi.VolumeCapability,
 +	capacityBytes int64,
@@ -918,23 +930,24 @@ index 00000000..72408ecd
 +	// Idempotency: a previous attempt may have created the PV but not the PVC.
 +	if existingPV, err := e.kubeClient.CoreV1().PersistentVolumes().Get(ctx, pvName, metav1.GetOptions{}); err == nil {
 +		klog.V(2).Infof("ensurePV: PV %s already exists, reusing it for VRR %s/%s", pvName, vrr.Namespace, vrr.Name)
++		// A PV left by an executor that did not record the secret references cannot be
++		// fixed in place; name it so the unmountable claim is not a mystery.
++		if missing := missingSecretRefs(existingPV, secretRefs); len(missing) > 0 {
++			fields := strings.Join(missing, ", ")
++			e.eventRecorder.Eventf(vrr, v1.EventTypeWarning, "VRRPVMissingSecretRefs",
++				"Reused PV %s lacks spec.csi secret references that StorageClass %s names: %s; the node plugin may refuse to stage it",
++				pvName, sc.Name, fields)
++			klog.Warningf("VRR %s/%s: reused PV %s lacks spec.csi secret references that StorageClass %s names: %s",
++				vrr.Namespace, vrr.Name, pvName, sc.Name, fields)
++		}
 +		return existingPV, nil
 +	} else if !apierrors.IsNotFound(err) {
 +		return nil, fmt.Errorf("failed to check if PV %s exists: %w", pvName, err)
 +	}
 +
-+	// Resolve provisioner secret credentials from the StorageClass parameters.
-+	// The PVC does not exist yet, so secret templates can only reference the PV name.
-+	var provisionerCredentials map[string]string
-+	provisionerSecretRef, err := getSecretReference(provisionerSecretParams, sc.Parameters, pvName, nil)
++	provisionerCredentials, err := getCredentials(ctx, e.kubeClient, secretRefs.provisioner)
 +	if err != nil {
-+		// Missing/invalid secret reference is acceptable - some drivers need no secrets.
-+		klog.V(5).Infof("ensurePV: no secret reference in StorageClass for VRR %s/%s: %v", vrr.Namespace, vrr.Name, err)
-+	} else if provisionerSecretRef != nil {
-+		provisionerCredentials, err = getCredentials(ctx, e.kubeClient, provisionerSecretRef)
-+		if err != nil {
-+			return nil, fmt.Errorf("failed to get provisioner credentials: %w", err)
-+		}
++		return nil, fmt.Errorf("failed to get provisioner credentials: %w", err)
 +	}
 +
 +	req := csi.CreateVolumeRequest{
@@ -960,7 +973,7 @@ index 00000000..72408ecd
 +	klog.V(2).Infof("ensurePV: CSI CreateVolume succeeded for VRR %s/%s, volumeHandle %s", vrr.Namespace, vrr.Name, rep.Volume.VolumeId)
 +
 +	pv, err := createPVFromCSIResponse(rep.Volume, sc, pvName, e.driverName, e.identity, volumeCaps, fsType, accessModes, capacityBytes,
-+		provisionerSecretRef)
++		secretRefs)
 +	if err != nil {
 +		return nil, fmt.Errorf("failed to build PV object from CSI response: %w", err)
 +	}
@@ -1073,11 +1086,82 @@ index 00000000..72408ecd
 +	}, nil
 +}
 +
++// vrrSecretRefs are the StorageClass secret references of a restored volume, the same set
++// upstream prepareProvision resolves for a dynamically provisioned one.
++type vrrSecretRefs struct {
++	provisioner       *v1.SecretReference
++	controllerPublish *v1.SecretReference
++	nodeStage         *v1.SecretReference
++	nodePublish       *v1.SecretReference
++	controllerExpand  *v1.SecretReference
++	nodeExpand        *v1.SecretReference
++	controllerModify  *v1.SecretReference
++}
++
++// resolveVRRSecretRefs resolves the secret templates of the StorageClass against the PV
++// name and the target PVC. The PVC does not exist yet, but its name and namespace are
++// known; it is created without annotations, so a ${pvc.annotations[...]} template fails
++// here just as it would for that claim.
++func resolveVRRSecretRefs(sc *storagev1.StorageClass, pvName string, vrr *storagev1alpha1.VolumeRestoreRequest) (vrrSecretRefs, error) {
++	claim := &v1.PersistentVolumeClaim{
++		ObjectMeta: metav1.ObjectMeta{
++			Name:      vrrTargetPVCName(vrr),
++			Namespace: vrrTargetNamespace(vrr),
++		},
++	}
++	var refs vrrSecretRefs
++	for _, s := range []struct {
++		params secretParamsMap
++		ref    **v1.SecretReference
++	}{
++		{provisionerSecretParams, &refs.provisioner},
++		{controllerPublishSecretParams, &refs.controllerPublish},
++		{nodeStageSecretParams, &refs.nodeStage},
++		{nodePublishSecretParams, &refs.nodePublish},
++		{controllerExpandSecretParams, &refs.controllerExpand},
++		{nodeExpandSecretParams, &refs.nodeExpand},
++		{controllerModifySecretParams, &refs.controllerModify},
++	} {
++		ref, err := getSecretReference(s.params, sc.Parameters, pvName, claim)
++		if err != nil {
++			return vrrSecretRefs{}, fmt.Errorf("%s secret: %w", s.params.name, err)
++		}
++		*s.ref = ref
++	}
++	return refs, nil
++}
++
++// missingSecretRefs returns the spec.csi secret reference fields that the StorageClass
++// names but pv does not carry.
++func missingSecretRefs(pv *v1.PersistentVolume, refs vrrSecretRefs) []string {
++	var missing []string
++	var csiSource v1.CSIPersistentVolumeSource
++	if pv.Spec.CSI != nil {
++		csiSource = *pv.Spec.CSI
++	}
++	for _, f := range []struct {
++		field string
++		want  *v1.SecretReference
++		got   *v1.SecretReference
++	}{
++		{"controllerPublishSecretRef", refs.controllerPublish, csiSource.ControllerPublishSecretRef},
++		{"nodeStageSecretRef", refs.nodeStage, csiSource.NodeStageSecretRef},
++		{"nodePublishSecretRef", refs.nodePublish, csiSource.NodePublishSecretRef},
++		{"controllerExpandSecretRef", refs.controllerExpand, csiSource.ControllerExpandSecretRef},
++		{"nodeExpandSecretRef", refs.nodeExpand, csiSource.NodeExpandSecretRef},
++	} {
++		if f.want != nil && f.got == nil {
++			missing = append(missing, f.field)
++		}
++	}
++	return missing
++}
++
 +// createPVFromCSIResponse builds a PersistentVolume object from a CSI CreateVolume response.
 +//
 +// requestedBytes is the CapacityRange.RequiredBytes sent in the CreateVolume request; it is
-+// the fallback when the driver reports zero capacity. deletionSecretRef is the provisioner
-+// secret the volume was created with, or nil when the StorageClass names none.
++// the fallback when the driver reports zero capacity. secretRefs are the StorageClass
++// secret references resolved for this volume.
 +func createPVFromCSIResponse(
 +	volume *csi.Volume,
 +	sc *storagev1.StorageClass,
@@ -1088,7 +1172,7 @@ index 00000000..72408ecd
 +	fsType string,
 +	accessModes []v1.PersistentVolumeAccessMode,
 +	requestedBytes int64,
-+	deletionSecretRef *v1.SecretReference,
++	secretRefs vrrSecretRefs,
 +) (*v1.PersistentVolume, error) {
 +	respCap := volume.GetCapacityBytes()
 +	if respCap == 0 {
@@ -1128,11 +1212,18 @@ index 00000000..72408ecd
 +
 +	pvReadOnly := len(accessModes) == 1 && accessModes[0] == v1.ReadOnlyMany
 +
++	// spec.csi is immutable once the PV exists, so a reference missed here can only be
++	// fixed by recreating the PV; ceph-csi rejects NodeStageVolume without its secret.
 +	csiPVSource := &v1.CSIPersistentVolumeSource{
-+		Driver:           driverName,
-+		VolumeHandle:     volume.VolumeId,
-+		VolumeAttributes: volumeAttributes,
-+		ReadOnly:         pvReadOnly,
++		Driver:                     driverName,
++		VolumeHandle:               volume.VolumeId,
++		VolumeAttributes:           volumeAttributes,
++		ReadOnly:                   pvReadOnly,
++		ControllerPublishSecretRef: secretRefs.controllerPublish,
++		NodeStageSecretRef:         secretRefs.nodeStage,
++		NodePublishSecretRef:       secretRefs.nodePublish,
++		ControllerExpandSecretRef:  secretRefs.controllerExpand,
++		NodeExpandSecretRef:        secretRefs.nodeExpand,
 +	}
 +	if volumeMode == nil || *volumeMode == v1.PersistentVolumeFilesystem {
 +		csiPVSource.FSType = fsType
@@ -1164,11 +1255,16 @@ index 00000000..72408ecd
 +	// the StorageClass, so a driver that keeps delete-time settings in that secret (csi-nfs
 +	// keeps mount options and the volume cleanup method there) would delete without them.
 +	deletionSecretName, deletionSecretNamespace := "", ""
-+	if deletionSecretRef != nil {
-+		deletionSecretName, deletionSecretNamespace = deletionSecretRef.Name, deletionSecretRef.Namespace
++	if secretRefs.provisioner != nil {
++		deletionSecretName, deletionSecretNamespace = secretRefs.provisioner.Name, secretRefs.provisioner.Namespace
 +	}
 +	metav1.SetMetaDataAnnotation(&pv.ObjectMeta, annDeletionProvisionerSecretRefName, deletionSecretName)
 +	metav1.SetMetaDataAnnotation(&pv.ObjectMeta, annDeletionProvisionerSecretRefNamespace, deletionSecretNamespace)
++
++	if secretRefs.controllerModify != nil {
++		metav1.SetMetaDataAnnotation(&pv.ObjectMeta, annModifyControllerSecretRefName, secretRefs.controllerModify.Name)
++		metav1.SetMetaDataAnnotation(&pv.ObjectMeta, annModifyControllerSecretRefNamespace, secretRefs.controllerModify.Namespace)
++	}
 +
 +	if sc.ReclaimPolicy != nil {
 +		pv.Spec.PersistentVolumeReclaimPolicy = *sc.ReclaimPolicy
@@ -1235,10 +1331,10 @@ index 00000000..72408ecd
 +}
 diff --git a/pkg/controller/vrr_handler_test.go b/pkg/controller/vrr_handler_test.go
 new file mode 100644
-index 00000000..d67072dc
+index 0000000..323d222
 --- /dev/null
 +++ b/pkg/controller/vrr_handler_test.go
-@@ -0,0 +1,1564 @@
+@@ -0,0 +1,1838 @@
 +/*
 +Copyright 2025 Flant JSC
 +
@@ -1259,6 +1355,7 @@ index 00000000..d67072dc
 +
 +import (
 +	"context"
++	"reflect"
 +	"strings"
 +	"testing"
 +	"time"
@@ -1659,6 +1756,80 @@ index 00000000..d67072dc
 +	assertPVCBoundTo(t, kubeClient, pvName)
 +}
 +
++// TestReconcile_PVAlreadyExists_MissingSecretRefs verifies that a PV reused from an earlier
++// attempt is reported, with every missing field, when it lacks secret references the
++// StorageClass names: spec.csi is immutable, so such a PV binds and is never staged.
++func TestReconcile_PVAlreadyExists_MissingSecretRefs(t *testing.T) {
++	secretRef := &v1.SecretReference{Name: "csi-secret", Namespace: "csi-ns"}
++
++	tests := []struct {
++		name       string
++		stageRef   *v1.SecretReference
++		expandRef  *v1.SecretReference
++		wantFields string
++	}{
++		{name: "error: reused PV without any secret reference names both fields", wantFields: "nodeStageSecretRef, controllerExpandSecretRef"},
++		{name: "error: reused PV without nodeStageSecretRef names that field", expandRef: secretRef, wantFields: ": nodeStageSecretRef;"},
++		{name: "success: reused PV with every secret reference is not reported", stageRef: secretRef, expandRef: secretRef},
++	}
++
++	for _, tt := range tests {
++		t.Run(tt.name, func(t *testing.T) {
++			ctrl := gomock.NewController(t)
++			defer ctrl.Finish()
++
++			sc := ourStorageClass()
++			sc.Parameters = map[string]string{
++				"csi.storage.k8s.io/node-stage-secret-name":             secretRef.Name,
++				"csi.storage.k8s.io/node-stage-secret-namespace":        secretRef.Namespace,
++				"csi.storage.k8s.io/controller-expand-secret-name":      secretRef.Name,
++				"csi.storage.k8s.io/controller-expand-secret-namespace": secretRef.Namespace,
++			}
++			mockSCLister := NewMockStorageClassLister(ctrl)
++			mockSCLister.storageClasses[vrrTestStorageClass] = sc
++
++			vrr := createTestVRR("test-vrr", "test-ns", "VolumeSnapshotContent", "test-vsc")
++			pvName := expectedPVName(t, vrr)
++			existingPV := csiPV(pvName, "existing-volume-id")
++			existingPV.Spec.CSI.NodeStageSecretRef = tt.stageRef
++			existingPV.Spec.CSI.ControllerExpandSecretRef = tt.expandRef
++
++			kubeClient := fakeclientset.NewSimpleClientset(existingPV)
++			snapshotClient := snapfake.NewSimpleClientset(readyVSC("test-vsc", vrrTestSnapshotHandle))
++			mockCSIClient := &mockControllerClient{
++				createVolumeFunc: func(_ context.Context, _ *csi.CreateVolumeRequest) (*csi.CreateVolumeResponse, error) {
++					t.Error("CSI CreateVolume must not be called when PV already exists")
++					return nil, nil
++				},
++			}
++
++			eventRecorder := record.NewFakeRecorder(10)
++			e := newTestExecutor(mockCSIClient, mockSCLister, kubeClient, snapshotClient, eventRecorder)
++			if err := e.reconcile(context.Background(), vrr); err != nil {
++				t.Fatalf("reconcile failed: %v", err)
++			}
++			assertPVCBoundTo(t, kubeClient, pvName)
++
++			var events []string
++			for len(eventRecorder.Events) > 0 {
++				events = append(events, <-eventRecorder.Events)
++			}
++			var reported string
++			for _, ev := range events {
++				if strings.Contains(ev, "VRRPVMissingSecretRefs") {
++					reported = ev
++				}
++			}
++			switch {
++			case tt.wantFields == "" && reported != "":
++				t.Errorf("unexpected VRRPVMissingSecretRefs event: %q", reported)
++			case tt.wantFields != "" && !strings.Contains(reported, tt.wantFields):
++				t.Errorf("VRRPVMissingSecretRefs event = %q, want it to contain %q (events: %v)", reported, tt.wantFields, events)
++			}
++		})
++	}
++}
++
 +func TestReconcile_FromPV_HappyPath(t *testing.T) {
 +	ctrl := gomock.NewController(t)
 +	defer ctrl.Finish()
@@ -1816,7 +1987,7 @@ index 00000000..d67072dc
 +	// capacity, so the fallback path is never taken. A deliberately different value
 +	// makes that explicit.
 +	pv, err := createPVFromCSIResponse(volume, sc, "test-pv", vrrTestDriverName, vrrTestIdentity, volumeCaps, "ext4",
-+		[]v1.PersistentVolumeAccessMode{v1.ReadOnlyMany}, 2*1024*1024*1024, nil)
++		[]v1.PersistentVolumeAccessMode{v1.ReadOnlyMany}, 2*1024*1024*1024, vrrSecretRefs{})
 +	if err != nil {
 +		t.Fatalf("createPVFromCSIResponse failed: %v", err)
 +	}
@@ -1847,7 +2018,7 @@ index 00000000..d67072dc
 +	// capacity, so the fallback path is never taken. A deliberately different value
 +	// makes that explicit.
 +	pv, err := createPVFromCSIResponse(volume, sc, "test-pv", vrrTestDriverName, vrrTestIdentity, volumeCaps, "ext4",
-+		[]v1.PersistentVolumeAccessMode{v1.ReadWriteOncePod}, 2*1024*1024*1024, nil)
++		[]v1.PersistentVolumeAccessMode{v1.ReadWriteOncePod}, 2*1024*1024*1024, vrrSecretRefs{})
 +	if err != nil {
 +		t.Fatalf("createPVFromCSIResponse failed: %v", err)
 +	}
@@ -1859,7 +2030,7 @@ index 00000000..d67072dc
 +	}
 +
 +	// Empty requested modes default to ReadWriteOnce.
-+	pvDefault, err := createPVFromCSIResponse(volume, sc, "test-pv2", vrrTestDriverName, vrrTestIdentity, volumeCaps, "ext4", nil, 2*1024*1024*1024, nil)
++	pvDefault, err := createPVFromCSIResponse(volume, sc, "test-pv2", vrrTestDriverName, vrrTestIdentity, volumeCaps, "ext4", nil, 2*1024*1024*1024, vrrSecretRefs{})
 +	if err != nil {
 +		t.Fatalf("createPVFromCSIResponse failed: %v", err)
 +	}
@@ -1887,7 +2058,7 @@ index 00000000..d67072dc
 +	// requestedBytes is irrelevant here: the CSI response already reports a non-zero
 +	// capacity, so the fallback path is never taken. A deliberately different value
 +	// makes that explicit.
-+	pv, err := createPVFromCSIResponse(volume, sc, "test-pv", vrrTestDriverName, vrrTestIdentity, volumeCaps, "ext4", nil, 2*1024*1024*1024, nil)
++	pv, err := createPVFromCSIResponse(volume, sc, "test-pv", vrrTestDriverName, vrrTestIdentity, volumeCaps, "ext4", nil, 2*1024*1024*1024, vrrSecretRefs{})
 +	if err != nil {
 +		t.Fatalf("createPVFromCSIResponse failed: %v", err)
 +	}
@@ -2269,6 +2440,205 @@ index 00000000..d67072dc
 +	}
 +}
 +
++// TestReconcile_RecordsStorageClassSecretRefs verifies that the PV the executor creates
++// carries the secret references of the StorageClass in spec.csi, as a dynamically
++// provisioned PV does. spec.csi is immutable, and without nodeStageSecretRef ceph-csi
++// rejects NodeStageVolume with "stage secrets cannot be nil or empty", so a restored
++// volume can never be mounted.
++func TestReconcile_RecordsStorageClassSecretRefs(t *testing.T) {
++	const (
++		secretName      = "csi-secret"
++		secretNamespace = "csi-ns"
++	)
++	ref := func(name, namespace string) *v1.SecretReference {
++		return &v1.SecretReference{Name: name, Namespace: namespace}
++	}
++	cephParameters := map[string]string{
++		"clusterID": "ceph",
++		"csi.storage.k8s.io/provisioner-secret-name":             secretName,
++		"csi.storage.k8s.io/provisioner-secret-namespace":        secretNamespace,
++		"csi.storage.k8s.io/node-stage-secret-name":              secretName,
++		"csi.storage.k8s.io/node-stage-secret-namespace":         secretNamespace,
++		"csi.storage.k8s.io/controller-expand-secret-name":       secretName,
++		"csi.storage.k8s.io/controller-expand-secret-namespace":  secretNamespace,
++		"csi.storage.k8s.io/controller-publish-secret-name":      secretName,
++		"csi.storage.k8s.io/controller-publish-secret-namespace": secretNamespace,
++	}
++	cephSource := &v1.CSIPersistentVolumeSource{
++		ControllerPublishSecretRef: ref(secretName, secretNamespace),
++		NodeStageSecretRef:         ref(secretName, secretNamespace),
++		ControllerExpandSecretRef:  ref(secretName, secretNamespace),
++	}
++
++	tests := []struct {
++		name            string
++		sourceKind      string
++		scParameters    map[string]string
++		secrets         []string
++		want            *v1.CSIPersistentVolumeSource
++		wantAnnotations map[string]string
++		wantEventReason string
++	}{
++		{
++			name:         "success: VolumeSnapshotContent source records the csi-ceph secret refs",
++			sourceKind:   "VolumeSnapshotContent",
++			scParameters: cephParameters,
++			secrets:      []string{secretNamespace + "/" + secretName},
++			want:         cephSource,
++		},
++		{
++			name:         "success: PersistentVolume source records the csi-ceph secret refs",
++			sourceKind:   "PersistentVolume",
++			scParameters: cephParameters,
++			secrets:      []string{secretNamespace + "/" + secretName},
++			want:         cephSource,
++		},
++		{
++			name:       "success: templates resolve against the target PVC",
++			sourceKind: "VolumeSnapshotContent",
++			scParameters: map[string]string{
++				"csi.storage.k8s.io/node-stage-secret-name":      "${pvc.name}-stage",
++				"csi.storage.k8s.io/node-stage-secret-namespace": "${pvc.namespace}",
++			},
++			want: &v1.CSIPersistentVolumeSource{
++				NodeStageSecretRef: ref(vrrTestTargetPVCName+"-stage", vrrTestTargetNamespace),
++			},
++		},
++		{
++			name:       "success: the default secret covers every operation",
++			sourceKind: "VolumeSnapshotContent",
++			scParameters: map[string]string{
++				"csi.storage.k8s.io/secret-name":      secretName,
++				"csi.storage.k8s.io/secret-namespace": secretNamespace,
++			},
++			secrets: []string{secretNamespace + "/" + secretName},
++			want: &v1.CSIPersistentVolumeSource{
++				ControllerPublishSecretRef: ref(secretName, secretNamespace),
++				NodeStageSecretRef:         ref(secretName, secretNamespace),
++				NodePublishSecretRef:       ref(secretName, secretNamespace),
++				ControllerExpandSecretRef:  ref(secretName, secretNamespace),
++				NodeExpandSecretRef:        ref(secretName, secretNamespace),
++			},
++			wantAnnotations: map[string]string{
++				annModifyControllerSecretRefName:      secretName,
++				annModifyControllerSecretRefNamespace: secretNamespace,
++			},
++		},
++		{
++			name:       "success: the controller-modify secret is recorded in annotations",
++			sourceKind: "VolumeSnapshotContent",
++			scParameters: map[string]string{
++				"csi.storage.k8s.io/controller-modify-secret-name":      secretName,
++				"csi.storage.k8s.io/controller-modify-secret-namespace": secretNamespace,
++			},
++			want: &v1.CSIPersistentVolumeSource{},
++			wantAnnotations: map[string]string{
++				annModifyControllerSecretRefName:      secretName,
++				annModifyControllerSecretRefNamespace: secretNamespace,
++			},
++		},
++		{
++			name:       "error: a template the target PVC cannot resolve is a permanent StorageClass error",
++			sourceKind: "VolumeSnapshotContent",
++			scParameters: map[string]string{
++				"csi.storage.k8s.io/node-stage-secret-name":      "${pvc.annotations['example.com/secret']}",
++				"csi.storage.k8s.io/node-stage-secret-namespace": secretNamespace,
++			},
++			wantEventReason: "VRRInvalidStorageClass",
++		},
++	}
++
++	for _, tt := range tests {
++		t.Run(tt.name, func(t *testing.T) {
++			ctrl := gomock.NewController(t)
++			defer ctrl.Finish()
++
++			sc := ourStorageClass()
++			sc.Parameters = tt.scParameters
++			mockSCLister := NewMockStorageClassLister(ctrl)
++			mockSCLister.storageClasses[vrrTestStorageClass] = sc
++
++			kubeClient := fakeclientset.NewSimpleClientset()
++			for _, s := range tt.secrets {
++				namespace, name, _ := strings.Cut(s, "/")
++				secret := &v1.Secret{
++					ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace},
++					Data:       map[string][]byte{"key": []byte("value")},
++				}
++				if _, err := kubeClient.CoreV1().Secrets(namespace).Create(context.Background(), secret, metav1.CreateOptions{}); err != nil {
++					t.Fatalf("failed to seed secret: %v", err)
++				}
++			}
++
++			var vrr *storagev1alpha1.VolumeRestoreRequest
++			var snapshotClient *snapfake.Clientset
++			switch tt.sourceKind {
++			case "VolumeSnapshotContent":
++				vrr = createTestVRR("test-vrr", vrrTestTargetNamespace, "VolumeSnapshotContent", "test-vsc")
++				snapshotClient = snapfake.NewSimpleClientset(readyVSC("test-vsc", vrrTestSnapshotHandle))
++			case "PersistentVolume":
++				vrr = createTestVRR("test-vrr", vrrTestTargetNamespace, "PersistentVolume", "source-pv")
++				if _, err := kubeClient.CoreV1().PersistentVolumes().Create(context.Background(), csiPV("source-pv", vrrTestVolumeHandle), metav1.CreateOptions{}); err != nil {
++					t.Fatalf("failed to seed source PV: %v", err)
++				}
++			}
++
++			createVolumeCalled := false
++			mockCSIClient := &mockControllerClient{
++				createVolumeFunc: func(_ context.Context, _ *csi.CreateVolumeRequest) (*csi.CreateVolumeResponse, error) {
++					createVolumeCalled = true
++					return &csi.CreateVolumeResponse{Volume: &csi.Volume{VolumeId: "new-volume-id", CapacityBytes: 1024 * 1024 * 1024}}, nil
++				},
++			}
++
++			eventRecorder := record.NewFakeRecorder(10)
++			e := newTestExecutor(mockCSIClient, mockSCLister, kubeClient, snapshotClient, eventRecorder)
++			if err := e.reconcile(context.Background(), vrr); err != nil {
++				t.Fatalf("reconcile failed: %v", err)
++			}
++
++			pvName := expectedPVName(t, vrr)
++			if tt.wantEventReason != "" {
++				if !waitForEvent(eventRecorder, tt.wantEventReason) {
++					t.Errorf("Expected event with reason %s", tt.wantEventReason)
++				}
++				if createVolumeCalled {
++					t.Error("CSI CreateVolume must not be called for a StorageClass with an unresolvable secret template")
++				}
++				if _, err := kubeClient.CoreV1().PersistentVolumes().Get(context.Background(), pvName, metav1.GetOptions{}); !apierrors.IsNotFound(err) {
++					t.Errorf("expected no PV %s, got err=%v", pvName, err)
++				}
++				assertNoPVC(t, kubeClient)
++				return
++			}
++
++			pv, err := kubeClient.CoreV1().PersistentVolumes().Get(context.Background(), pvName, metav1.GetOptions{})
++			if err != nil {
++				t.Fatalf("expected PV %s to exist: %v", pvName, err)
++			}
++			got := pv.Spec.CSI
++			for field, pair := range map[string][2]*v1.SecretReference{
++				"controllerPublishSecretRef": {got.ControllerPublishSecretRef, tt.want.ControllerPublishSecretRef},
++				"nodeStageSecretRef":         {got.NodeStageSecretRef, tt.want.NodeStageSecretRef},
++				"nodePublishSecretRef":       {got.NodePublishSecretRef, tt.want.NodePublishSecretRef},
++				"controllerExpandSecretRef":  {got.ControllerExpandSecretRef, tt.want.ControllerExpandSecretRef},
++				"nodeExpandSecretRef":        {got.NodeExpandSecretRef, tt.want.NodeExpandSecretRef},
++			} {
++				if !reflect.DeepEqual(pair[0], pair[1]) {
++					t.Errorf("PV spec.csi.%s = %v, want %v", field, pair[0], pair[1])
++				}
++			}
++			for _, ann := range []string{annModifyControllerSecretRefName, annModifyControllerSecretRefNamespace} {
++				got, ok := pv.Annotations[ann]
++				want, wantOK := tt.wantAnnotations[ann]
++				if ok != wantOK || got != want {
++					t.Errorf("PV annotation %q = %q (present %v), want %q (present %v)", ann, got, ok, want, wantOK)
++				}
++			}
++		})
++	}
++}
++
 +// TestReconcile_FromVSC_VolumeCapacityPrecedence verifies that restoreFromVSC picks the
 +// effective volume capacity in this priority order: requested pvcTemplate size >
 +// VolumeSnapshotContent RestoreSize > defaultVolumeCapacityBytes - and never picks a size
@@ -2500,7 +2870,7 @@ index 00000000..d67072dc
 +			volume := &csi.Volume{VolumeId: "test-volume-id", CapacityBytes: tt.driverCapacity}
 +
 +			pv, err := createPVFromCSIResponse(volume, sc, "test-pv", vrrTestDriverName, vrrTestIdentity, volumeCaps, "ext4",
-+				nil, tt.requestedBytes, nil)
++				nil, tt.requestedBytes, vrrSecretRefs{})
 +			if err != nil {
 +				t.Fatalf("createPVFromCSIResponse failed: %v", err)
 +			}
