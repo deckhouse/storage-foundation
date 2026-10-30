@@ -6,7 +6,6 @@ metadata:
   labels:
     heritage: deckhouse
     module: storage-foundation
-    rbac.deckhouse.io/aggregate-to-infrastructure-as: manager
     rbac.deckhouse.io/aggregate-to-storage-as: manager
     rbac.deckhouse.io/kind: capability
     rbac.deckhouse.io/capability: "system-capability.storage-foundation.edit"
