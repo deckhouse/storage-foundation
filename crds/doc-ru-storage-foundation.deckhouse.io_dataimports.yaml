@@ -3,44 +3,45 @@ spec:
     - name: v1alpha1
       schema:
         openAPIV3Schema:
-          description: |
-            Ресурс для импорта данных в PV, VolumeSnapshot, VirtualDisk или VirtualDiskSnapshot.
+          description: |-
+            Ресурс для импорта данных в новый PersistentVolumeClaim (PVC) (CreatePVC) или создания сохраняемого артефакта
+            данных для существующего узла снимка (PopulateData).
           properties:
             spec:
               properties:
                 ttl:
-                  description: |
+                  description: |-
                     Время жизни после последнего запроса пользователя.
 
                     Допустимые значения:
 
-                    - `<number>s`;
-                    - `<number>m`;
-                    - `<number>h`.
+                    - `<number>s`
+                    - `<number>m`
+                    - `<number>h`
 
-                    Например, `5m`, `2h45m`, или `1d`.
+                    Например, `5m`, `2h45m` или `24h`.
                 publish:
                   description: |
                     Включение внешнего доступа к импортер-поду за пределами кластера.
                 waitForFirstConsumer:
-                  description: |
-                    Определяет, чего импорт ждёт перед тем как начать перенос данных в целевой PVC. Если
-                    у StorageClass целевого PVC параметр `volumeBindingMode` равен `WaitForFirstConsumer`
-                    и это поле равно `true` (значение по умолчанию), импорт ждёт, пока не будет
-                    запланирован под, монтирующий целевой PVC, а затем размещает импортируемый том на
-                    узле, на который был запланирован этот под. Если значение `false`, импорт не ждёт
-                    потребителя: он продолжается сразу и сам становится первым потребителем тома. Не
-                    имеет эффекта, если StorageClass целевого PVC не откладывает привязку до появления
-                    потребителя.
+                  description: |-
+                    Определяет, чего импорт ждёт перед началом переноса данных в целевой PVC. Если у
+                    StorageClass целевого PVC параметр `volumeBindingMode` равен `WaitForFirstConsumer` и это
+                    поле равно `true`, импорт ждёт, пока не будет запланирован под, монтирующий целевой PVC,
+                    а затем размещает импортируемый том на соответствующем узле. Если значение `false`, импорт
+                    продолжает работу, не дожидаясь появления потребителя, и сам становится первым потребителем тома. Не имеет эффекта, если StorageClass целевого PVC
+                    не откладывает привязку до появления потребителя.
                 mode:
-                  description: |
-                    Дискриминатор, определяющий, что импорт делает с данными:
+                  description: |-
+                    Определяет назначение импортируемых данных:
 
-                    - `CreatePVC`: запись в сохраняемый, создаваемый PVC (`pvcTemplate`). Долговечный артефакт не создаётся.
-                    - `PopulateData`: данные заливаются во временный (scratch) том (`storageParams`) и захватываются в долговечный VolumeSnapshotContent для уже существующего узла-снимка, указанного в `snapshotRef`.
+                    - `CreatePVC`: запись данных в новый PVC (`pvcTemplate`). Сохраняемый артефакт данных не создаётся.
+                    - `PopulateData`: запись данных в соответствии с `storageParams` и создание сохраняемого
+                      VolumeSnapshotContent для существующего узла снимка, указанного в `snapshotRef`.
                 snapshotRef:
-                  description: |
-                    Только для режима PopulateData. Ссылка на уже существующий узел xxxSnapshot, которому принадлежит создаваемый долговечный артефакт (пространство имён неявно совпадает с пространством имён DataImport). Проставляется внешним создателем (d8/пользователь/система резервного копирования); контроллер DataImport её не читает — она нужна, чтобы обратный поиск state-snapshotter сопоставил лист по `spec.snapshotRef`.
+                  description: |-
+                    Только для режима `PopulateData`. Ссылка на существующий узел снимка, которому принадлежит
+                    создаваемый сохраняемый артефакт данных. Неймспейс совпадает с неймспейсом DataImport.
                   properties:
                     apiVersion:
                       description: |
@@ -52,38 +53,39 @@ spec:
                       description: |
                         Имя узла-снимка.
                 storageParams:
-                  description: |
-                    Только для режима PopulateData. Параметры временного (scratch) тома, в который заливаются импортируемые данные до захвата; уничтожается после создания долговечного VolumeSnapshotContent. Его StorageClass должен поддерживать снимки (ссылается на VolumeSnapshotClass через аннотацию `storage.deckhouse.io/volumesnapshotclass`).
+                  description: |-
+                    Только для режима `PopulateData`. Параметры хранилища для создания сохраняемого
+                    VolumeSnapshotContent. StorageClass должен поддерживать снимки через VolumeSnapshotClass.
                   properties:
                     storageClassName:
                       description: |
-                        StorageClass временного (scratch) PVC (должен поддерживать снимки).
+                        StorageClass временного PVC (должен поддерживать снимки).
                     size:
                       description: |
-                        Запрашиваемый размер временного (scratch) PVC (величина Kubernetes, например `10Gi`).
+                        Запрашиваемый размер временного PVC (величина Kubernetes, например `10Gi`).
                     volumeMode:
                       description: |
-                        Режим тома временного (scratch) PVC. По умолчанию `Filesystem`.
+                        Режим тома временного PVC. По умолчанию `Filesystem`.
                 pvcTemplate:
                   description: |
-                    Только для режима CreatePVC. Шаблон PersistentVolumeClaim, полностью описывающий целевой PVC, в который записываются импортируемые данные; PVC сохраняется после импорта.
+                    Только для режима CreatePVC. Шаблон PVC, полностью описывающий целевой PVC, в который записываются импортируемые данные; PVC сохраняется после импорта.
                   properties:
                     metadata:
                       description: |
-                        Метаданные PersistentVolumeClaim.
+                        Метаданные PVC.
                       properties:
                         name:
                           description: |
-                            Имя PersistentVolumeClaim.
+                            Имя PVC.
                         labels:
                           description: |
-                            Метки PersistentVolumeClaim.
+                            Метки PVC.
                         annotations:
                           description: |
-                            Аннотации PersistentVolumeClaim.
+                            Аннотации PVC.
                     spec:
                       description: |
-                        Спецификация PersistentVolumeClaim.
+                        Спецификация PVC.
                       properties:
                         accessModes:
                           description: |
@@ -97,16 +99,16 @@ spec:
                                 Минимальный объём требуемых вычислительных ресурсов.
                         storageClassName:
                           description: |
-                            Имя StorageClass, требуемого PersistentVolumeClaim. Если не указано,
+                            Имя StorageClass, требуемого PVC. Если не указано,
                             используется StorageClass по умолчанию кластера — в том числе назначенный
                             позже; импорт ждёт его назначения. Пустая строка не поддерживается: том
                             должен создаваться динамически.
                         volumeMode:
                           description: |
-                            Режим тома, требуемый для PersistentVolumeClaim.
+                            Режим тома, требуемый для PVC.
             status:
               description: |
-                Информация о статусе ресурса DataImport.
+                Информация о статусе DataImport.
               properties:
                 url:
                   description: |
@@ -124,41 +126,40 @@ spec:
                   description: |
                     Режим тома импортированных данных.
                 phase:
-                  description: |
-                    Укрупнённое состояние жизненного цикла, которое пишет только контроллер:
-                    Pending → Ready → Completed | Expired | Failed. Значение `Terminating` означает объект с
-                    установленной меткой удаления и является переходным состоянием, а не исходом. `Expired` —
-                    штатный терминальный исход (истекло окно неактивности), а не сбой.
+                  description: |-
+                    Состояние жизненного цикла DataImport: Pending → Ready → Completed | Expired | Failed.
+                    `Terminating` означает объект с установленной меткой удаления и является переходным
+                    состоянием, а не результатом. `Expired` — штатное терминальное состояние после истечения
+                    периода неактивности.
                 completionTimestamp:
-                  description: |
-                    Время перехода DataImport в терминальную фазу (Completed, Expired или Failed).
-                    Проставляется контроллером один раз; сборщик мусора отсчитывает время хранения от этой метки.
+                  description: |-
+                    Время перехода DataImport в терминальную фазу (Completed, Expired или Failed). От этой
+                    метки отсчитывается срок хранения.
                 serverState:
-                  description: |
-                    Необработанный сигнал прогресса от импортер-пода (единственного писателя): `Ready` — сервер
-                    обслуживает запросы, `Finished` — заливка клиента завершена долговечно, `IdleExpired` —
-                    истекло окно неактивности. Контроллер выводит из него фазу и условия.
+                  description: |-
+                    Состояние сервера импорта: `Ready` — сервер доступен, `Finished` — загрузка завершена,
+                    `IdleExpired` — истёк период неактивности.
                 data:
-                  description: |
-                    Блок захваченных данных импорта. Содержит долговечный кластерный артефакт данных под data.artifactRef (VolumeSnapshotContent). Заполняется после завершения соответствующего VolumeCaptureRequest.
+                  description: |-
+                    Информация о сохраняемом артефакте данных, созданном этим импортом.
                   properties:
                     artifactRef:
-                      description: |
-                        Ссылка на долговечный кластерный артефакт данных (VolumeSnapshotContent), созданный этим импортом.
+                      description: |-
+                        Ссылка на сохраняемый артефакт данных (VolumeSnapshotContent), созданный этим импортом.
                       properties:
                         uid:
-                          description: |
-                            UID артефакта данных (например, UID VolumeSnapshotContent). Необязательное; заполняется по возможности.
+                          description: |-
+                            UID сохраняемого артефакта данных (например, UID VolumeSnapshotContent). Необязательное
+                            поле; заполняется при наличии значения.
                     fsType:
-                      description: |
-                        Файловая система, на которую фактически были записаны импортированные данные. Считывается с PersistentVolume временного (scratch) тома (`spec.csi.fsType`) до его уничтожения: том удаляется сразу после захвата, а сам артефакт тип файловой системы не хранит, поэтому это единственная сохраняющаяся запись о нём.
-
-                        Пустое значение означает «неизвестно», а не значение по умолчанию: при импорте в блочный том (Block) файловой системы нет вовсе, а CSI-драйвер может не записать её тип на томе.
+                      description: |-
+                        Тип файловой системы импортированных данных. Пустое значение означает, что тип файловой
+                        системы неизвестен или неприменим для блочного тома.
                 conditions:
                   type: array
                   items:
                     type: object
-                    description: Массив условий, описывающих текущее состояние ресурса DataImport.
+                    description: Массив условий, описывающих текущее состояние DataImport.
                     properties:
                       type:
                         description: |

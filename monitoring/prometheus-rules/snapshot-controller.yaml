@@ -21,13 +21,13 @@
           - Check the Pod's status:
           
             ```shell
-            kubectl -n d8-storage-foundation get pod -l app=snapshot-controller
+            d8 k -n d8-storage-foundation get pod -l app=snapshot-controller
             ```
 
           - Check the Pod's logs:
           
             ```shell
-            kubectl -n d8-storage-foundation logs -l app=snapshot-controller -c snapshot-controller
+            d8 k -n d8-storage-foundation logs -l app=snapshot-controller -c snapshot-controller
             ```
 
     - alert: D8SnapshotControllerTargetAbsent
@@ -49,13 +49,13 @@
           - Check the Pod's status:
           
             ```shell
-            kubectl -n d8-storage-foundation get pod -l app=snapshot-controller
+            d8 k -n d8-storage-foundation get pod -l app=snapshot-controller
             ```
 
           - Check the Pod's logs:
 
             ```shell
-            kubectl -n d8-storage-foundation logs -l app=snapshot-controller -c snapshot-controller
+            d8 k -n d8-storage-foundation logs -l app=snapshot-controller -c snapshot-controller
             ```
 
     - alert: D8SnapshotControllerPodIsNotReady
@@ -76,13 +76,13 @@
           1. Examine the Deployment's details:
           
              ```shell
-             kubectl -n d8-storage-foundation describe deployment snapshot-controller
+             d8 k -n d8-storage-foundation describe deployment snapshot-controller
              ```
 
           2. Check the Pod's status to determine the cause why it is not running:
           
              ```shell
-             kubectl -n d8-storage-foundation describe pod -l app=snapshot-controller
+             d8 k -n d8-storage-foundation describe pod -l app=snapshot-controller
              ```
 
     - alert: D8SnapshotControllerPodIsNotRunning
@@ -103,11 +103,11 @@
           1. Examine the Deployment's details:
           
              ```shell
-             kubectl -n d8-storage-foundation describe deployment snapshot-controller
+             d8 k -n d8-storage-foundation describe deployment snapshot-controller
              ```
 
           2. Check the Pod's status to determine the cause why it is not running:
           
              ```shell
-             kubectl -n d8-storage-foundation describe pod -l app=snapshot-controller
+             d8 k -n d8-storage-foundation describe pod -l app=snapshot-controller
              ```

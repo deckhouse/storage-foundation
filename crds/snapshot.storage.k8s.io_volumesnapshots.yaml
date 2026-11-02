@@ -73,6 +73,8 @@ spec:
               to the latest internal value and may reject unrecognized values.
               More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
             type: string
+            x-doc-skip: true
+
           kind:
             description: |-
               Kind of REST resource this object represents. Servers may infer this value
@@ -80,8 +82,12 @@ spec:
               after creation. Value must be in CamelCase.
               More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
             type: string
+            x-doc-skip: true
+
           metadata:
             type: object
+            x-doc-skip: true
+
           spec:
             description: |-
               Desired characteristics of a snapshot requested by a user.
@@ -89,14 +95,10 @@ spec:
             properties:
               mode:
                 description: |-
-                  mode selects how this VolumeSnapshot obtains its content and is immutable once set.
-                  When omitted, it is set to Capture on creation and keeps its stored value on update.
-                  Capture: dynamic CSI snapshot from spec.source. Import: the data artifact is
-                  produced by a DataImport in the same namespace (reverse-lookup by DataImport.spec.snapshotRef);
-                  spec.source is omitted (required only when mode != Import) and the upstream
-                  snapshot-controller does not reconcile such a VolumeSnapshot - the state-snapshotter
-                  common controller binds it (sets status).
-                  Deckhouse extension: parity with spec.mode on every other state-snapshotter snapshot kind.
+                  Defines how the VolumeSnapshot obtains its content and is immutable after it is set.
+                  If omitted, it is set to `Capture` on creation. `Capture` creates a CSI snapshot from `spec.source`.
+                  `Import` associates the VolumeSnapshot with data imported in the same namespace; in this mode,
+                  `spec.source` is omitted. Deckhouse extension.
                 enum:
                 - Capture
                 - Import
@@ -106,12 +108,12 @@ spec:
                   rule: self == oldSelf
               source:
                 description: |-
-                  source specifies where a snapshot will be created from.
-                  Required unless mode is Import (an import VolumeSnapshot omits it - the data artifact
-                  comes from a DataImport; symmetry with the other snapshot kinds).
-                  May be empty: restore intent (backup controller sets volumeSnapshotContentName after restore).
-                  Otherwise exactly one of persistentVolumeClaimName or volumeSnapshotContentName must be set.
-                  Immutable after creation (except one-shot set of volumeSnapshotContentName from empty).
+                  Specifies the source from which the snapshot is created.
+
+                  Required unless `mode` is `Import`. May be empty during restore; in that case, the backup controller may set
+                  `volumeSnapshotContentName` once after a successful restore. Otherwise exactly one of
+                  `persistentVolumeClaimName` or `volumeSnapshotContentName` must be set. Immutable after creation except for
+                  that one-time update from an empty source.
                 properties:
                   persistentVolumeClaimName:
                     description: |-
@@ -187,10 +189,8 @@ spec:
             properties:
               boundSnapshotContentName:
                 description: |-
-                  Name of the cluster-scoped state-snapshotter SnapshotContent (state-snapshotter.deckhouse.io)
-                  that backs this VolumeSnapshot as a logical node in a snapshot tree. Written by the
-                  state-snapshotter common controller in addition to boundVolumeSnapshotContentName.
-                  Deckhouse extension.
+                  Name of the SnapshotContent associated with this VolumeSnapshot when it participates in a
+                  Deckhouse snapshot tree. Deckhouse extension.
                 type: string
               boundVolumeSnapshotContentName:
                 description: |-
@@ -204,48 +204,30 @@ spec:
                 type: string
               captureState:
                 description: |-
-                  captureState collects the state-snapshotter capture signals mirrored onto this VolumeSnapshot
-                  when it is a domain snapshot node: commonController holds the core-written capture-leg latches,
-                  and domainSpecificController holds the domain-written planning refs and lifecycle. Written by the
-                  state-snapshotter controllers. Deckhouse extension.
+                  State of snapshot capture when this VolumeSnapshot participates in a snapshot tree.
+                  Deckhouse extension.
                 properties:
                   commonController:
-                    description: 'commonController holds the core-written capture-leg
-                      success latches. Single writer: state-snapshotter core.'
+                    description: Capture state common to the snapshot tree.
                     properties:
                       childSubtreesManifestsPersisted:
-                        description: |-
-                          childSubtreesManifestsPersisted is a core-written latch: true once the subtrees of all declared
-                          direct children of this node are fully persisted (every descendant beneath each direct child has
-                          durably archived its manifests). It excludes this node's own manifests, which manifestCaptured
-                          tracks; a childless node is vacuously persisted. Eager-declared false at capture barrier 1.
-                          Monotonic (false -> true).
+                        description: Indicates whether manifests of all descendant snapshots have been persisted.
                         type: boolean
                       childrenSettled:
-                        description: |-
-                          childrenSettled is a core-computed monotonic latch: true once every direct child of this node
-                          has gone terminal, captured or failed alike. A completeness signal orthogonal to success;
-                          domains only read it. nil until computed or for a leaf. Monotonic (false -> true).
+                        description: Indicates whether all direct child snapshots have reached a terminal state.
                         type: boolean
                       dataCaptured:
-                        description: |-
-                          dataCaptured is the data-leg success latch, declared only where a data line exists.
+                        description: Indicates whether volume data has been captured successfully.
                         type: boolean
                       manifestCaptured:
-                        description: |-
-                          manifestCaptured is the manifest-leg success latch (declared on every capture node).
+                        description: Indicates whether manifests for this snapshot node have been captured successfully.
                         type: boolean
                       subtreePlanned:
-                        description: |-
-                          subtreePlanned is a core-computed monotonic recursive latch: true once this node reached
-                          capture barrier 1 (domainSpecificController.phase >= Planned) and every direct child's own
-                          subtreePlanned is true (the whole subtree finished planning). Domains only read it.
-                          Monotonic (false -> true).
+                        description: Indicates whether planning is complete for this snapshot and its descendants.
                         type: boolean
                     type: object
                   domainSpecificController:
-                    description: 'domainSpecificController holds the domain-written
-                      planning refs and lifecycle. Single writer: domain (SDK).'
+                    description: Domain-specific planning references and lifecycle state.
                     properties:
                       excludedRefs:
                         description: |-
@@ -270,14 +252,13 @@ spec:
                         type: array
                         x-kubernetes-list-type: atomic
                       manifestCaptureRequestName:
-                        description: manifestCaptureRequestName is the temporary MCR
-                          owned by the domain node while own-scope capture runs.
+                        description: Name of the manifest capture request associated with this snapshot node.
                         type: string
                       message:
                         description: message is a human-readable detail for phase=Failed.
                         type: string
                       phase:
-                        description: phase is the domain lifecycle barrier (Planning|Planned|Finished|Failed).
+                        description: Lifecycle phase of the snapshot node.
                         enum:
                         - Planning
                         - Planned
@@ -289,8 +270,7 @@ spec:
                           phase=Failed (free-form domain string).
                         type: string
                       volumeCaptureRequestName:
-                        description: volumeCaptureRequestName is the temporary VCR
-                          owned by a data-leaf domain node while the data leg runs.
+                        description: Name of the volume capture request associated with this snapshot node.
                         type: string
                     type: object
                 type: object
@@ -589,6 +569,7 @@ spec:
               to the latest internal value and may reject unrecognized values.
               More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
             type: string
+            x-doc-skip: true
           kind:
             description: |-
               Kind of REST resource this object represents. Servers may infer this value
@@ -596,6 +577,7 @@ spec:
               after creation. Value must be in CamelCase.
               More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
             type: string
+            x-doc-skip: true
           spec:
             description: |-
               Desired characteristics of a snapshot requested by a user.

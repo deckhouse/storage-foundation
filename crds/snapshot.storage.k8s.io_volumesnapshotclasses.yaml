@@ -47,6 +47,8 @@ spec:
               to the latest internal value and may reject unrecognized values.
               More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
             type: string
+            x-doc-skip: true
+
           deletionPolicy:
             description: |-
               Controls the deletion behavior of VolumeSnapshotContent and its physical snapshot
@@ -70,8 +72,12 @@ spec:
               after creation. Value must be in CamelCase.
               More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
             type: string
+            x-doc-skip: true
+
           metadata:
             type: object
+            x-doc-skip: true
+
           parameters:
             additionalProperties:
               type: string
@@ -117,6 +123,7 @@ spec:
               to the latest internal value and may reject unrecognized values.
               More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
             type: string
+            x-doc-skip: true
           deletionPolicy:
             description: |-
               Controls the deletion behavior of VolumeSnapshotContent and its physical snapshot
@@ -140,6 +147,7 @@ spec:
               after creation. Value must be in CamelCase.
               More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
             type: string
+            x-doc-skip: true
           parameters:
             additionalProperties:
               type: string

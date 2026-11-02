@@ -66,6 +66,8 @@ spec:
               to the latest internal value and may reject unrecognized values.
               More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
             type: string
+            x-doc-skip: true
+
           kind:
             description: |-
               Kind of REST resource this object represents. Servers may infer this value
@@ -73,8 +75,12 @@ spec:
               after creation. Value must be in CamelCase.
               More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
             type: string
+            x-doc-skip: true
+
           metadata:
             type: object
+            x-doc-skip: true
+
           spec:
             description: |-
               Properties of VolumeSnapshotContent created by the underlying storage system.
@@ -340,6 +346,7 @@ spec:
               to the latest internal value and may reject unrecognized values.
               More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
             type: string
+            x-doc-skip: true
           kind:
             description: |-
               Kind of REST resource this object represents. Servers may infer this value
@@ -347,6 +354,7 @@ spec:
               after creation. Value must be in CamelCase.
               More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
             type: string
+            x-doc-skip: true
           spec:
             description: |-
               Properties of VolumeSnapshotContent created by the underlying storage system.

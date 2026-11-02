@@ -40,7 +40,7 @@ spec:
       name: Wait For Consumer
       priority: 1
       type: boolean
-    - description: The status of the DataImport resource.
+    - description: The status of DataImport.
       jsonPath: .status.phase
       name: Status
       type: string
@@ -63,9 +63,8 @@ spec:
 
                   - `CreatePVC`: write into a preserved, newly created PVC (`pvcTemplate`). No durable
                     artifact.
-                  - `PopulateData`: stage the bytes into a transient scratch volume (`storageParams`) and
-                    capture them into a durable VolumeSnapshotContent for the already-existing snapshot node
-                    referenced by `snapshotRef`.
+                  - `PopulateData`: write the bytes according to `storageParams` and produce a durable
+                    VolumeSnapshotContent for the existing snapshot node referenced by `snapshotRef`.
                 enum:
                 - CreatePVC
                 - PopulateData
@@ -140,10 +139,8 @@ spec:
                 type: object
               snapshotRef:
                 description: |-
-                  PopulateData only. Reference to the already-existing xxxSnapshot node the produced
-                  durable artifact belongs to (namespace implicit = the DataImport namespace). Set by the
-                  external creator (d8/user/backup); the DataImport controller does not read it — it exists
-                  so the state-snapshotter reverse-lookup can match the leaf against `spec.snapshotRef`.
+                  PopulateData only. Reference to the existing snapshot node that owns the produced durable
+                  artifact. The namespace is implicitly the DataImport namespace.
                 properties:
                   apiVersion:
                     description: Group/version of the snapshot node (e.g. `snapshot.storage.k8s.io/v1`).
@@ -166,10 +163,8 @@ spec:
                   rule: self == oldSelf
               storageParams:
                 description: |-
-                  PopulateData only. Parameters of the transient scratch volume the imported bytes are
-                  staged into before capture; it is destroyed after the durable VolumeSnapshotContent is
-                  produced. Its StorageClass must be snapshot-capable (it references a VolumeSnapshotClass
-                  via the `storage.deckhouse.io/volumesnapshotclass` annotation).
+                  PopulateData only. Storage parameters used to produce the durable VolumeSnapshotContent.
+                  The StorageClass must support snapshots through a VolumeSnapshotClass.
                 properties:
                   size:
                     description: Requested size of the scratch PVC (a Kubernetes quantity,
@@ -201,7 +196,7 @@ spec:
                   - `<number>m`
                   - `<number>h`
 
-                  For example, `5m`, `2h45m`, or `1d`.
+                  For example, `5m`, `2h45m`, or `24h`.
                 pattern: ^([0-9]+(\.[0-9]+)?h)?([0-9]+(\.[0-9]+)?m)?([0-9]+s)?$
                 type: string
               waitForFirstConsumer:
@@ -209,10 +204,10 @@ spec:
                 description: |-
                   Controls what the import waits for before it starts moving data into the target PVC.
                   When the target PVC's StorageClass has `volumeBindingMode: WaitForFirstConsumer` and
-                  this field is `true` (the default), the import waits until a pod that mounts the
+                  this field is `true`, the import waits until a pod that mounts the
                   target PVC is scheduled, then places the imported volume on the node that pod was
-                  scheduled to. When `false`, the import does not wait for a consumer: it proceeds
-                  immediately and becomes the volume's first consumer itself. Has no effect when the
+                  scheduled to. When `false`, the import does not wait for a consumer and becomes the
+                  volume's first consumer itself. Has no effect when the
                   target PVC's StorageClass does not delay binding until a consumer appears.
                 type: boolean
             required:
@@ -234,7 +229,7 @@ spec:
             - message: mode is immutable
               rule: self.mode == oldSelf.mode
           status:
-            description: DataImport resource status details.
+            description: Status information for DataImport.
             properties:
               accessTimestamp:
                 description: Last access timestamp updated by the importer pod.
@@ -245,15 +240,14 @@ spec:
                   connection to the importer pod.
                 type: string
               completionTimestamp:
-                description: |-
-                  Time the DataImport reached a terminal phase (Completed, Expired or Failed). Set once by
-                  the controller; the garbage collector measures retention age from this timestamp.
+                description: Time the DataImport reached a terminal phase (Completed,
+                  Expired or Failed). Retention age is measured from this timestamp.
                 format: date-time
                 type: string
               conditions:
                 items:
                   description: Array of conditions describing the current state of
-                    the DataImport resource.
+                    DataImport.
                   properties:
                     lastTransitionTime:
                       description: |-
@@ -322,15 +316,12 @@ spec:
                   type: object
                 type: array
               data:
-                description: |-
-                  Captured-data block for this import. Carries the durable cluster-scoped data artifact
-                  under data.artifactRef (a VolumeSnapshotContent). Populated once the backing
-                  VolumeCaptureRequest completes.
+                description: Information about the durable data artifact produced
+                  by this import.
                 properties:
                   artifactRef:
-                    description: |-
-                      Reference to the durable cluster-scoped data artifact produced by this import
-                      (a VolumeSnapshotContent).
+                    description: Reference to the durable data artifact produced by
+                      this import (a VolumeSnapshotContent).
                     properties:
                       apiVersion:
                         type: string
@@ -339,28 +330,22 @@ spec:
                       name:
                         type: string
                       uid:
-                        description: |-
-                          UID of the durable data artifact (for example the VolumeSnapshotContent UID),
-                          making the reference self-contained. Optional; producers fill it best-effort.
+                        description: UID of the durable data artifact (for example,
+                          the VolumeSnapshotContent UID). Optional and populated when
+                          available.
                         type: string
                     type: object
                   fsType:
-                    description: |-
-                      Filesystem the imported bytes were actually written onto, observed on the scratch
-                      volume's PersistentVolume (`spec.csi.fsType`) before that volume was destroyed. The
-                      scratch volume is deleted right after capture and the artifact itself records no
-                      filesystem type, so this is the only surviving record of it.
-
-                      Empty means "not known", never "default": a Block import carries no filesystem at
-                      all, and a CSI driver may record no filesystem type on the volume.
+                    description: Filesystem type of the imported data. Empty means
+                      that the filesystem type is unknown or not applicable for a
+                      Block volume.
                     type: string
                 type: object
               phase:
-                description: |-
-                  Coarse-grained lifecycle state, written exclusively by the controller:
-                  Pending → Ready → Completed | Expired | Failed. `Terminating` denotes an object with a
-                  deletion timestamp and is a transient state, not an outcome. `Expired` is a normal
-                  terminal outcome (the idle-TTL window elapsed), not a failure.
+                description: 'Lifecycle state of the DataImport: Pending → Ready →
+                  Completed | Expired | Failed. `Terminating` denotes an object with
+                  a deletion timestamp and is a transient state, not an outcome. `Expired`
+                  is a normal terminal outcome when the idle-TTL window elapses.'
                 enum:
                 - Pending
                 - Ready
@@ -373,10 +358,9 @@ spec:
                 description: Public URL of the importer service.
                 type: string
               serverState:
-                description: |-
-                  Raw progress signal reported by the importer server pod (the only writer): `Ready` when
-                  the server is serving, `Finished` when the client upload finished durably, `IdleExpired`
-                  when the idle-TTL window elapsed. The controller derives phase and conditions from it.
+                description: 'Importer server state: `Ready` when the server is available,
+                  `Finished` when the upload has completed, and `IdleExpired` when
+                  the idle-TTL window has elapsed.'
                 enum:
                 - Ready
                 - Finished
@@ -386,7 +370,7 @@ spec:
                 description: Internal URL of the importer service.
                 type: string
               volumeMode:
-                description: Volume mode of the exported data.
+                description: Volume mode of the imported data.
                 enum:
                 - Block
                 - Filesystem

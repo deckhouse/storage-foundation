@@ -42,26 +42,26 @@ import (
 // +kubebuilder:printcolumn:name="Mode",type="string",JSONPath=".spec.mode",priority=1
 // +kubebuilder:printcolumn:name="Storage Class",type="string",JSONPath=".spec.storageParams.storageClassName",priority=1
 // +kubebuilder:printcolumn:name="Wait For Consumer",type="boolean",JSONPath=".spec.waitForFirstConsumer",priority=1
-// +kubebuilder:printcolumn:name="Status",type="string",JSONPath=".status.phase",description="The status of the DataImport resource."
+// +kubebuilder:printcolumn:name="Status",type="string",JSONPath=".status.phase",description="The status of DataImport."
 // +kubebuilder:printcolumn:name="Age",type="date",JSONPath=".metadata.creationTimestamp"
 // +crd-enricher:crd:minimal=true
 // +crd-enricher:crd:preserveUnknownFields=false
-// +crd-enricher:raw:properties.status.description=DataImport resource status details.
+// +crd-enricher:raw:properties.status.description=Status information for DataImport.
 // +crd-enricher:raw:properties.status.properties.url.description=Internal URL of the importer service.
 // +crd-enricher:raw:properties.status.properties.ca.description=Base64-encoded CA certificate for establishing a TLS connection to the importer pod.
 // +crd-enricher:raw:properties.status.properties.publicURL.description=Public URL of the importer service.
 // +crd-enricher:raw:properties.status.properties.accessTimestamp.description=Last access timestamp updated by the importer pod.
-// +crd-enricher:raw:properties.status.properties.volumeMode.description=Volume mode of the exported data.
+// +crd-enricher:raw:properties.status.properties.volumeMode.description=Volume mode of the imported data.
 // +crd-enricher:raw:properties.status.properties.phase.enum=[Pending, Ready, Completed, Expired, Failed, Terminating]
-// +crd-enricher:raw:properties.status.properties.phase.description="Coarse-grained lifecycle state, written exclusively by the controller:\nPending → Ready → Completed | Expired | Failed. `Terminating` denotes an object with a\ndeletion timestamp and is a transient state, not an outcome. `Expired` is a normal\nterminal outcome (the idle-TTL window elapsed), not a failure."
-// +crd-enricher:raw:properties.status.properties.completionTimestamp.description="Time the DataImport reached a terminal phase (Completed, Expired or Failed). Set once by\nthe controller; the garbage collector measures retention age from this timestamp."
+// +crd-enricher:raw:properties.status.properties.phase.description="Lifecycle state of the DataImport: Pending → Ready → Completed | Expired | Failed. `Terminating` denotes an object with a deletion timestamp and is a transient state, not an outcome. `Expired` is a normal terminal outcome when the idle-TTL window elapses."
+// +crd-enricher:raw:properties.status.properties.completionTimestamp.description="Time the DataImport reached a terminal phase (Completed, Expired or Failed). Retention age is measured from this timestamp."
 // +crd-enricher:raw:properties.status.properties.serverState.enum=[Ready, Finished, IdleExpired]
-// +crd-enricher:raw:properties.status.properties.serverState.description="Raw progress signal reported by the importer server pod (the only writer): `Ready` when\nthe server is serving, `Finished` when the client upload finished durably, `IdleExpired`\nwhen the idle-TTL window elapsed. The controller derives phase and conditions from it."
-// +crd-enricher:raw:properties.status.properties.data.description="Captured-data block for this import. Carries the durable cluster-scoped data artifact\nunder data.artifactRef (a VolumeSnapshotContent). Populated once the backing\nVolumeCaptureRequest completes."
-// +crd-enricher:raw:properties.status.properties.data.properties.artifactRef.description="Reference to the durable cluster-scoped data artifact produced by this import\n(a VolumeSnapshotContent)."
-// +crd-enricher:raw:properties.status.properties.data.properties.artifactRef.properties.uid.description="UID of the durable data artifact (for example the VolumeSnapshotContent UID),\nmaking the reference self-contained. Optional; producers fill it best-effort."
-// +crd-enricher:raw:properties.status.properties.data.properties.fsType.description="Filesystem the imported bytes were actually written onto, observed on the scratch\nvolume's PersistentVolume (`spec.csi.fsType`) before that volume was destroyed. The\nscratch volume is deleted right after capture and the artifact itself records no\nfilesystem type, so this is the only surviving record of it.\n\nEmpty means \"not known\", never \"default\": a Block import carries no filesystem at\nall, and a CSI driver may record no filesystem type on the volume."
-// +crd-enricher:raw:properties.status.properties.conditions.items.description=Array of conditions describing the current state of the DataImport resource.
+// +crd-enricher:raw:properties.status.properties.serverState.description="Importer server state: `Ready` when the server is available, `Finished` when the upload has completed, and `IdleExpired` when the idle-TTL window has elapsed."
+// +crd-enricher:raw:properties.status.properties.data.description="Information about the durable data artifact produced by this import."
+// +crd-enricher:raw:properties.status.properties.data.properties.artifactRef.description="Reference to the durable data artifact produced by this import (a VolumeSnapshotContent)."
+// +crd-enricher:raw:properties.status.properties.data.properties.artifactRef.properties.uid.description="UID of the durable data artifact (for example, the VolumeSnapshotContent UID). Optional and populated when available."
+// +crd-enricher:raw:properties.status.properties.data.properties.fsType.description="Filesystem type of the imported data. Empty means that the filesystem type is unknown or not applicable for a Block volume."
+// +crd-enricher:raw:properties.status.properties.conditions.items.description=Array of conditions describing the current state of DataImport.
 // +crd-enricher:raw:properties.status.properties.conditions.items.properties.type.description=Condition type.
 // +crd-enricher:raw:properties.status.properties.conditions.items.properties.type.enum=[Ready, UploadFinished, Completed]
 // +crd-enricher:raw:properties.status.properties.conditions.items.properties.status.description=Condition status.
@@ -132,7 +132,7 @@ type DataImportSpec struct {
 	// - `<number>m`
 	// - `<number>h`
 	//
-	// For example, `5m`, `2h45m`, or `1d`.
+	// For example, `5m`, `2h45m`, or `24h`.
 	// +kubebuilder:validation:Pattern=`^([0-9]+(\.[0-9]+)?h)?([0-9]+(\.[0-9]+)?m)?([0-9]+s)?$`
 	TTL string `json:"ttl"`
 	// Expose the importer pod outside the cluster.
@@ -141,10 +141,10 @@ type DataImportSpec struct {
 	Publish bool `json:"publish,omitempty"`
 	// Controls what the import waits for before it starts moving data into the target PVC.
 	// When the target PVC's StorageClass has `volumeBindingMode: WaitForFirstConsumer` and
-	// this field is `true` (the default), the import waits until a pod that mounts the
+	// this field is `true`, the import waits until a pod that mounts the
 	// target PVC is scheduled, then places the imported volume on the node that pod was
-	// scheduled to. When `false`, the import does not wait for a consumer: it proceeds
-	// immediately and becomes the volume's first consumer itself. Has no effect when the
+	// scheduled to. When `false`, the import does not wait for a consumer and becomes the
+	// volume's first consumer itself. Has no effect when the
 	// target PVC's StorageClass does not delay binding until a consumer appears.
 	// +optional
 	// +kubebuilder:default=true
@@ -154,9 +154,8 @@ type DataImportSpec struct {
 	//
 	// - `CreatePVC`: write into a preserved, newly created PVC (`pvcTemplate`). No durable
 	//   artifact.
-	// - `PopulateData`: stage the bytes into a transient scratch volume (`storageParams`) and
-	//   capture them into a durable VolumeSnapshotContent for the already-existing snapshot node
-	//   referenced by `snapshotRef`.
+	// - `PopulateData`: write the bytes according to `storageParams` and produce a durable
+	//   VolumeSnapshotContent for the existing snapshot node referenced by `snapshotRef`.
 	// +kubebuilder:default=CreatePVC
 	// +optional
 	Mode DataImportMode `json:"mode,omitempty"`
@@ -166,10 +165,8 @@ type DataImportSpec struct {
 	// VolumeRestoreRequest, so the namespace and uid it also carries are taken out of this field's
 	// schema: the namespace is implicitly the DataImport's own.
 
-	// PopulateData only. Reference to the already-existing xxxSnapshot node the produced
-	// durable artifact belongs to (namespace implicit = the DataImport namespace). Set by the
-	// external creator (d8/user/backup); the DataImport controller does not read it — it exists
-	// so the state-snapshotter reverse-lookup can match the leaf against `spec.snapshotRef`.
+	// PopulateData only. Reference to the existing snapshot node that owns the produced durable
+	// artifact. The namespace is implicitly the DataImport namespace.
 	// +optional
 	// +kubebuilder:validation:XValidation:rule="self == oldSelf",message="snapshotRef is immutable"
 	// +crd-enricher:unset:properties.namespace
@@ -181,10 +178,8 @@ type DataImportSpec struct {
 	// +crd-enricher:raw:properties.name.description=Name of the snapshot node.
 	// +crd-enricher:raw:properties.name.minLength=1
 	SnapshotRef *ObjectReference `json:"snapshotRef,omitempty"`
-	// PopulateData only. Parameters of the transient scratch volume the imported bytes are
-	// staged into before capture; it is destroyed after the durable VolumeSnapshotContent is
-	// produced. Its StorageClass must be snapshot-capable (it references a VolumeSnapshotClass
-	// via the `storage.deckhouse.io/volumesnapshotclass` annotation).
+	// PopulateData only. Storage parameters used to produce the durable VolumeSnapshotContent.
+	// The StorageClass must support snapshots through a VolumeSnapshotClass.
 	// +optional
 	StorageParams *StorageParamsSpec `json:"storageParams,omitempty"`
 

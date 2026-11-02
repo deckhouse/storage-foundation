@@ -83,6 +83,7 @@ func addKnownTypes(scheme *runtime.Scheme) error {
 
 // VolumeSnapshot is the Deckhouse-owned, domain-extended view of a CSI VolumeSnapshot. It is a partial
 // projection: only the spec/status fields the state-snapshotter domain protocol touches are modeled.
+// +crd-enricher:raw:properties.spec.properties.source.description="Source identifies where the snapshot comes from. Required unless mode is Import. It may be empty during restore; in that case, volumeSnapshotContentName may be set once after a successful restore. Otherwise exactly one of persistentVolumeClaimName or volumeSnapshotContentName must be set."
 type VolumeSnapshot struct {
 	metav1.TypeMeta   `json:",inline"`
 	metav1.ObjectMeta `json:"metadata,omitempty"`

@@ -13,42 +13,45 @@ spec:
                     Время жизни после последнего запроса пользователя.
                 publish:
                   description: |
-                    Включение внешнего доступа к экспортер-поду за пределами кластера.
+                    Включение внешнего доступа к поду экспортера за пределами кластера.
                 publicIngress:
                   description: |
                     Тип публичного доступа к экспортеру.
                 targetRef:
                   description: |
-                    GroupKind-ссылка на целевой ресурс для экспорта (namespace неявный — тот же, что
-                    у DataExport).
+                    Ссылка на целевой объект для экспорта. Целевой объект должен находиться в том же
+                    неймспейсе, что и DataExport. PersistentVolumeClaim (PVC) и VirtualDisk можно экспортировать
+                    напрямую; ресурсы снимков также можно использовать как целевые объекты экспорта.
+                    Cluster-wide-ресурс VolumeSnapshotContent нельзя использовать как целевой объект экспорта.
                   properties:
                     group:
                       description: |
-                        API-группа целевого ресурса ("" или отсутствует для core-группы, например
-                        для PersistentVolumeClaim).
+                        API-группа целевого объекта ("" или отсутствует для основной API-группы, например
+                        для PVC).
                     kind:
                       description: |
-                        Kind целевого объекта (например, PersistentVolumeClaim, VirtualDisk,
+                        Значение поля `kind` целевого объекта (например, PersistentVolumeClaim, VirtualDisk,
                         VolumeSnapshot, VirtualDiskSnapshot).
                     name:
                       description: |
-                        Имя целевого ресурса для экспорта.
+                        Имя целевого объекта для экспорта.
             status:
               type: object
               description: |
-                Информация о статусе ресурса DataExport.
+                Информация о статусе DataExport.
               properties:
                 url:
                   description: |
-                    Внутренний URL экспортер-пода (например, https://X.X.X.X:8085).
+                    Внутренний URL пода экспортера (например, https://X.X.X.X:8085).
                 ca:
                   description: |
-                    CA-сертификат в кодировке Base64 для TLS-подключения к экспортер-поду.
+                    CA-сертификат в кодировке Base64 для TLS-подключения к поду экспортера.
                 publicURL:
-                  description: |
-                    Публичный URL для внешнего доступа (например, https://api.<public-domain>/<namespace>/<вид-таргета>/<имя-таргета>/).
-                    Здесь <вид-таргета> — краткий вид таргета экспорта: pvc, vd или snap (любой таргет на основе снимка),
-                    а <имя-таргета> — значение spec.targetRef.name.
+                  description: |-
+                    Публичный URL для внешнего доступа (например,
+                    https://api.<PUBLIC_DOMAIN>/<NAMESPACE>/<TARGET_KIND>/<TARGET_NAME>/). `TARGET_KIND` —
+                    короткое имя типа цели экспорта: pvc, vd или snap; `TARGET_NAME` — значение
+                    `spec.targetRef.name`.
                 accessTimestamp:
                   description: |
                     Временная метка последнего доступа к экспортированным данным.
@@ -56,25 +59,22 @@ spec:
                   description: |
                     Режим тома экспортированных данных.
                 phase:
-                  description: |
-                    Укрупнённое состояние жизненного цикла, которое пишет только контроллер:
-                    Pending → Ready → Expired | Failed (у DataExport нет фазы Completed). Значение
-                    `Terminating` означает объект с установленной меткой удаления и является переходным
-                    состоянием, а не исходом. `Expired` — штатный терминальный исход (истекло окно
-                    неактивности), а не сбой.
+                  description: |-
+                    Состояние жизненного цикла DataExport: Pending → Ready → Expired | Failed. `Terminating`
+                    означает объект с установленной меткой удаления и является переходным состоянием, а не
+                    результатом. `Expired` — штатное терминальное состояние после истечения периода неактивности.
                 completionTimestamp:
-                  description: |
-                    Время перехода DataExport в терминальную фазу (Expired или Failed). Проставляется
-                    контроллером один раз; сборщик мусора отсчитывает время хранения от этой метки.
+                  description: |-
+                    Время перехода DataExport в терминальную фазу (Expired или Failed). От этой метки
+                    отсчитывается срок хранения.
                 serverState:
-                  description: |
-                    Необработанный сигнал прогресса от экспортер-пода (единственного писателя): `Ready` —
-                    сервер обслуживает запросы, `IdleExpired` — истекло окно неактивности. Контроллер выводит
-                    из него фазу и условия.
+                  description: |-
+                    Состояние сервера экспорта: `Ready` — сервер доступен, `IdleExpired` — истёк период
+                    неактивности.
                 conditions:
                   type: array
                   description: |
-                    Массив условий, описывающих текущее состояние ресурса DataExport.
+                    Массив условий, описывающих текущее состояние DataExport.
                   items:
                     type: object
                     properties:

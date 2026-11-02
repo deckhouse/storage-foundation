@@ -36,7 +36,7 @@ spec:
       name: Target Name
       priority: 1
       type: string
-    - description: The status of the DataExport resource.
+    - description: The status of DataExport.
       jsonPath: .status.phase
       name: Status
       type: string
@@ -62,15 +62,14 @@ spec:
                 type: boolean
               targetRef:
                 description: |-
-                  GroupKind reference to the target resource for export (namespace is implicit =
-                  the DataExport's own namespace). Live PersistentVolumeClaim and VirtualDisk are
-                  exported directly; any other (snapshot) kind is resolved generically through the
-                  leaf's bound SnapshotContent.dataRef and restored via a VolumeRestoreRequest. A bare
-                  cluster-scoped VolumeSnapshotContent is rejected.
+                  Reference to the target object for export. The target must be in the same namespace
+                  as the DataExport. PersistentVolumeClaim and VirtualDisk objects can be exported
+                  directly; snapshot resources can also be used as export targets. A cluster-scoped
+                  VolumeSnapshotContent cannot be used as an export target.
                 properties:
                   group:
                     description: |-
-                      API group of the target resource ("" / omitted for the core group, e.g.
+                      API group of the target object ("" / omitted for the core group, e.g.
                       for PersistentVolumeClaim).
                     type: string
                   kind:
@@ -80,7 +79,7 @@ spec:
                     minLength: 1
                     type: string
                   name:
-                    description: Name of the target resource for export.
+                    description: Name of the target object for export.
                     minLength: 1
                     type: string
                 required:
@@ -88,8 +87,9 @@ spec:
                 - name
                 type: object
               ttl:
-                description: Time-to-live duration after the last user request. Acceptable
-                  values - <number>s, <number>m, <number>h, e.g. 5m, 2h45m, 1d
+                description: 'Time-to-live duration after the last user request. Acceptable
+                  values: <number>s, <number>m, <number>h. For example, 5m, 2h45m,
+                  or 24h.'
                 pattern: ^([0-9]+(\.[0-9]+)?h)?([0-9]+(\.[0-9]+)?m)?([0-9]+s)?$
                 type: string
             required:
@@ -103,7 +103,7 @@ spec:
                 : "") == (has(oldSelf.targetRef.group) ? oldSelf.targetRef.group :
                 "")'
           status:
-            description: Status information for the DataExport resource.
+            description: Status information for DataExport.
             properties:
               accessTimestamp:
                 description: Timestamp of the last access to the exported data.
@@ -114,14 +114,12 @@ spec:
                   exporter pod.
                 type: string
               completionTimestamp:
-                description: |-
-                  Time the DataExport reached a terminal phase (Expired or Failed). Set once by the
-                  controller; the garbage collector measures retention age from this timestamp.
+                description: Time the DataExport reached a terminal phase (Expired
+                  or Failed). Retention age is measured from this timestamp.
                 format: date-time
                 type: string
               conditions:
-                description: Array of conditions describing the current state of the
-                  DataExport resource.
+                description: Array of conditions describing the current state of DataExport.
                 items:
                   properties:
                     lastTransitionTime:
@@ -180,11 +178,10 @@ spec:
                   type: object
                 type: array
               phase:
-                description: |-
-                  Coarse-grained lifecycle state, written exclusively by the controller:
-                  Pending → Ready → Expired | Failed (a DataExport has no Completed phase). `Terminating`
-                  denotes an object with a deletion timestamp and is a transient state, not an outcome.
-                  `Expired` is a normal terminal outcome (the idle-TTL window elapsed), not a failure.
+                description: 'Lifecycle state of the DataExport: Pending → Ready →
+                  Expired | Failed. `Terminating` denotes an object with a deletion
+                  timestamp and is a transient state, not an outcome. `Expired` is
+                  a normal terminal outcome when the idle-TTL window elapses.'
                 enum:
                 - Pending
                 - Ready
@@ -193,16 +190,13 @@ spec:
                 - Terminating
                 type: string
               publicURL:
-                description: |-
-                  Public URL for external access (e.g., https://api.<public-domain>/<namespace>/<target-kind>/<target-name>/).
-                  Here <target-kind> is the short kind of the export target: pvc, vd or snap (any snapshot-backed target),
-                  and <target-name> is the value of spec.targetRef.name.
+                description: 'Public URL for external access (for example, https://api.<PUBLIC_DOMAIN>/<NAMESPACE>/<TARGET_KIND>/<TARGET_NAME>/).
+                  `TARGET_KIND` is the short kind of the export target: pvc, vd, or
+                  snap; `TARGET_NAME` is the value of spec.targetRef.name.'
                 type: string
               serverState:
-                description: |-
-                  Raw progress signal reported by the exporter server pod (the only writer): `Ready` when
-                  the server is serving, `IdleExpired` when the idle-TTL window elapsed. The controller
-                  derives phase and conditions from it.
+                description: 'Exporter server state: `Ready` when the server is available
+                  and `IdleExpired` when the idle-TTL window has elapsed.'
                 enum:
                 - Ready
                 - IdleExpired

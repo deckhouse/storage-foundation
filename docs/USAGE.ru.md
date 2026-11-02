@@ -1,18 +1,29 @@
 ---
-title: "Модуль storage-foundation: примеры конфигурации"
-description: "Примеры создания снапшотов томов, восстановления из снапшотов и клонирования PVC с помощью модуля storage-foundation."
+title: "Модуль storage-foundation: использование"
+weight: 40
+description: "Использование снимков, клонирование томов и передача данных томов по HTTP с помощью модуля storage-foundation."
 ---
 
-## Использование снапшотов
+## Использование снимков
 
-Чтобы использовать снапшоты, укажите конкретный `VolumeSnapshotClass`.
-Чтобы получить список доступных VolumeSnapshotClass в вашем кластере, выполните:
+Объекты VolumeSnapshotClass создают CSI-модули или администратор кластера. Выберите класс, соответствующий
+CSI-драйверу исходного PVC. Посмотреть доступные классы можно командой:
 
 ```shell
 d8 k get volumesnapshotclasses.snapshot.storage.k8s.io
 ```
 
-Затем вы сможете использовать VolumeSnapshotClass для создания снапшота из существующего тома:
+При создании VolumeSnapshot из PVC модуль выбирает VolumeSnapshotClass следующим образом:
+
+- Если StorageClass этого PVC имеет лейбл `storage-foundation.deckhouse.io/managed-by`, модуль берёт класс из аннотации
+  `storage.deckhouse.io/volumesnapshotclass` этого StorageClass. Поле `volumeSnapshotClassName` можно не указывать.
+  Если оно указано, значение должно совпадать с аннотацией, иначе создание VolumeSnapshot отклоняется.
+- Для остальных StorageClass модуль заполняет `volumeSnapshotClassName` из той же аннотации, только если поле не указано
+  и аннотация есть. В остальных случаях укажите класс, соответствующий CSI-драйверу PVC.
+
+У PVC должен быть задан `storageClassName`.
+
+Создайте снимок существующего PVC:
 
 ```yaml
 apiVersion: snapshot.storage.k8s.io/v1
@@ -25,23 +36,27 @@ spec:
     persistentVolumeClaimName: my-first-volume
 ```
 
-Спустя небольшой промежуток времени снапшот будет готов:
+После создания снимка проверьте его состояние:
 
-```console
-$ d8 k describe volumesnapshots.snapshot.storage.k8s.io my-first-snapshot
+```shell
+d8 k describe volumesnapshots.snapshot.storage.k8s.io my-first-snapshot
+```
+
+Пример вывода:
+
+```console {.nowrap-default}
 ...
 Spec:
   Source:
-    Persistent Volume Claim Name:  my-first-snapshot
+    Persistent Volume Claim Name:  my-first-volume
   Volume Snapshot Class Name:      sds-replicated-volume
 Status:
   Bound Volume Snapshot Content Name:  snapcontent-b6072ab7-6ddf-482b-a4e3-693088136d2c
-  Creation Time:                       2020-06-04T13:02:28Z
   Ready To Use:                        true
   Restore Size:                        500Mi
 ```
 
-Можно восстановить содержимое этого снапшота, создав новый PVC. Для этого необходимо указать снапшот в качестве источника:
+Чтобы восстановить содержимое снимка, создайте новый PersistentVolumeClaim (PVC) и укажите снимок в качестве источника:
 
 ```yaml
 apiVersion: v1
@@ -61,13 +76,48 @@ spec:
       storage: 500Mi
 ```
 
+### Поля VolumeSnapshot, добавленные модулем
+
+Модуль обслуживает CRD VolumeSnapshot с полями, которых нет в исходном CRD. Модуль `state-snapshotter` использует
+их, чтобы включить снимок тома в снимок неймспейса. Пользователь задаёт только `spec.mode`, поля статуса заполняют
+контроллеры:
+
+- `spec.mode` определяет, как снимок получает содержимое. `Capture` (модуль устанавливает это значение, если поле не
+  указано) создаёт CSI-снимок тома из `spec.source`. `Import` помечает снимок, содержимое которого загружается из
+  архива снимка командой `d8 snapshot upload`: `spec.source` не указывается, и модуль ничего не захватывает. Изменить
+  поле после создания нельзя.
+- `status.data` описывает захваченный том: исходный PVC в `sourceRef`, его StorageClass, режим тома, тип файловой
+  системы, выделенный размер и сохраняемый артефакт в `artifactRef` (VolumeSnapshotContent). Модуль `state-snapshotter`
+  заполняет эту секцию при обработке снимка. Команды `d8 snapshot` определяют том снимка по этой секции. DataExport
+  читает те же данные из объекта SnapshotContent модуля `state-snapshotter`, имя которого указано в
+  `status.boundSnapshotContentName`. Поэтому экспортировать снимок можно только после того, как модуль
+  `state-snapshotter` заполнил `status.boundSnapshotContentName` и данные этого SnapshotContent, а одного
+  `status.readyToUse: true` для этого недостаточно. Ожидание помогает, только пока модуль ещё обрабатывает снимок.
+  Модуль пропускает VolumeSnapshot, созданный из существующего VolumeSnapshotContent (pre-provisioned), VolumeSnapshot,
+  созданный до включения модуля `storage-foundation`, и VolumeSnapshot, у исходного PVC которого есть метка
+  `state-snapshotter.deckhouse.io/exclude`. Для такого снимка SnapshotContent с данными не появится, поэтому
+  экспортировать его данные через DataExport нельзя.
+- `status.conditions` содержит условие `Ready`, которое сообщает о готовности снимка для модуля `state-snapshotter`.
+  Оно не совпадает с `status.readyToUse`: это поле сообщает, что CSI-снимок привязан к своему VolumeSnapshotContent.
+- `status.captureState`, `status.childrenSnapshotRefs` и `status.sourceRef` — служебные поля обработки дерева снимков.
+  VolumeSnapshot является листом дерева, поэтому `status.childrenSnapshotRefs` обычно пуст.
+
 ## Клонирование CSI-томов
 
-На основе концепции снапшотов также можно выполнить клонирование Persistent Volume, а именно, существующих PersistentVolumeClaim (PVC).
-Однако спецификация CSI допускает ряд ограничений при клонировании томов в неймспейсах или StorageClass-ах, отличных от оригинального PVC.
-Подробнее об ограничениях см. [в документации Kubernetes](https://kubernetes.io/docs/concepts/storage/volume-pvc-datasource/).
+Чтобы создать копию существующего PVC, укажите его в `dataSource` нового PVC. Клонирование — отдельная возможность
+CSI-драйвера, для которой не требуется предварительно создавать VolumeSnapshot.
 
-Чтобы клонировать том, создайте новый PVC и укажите исходный PVC в `dataSource`:
+При клонировании действуют следующие ограничения:
+
+- Исходный PVC должен находиться в состоянии `Bound`.
+- Исходный и новый PVC должны находиться в одном неймспейсе и иметь одинаковый `volumeMode`.
+- Запрашиваемый размер нового PVC должен быть не меньше размера исходного.
+- Тома должны предоставляться динамически через CSI-драйвер, поддерживающий клонирование.
+- Другой StorageClass допустим, если оба StorageClass обслуживаются одним CSI-драйвером.
+- Если `storageClassName` не указан, используется StorageClass по умолчанию. Его должен обслуживать тот же CSI-драйвер,
+  что и исходный PVC.
+
+Чтобы клонировать `my-origin-pvc`, создайте новый PVC и укажите исходный PVC в поле `dataSource`:
 
 ```yaml
 apiVersion: v1
@@ -86,506 +136,516 @@ spec:
       storage: 500Mi
 ```
 
-## Экспорт и импорт содержимого томов по HTTP
+## Экспорт и импорт данных томов
 
-### Создание ресурсов DataExport и DataImport с помощью утилиты d8
+DataExport позволяет экспортировать данные PersistentVolumeClaim (PVC), VolumeSnapshot, VirtualDisk и
+VirtualDiskSnapshot. VirtualDisk и VirtualDiskSnapshot всегда используют блочный режим. DataImport загружает данные в
+новый PVC или в снимок, см. [раздел «Импорт данных»](#импорт-данных).
 
-Для создания и управления ресурсами `DataExport` и `DataImport` используется утилита `d8`.
+### Права доступа
 
-Создание `DataExport` — целевой том передаётся позиционным аргументом `<тип>/<имя>`:
+В Deckhouse Platform 1.78 и новее переносить данные могут субъекты RBAC (пользователи, группы и ServiceAccount) с
+уровнем доступа `admin` в соответствующем неймспейсе. Остальным субъектам необходима явная привязка встроенной
+ClusterRole `d8:namespace-capability:storage-foundation:transfer_volume_data`. Она позволяет создавать, читать и удалять
+DataExport и DataImport, а также передавать данные через HTTP API.
 
-```bash
-d8 data export create -n <namespace> <имя DataExport> <тип>/<имя> --ttl 5m --publish=(true/false)
-```
+Например, привяжите роль к пользователю, работающему с данными в неймспейсе `project`:
 
-Поддерживаемые типы целевых ресурсов: `pvc`/`persistentvolumeclaim`, `vs`/`volumesnapshot`, `vd`/`virtualdisk`, `vds`/`virtualdisksnapshot`.
-
-Создание `DataImport` — целевой PVC задаётся манифестом через `-f` (позиционного аргумента тома нет):
-
-```bash
-d8 data import create -n <namespace> <имя DataImport> -f <манифест-pvc> --ttl 2m --publish --wffc
-```
-
-{{< alert level="warning" >}}
-Ресурсы PVC могут быть экспортированы только в том случае, если они не смонтированы какими-либо подами в данный момент.
-{{< /alert >}}
-
-Пример: создание ресурса `DataExport` для PVC с именем `data` в неймспейсе `project` с TTL 5 минут:
-
-```bash
-d8 data export create -n project my-export pvc/data --ttl 5m
-```
-
-Для просмотра деталей созданного ресурса `DataExport`:
-
-```bash
-d8 k -n project get de my-export
-```
-
-Для скачивания файлов из экспортированных томов:
-
-```bash
-d8 data export download -n <namespace> <тип ресурса (pvc/vs/dataexport)>/<имя ресурса>/<путь к файлу> -o <имя файла> --publish=true
-```
-
-Пример:
-
-```bash
-d8 data export download -n project dataexport/my-export -o test_file.txt --publish=true
-```
-
-### Альтернативные способы создания и использования DataExport и DataImport без утилиты d8
-
-Помимо утилиты `d8`, ресурсы `DataExport` и `DataImport` можно создавать напрямую через YAML-манифест. В примере ниже для удобства используются переменные окружения, замените их значения на нужные:
-
-```bash
-export NAMESPACE="d8-storage-foundation"
-export DATA_EXPORT_RESOURCE_NAME="example-dataexport"
-export TARGET_TYPE="PersistentVolumeClaim"
-export TARGET_NAME="fs-pvc-data-exporter-fs-0"
-```
-
-```bash
-d8 k apply -f -<<EOF
-apiVersion: storage-foundation.deckhouse.io/v1alpha1
-kind: DataExport
-metadata:
-  name: ${DATA_EXPORT_RESOURCE_NAME}
-  namespace: ${NAMESPACE}
-spec:
-  ttl: 10h
-  targetRef:
-    kind: ${TARGET_TYPE}
-    name: ${TARGET_NAME}
-EOF
-```
-
-После создания ресурса извлеките CA-сертификат:
-
-```bash
-d8 k -n $NAMESPACE get dataexport $DATA_EXPORT_RESOURCE_NAME  -o jsonpath='{.status.ca}' | base64 -d > ca.pem
-```
-
-Проверьте сертификат:
-
-```bash
-openssl x509 -in ca.pem -noout -text | head
-```
-
-Пример вывода:
-
-```console
-Issuer: CN = data-exporter-CA
-Signature Algorithm: ecdsa-with-SHA256
-```
-
-Извлеките URL из ресурса DataExport и проверьте экспорт:
-
-```bash
-export POD_URL=$(d8 k -n $NAMESPACE get dataexport $DATA_EXPORT_RESOURCE_NAME  -o jsonpath='{.status.url}')
-echo "POD_URL: $POD_URL"
-```
-
-После создания ресурса DataExport и извлечения необходимых данных подключиться к экспортеру можно одним из следующих способов.
-
-#### 1. Аутентификация с помощью сертификата и ключа из локального kubeconfig
-
-Этот способ использует существующие учётные данные из локального файла `kubeconfig`:
-
-```bash
-cat ~/.kube/config | grep "client-certificate-data" | awk '{print $2}' | base64 -d > client.crt
-cat ~/.kube/config | grep "client-key-data" | awk '{print $2}' | base64 -d > client.key
-```
-
-Проверьте содержимое целевого PVC:
-
-```bash
-curl -v --cacert ca.pem ${POD_URL}api/v1/files/ --key client.key --cert client.crt
-```
-
-#### 2. Аутентификация с помощью токена и ролей
-
-Этот способ предполагает создание отдельного ServiceAccount с нужными правами доступа:
-
-```bash
-d8 k -n $NAMESPACE create serviceaccount data-exporter-test
-```
-
-Создайте токен:
-
-```bash
-export TOKEN=$(d8 k -n $NAMESPACE create token data-exporter-test --duration=24h)
-echo $TOKEN
-```
-
-Запросы к эндпоинтам данных запущенного экспорта или импорта — `/api/v1/files…` и `/api/v1/block…`, как по короткому пути, так и по полному — авторизуются через `SubjectAccessReview` на глагол `create` для **субресурса `download`** в API-группе `storage-foundation.deckhouse.io`: `dataexports/download` — при чтении данных из тома, `dataimports/download` — при записи данных в том. Обратите внимание: импорт авторизуется тем же субресурсом `download`, а не `upload` — субресурса `upload` не существует, поэтому роль, выдающая права на него, не даёт доступа вовсе.
-
-Выдайте права сервис-аккаунту одним из двух способов ниже.
-
-##### Привязка встроенной роли (предпочтительный способ)
-
-В составе модуля поставляется ClusterRole `d8:namespace-capability:storage-foundation:transfer_volume_data`. Она выдаёт `create` на оба субресурса `download`, а также позволяет создавать, читать и удалять сами ресурсы `DataExport` и `DataImport` — это то, что нужно клиенту, чтобы выполнить перенос самостоятельно.
-
-В DKP 1.78 и новее роль входит в уровень доступа `admin` пространства имён: тот, кто администрирует namespace (владеет там ролью `d8:namespace:admin` или ролью пространства имён либо проекта более высокого уровня), может переносить данные томов в этом namespace без дополнительной привязки. В младшие уровни пространства имён (viewer, user, manager) и в общекластерные уровни доступа роль не входит, поэтому всем остальным субъектам нужна явная привязка этой роли.
-
-Кроме того, роль входит в набор, который собирает ClusterRole `d8:state-snapshotter:backup-agent` — одна роль, выдаваемая внешней системе резервного копирования вместо нескольких отдельных. Этот агрегат тоже выдаётся только явной привязкой, поэтому сам по себе права никому не даёт; но права переноса действуют в каждом namespace, где привязана эта роль, агрегат или уровень `admin` пространства имён. Учитывайте это при аудите того, кто может вычитать том из кластера или записать в него данные: привязки, у которых в `roleRef` стоит эта роль, — ещё не полный ответ, привязки агрегата и уровня admin пространства имён дают то же самое. В кластере без модуля, в котором определён агрегат, агрегата не существует.
-
-В кластерах с DKP ниже 1.78 модуль поставляет те же права под прежними именами, и в уровни доступа пространства имён роль там не входит:
-
-| DKP 1.78 и новее | DKP ниже 1.78 |
-|---|---|
-| `d8:namespace-capability:storage-foundation:transfer_volume_data` | `d8:use:capability:module:storage-foundation:transfer_volume_data` |
-| `d8:state-snapshotter:backup-agent` | `d8:use:capability:module:state-snapshotter:backup_agent` |
-
-Привяжите роль к сервис-аккаунту:
-
-```bash
-d8 k create -f - <<EOF
-kind: RoleBinding
+```yaml
 apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
 metadata:
-  name: data-exporter-test-transfer-binding
-  namespace: ${NAMESPACE}
+  name: volume-transfer
+  namespace: project
 subjects:
-- kind: ServiceAccount
-  name: data-exporter-test
-  namespace: ${NAMESPACE}
+  - kind: User
+    name: <USER_NAME>
+    apiGroup: rbac.authorization.k8s.io
 roleRef:
   kind: ClusterRole
   name: d8:namespace-capability:storage-foundation:transfer_volume_data
   apiGroup: rbac.authorization.k8s.io
-EOF
 ```
 
-В DKP ниже 1.78 укажите в `roleRef.name` имя `d8:use:capability:module:storage-foundation:transfer_volume_data`.
+Замените `<USER_NAME>` именем пользователя. Для ServiceAccount или группы настройте `subjects` в соответствии с типом
+субъекта. В версиях Deckhouse Platform ниже 1.78 используйте прежние имена ролей:
 
-##### Создание роли вручную
+| Назначение | 1.78 и новее | Ниже 1.78 |
+|---|---|---|
+| Перенос данных | `d8:namespace-capability:storage-foundation:transfer_volume_data` | `d8:use:capability:module:storage-foundation:transfer_volume_data` |
+| Агент резервного копирования | `d8:state-snapshotter:backup-agent` | `d8:use:capability:module:state-snapshotter:backup_agent` |
 
-Если встроенная роль разрешает больше, чем вы хотите выдать, создайте свою ClusterRole только с нужными субресурсами. Роль ниже разрешает скачивание экспортированных данных и ничего больше; добавьте `dataimports/download` в `resources`, чтобы разрешить ещё и загрузку данных в том:
+При аудите учитывайте, что доступ к переносу данных также предоставляют уровень `admin` неймспейса и агрегированная роль
+`backup-agent` при наличии соответствующих привязок. Подробности приведены
+[на странице «Интеграция с системами резервного копирования»](/modules/state-snapshotter/backup_integration.html).
+Ручная настройка прав для HTTP-клиента описана [на странице «Расширенное использование»](advanced_usage.html).
+
+Объекты DataExport и DataImport могут обслуживать два модуля: `storage-foundation` в API-группе
+`storage-foundation.deckhouse.io` и `storage-volume-data-manager` в API-группе `storage.deckhouse.io`. Команды
+`d8 data` (версии 0.33.14 и новее) при каждом запуске определяют, с каким из этих модулей работать. Пользователь, у
+которого есть права только в группе `storage.deckhouse.io`, работает с модулем `storage-volume-data-manager` без
+предупреждения. Проверить права в группе `storage-foundation.deckhouse.io` можно следующей командой:
 
 ```bash
-d8 k create -f - <<EOF
-kind: ClusterRole
-apiVersion: rbac.authorization.k8s.io/v1
+d8 k auth can-i get dataexports.storage-foundation.deckhouse.io -n project
+```
+
+### Основные параметры
+
+Следующие параметры DataExport и DataImport управляют временем жизни, размещением и внешней доступностью ресурсов
+передачи данных. Каждый пункт заканчивается описанием того, как параметр задают команды `d8 data`.
+
+- `ttl` задаёт время простоя после последней передачи данных. Отсчёт `ttl` обновляется при передаче данных в теле
+  HTTP-запроса или ответа. Если ни запрос, ни ответ не содержат тела, как при `HEAD`, срок не продлевается. После
+  истечения срока DataImport или DataExport получает `Ready=False` с причиной `Expired`, и сервер передачи данных
+  останавливается: удаляются его под и сервис, а также Ingress (при `publish: true`). Сам объект DataImport или
+  DataExport удаляется автоматически позже. При экспорте исходный PVC снова привязывается к своему PV, данные в нём не
+  изменяются. При импорте также удаляется внутренний временный том, поэтому данные незавершённой загрузки не
+  сохраняются и передачу нужно начать заново с новым DataImport. В режиме `CreatePVC` целевой PVC после истечения срока
+  не удаляется. В `d8 data`: команды `create` и `download` без флага `--ttl` задают `2m`.
+- `waitForFirstConsumer` применяется только к импорту в новый PVC (`CreatePVC`). При `true` импорт в StorageClass с отложенной привязкой
+  ожидает появления пода, который использует PVC. Том создаётся на узле, выбранном для этого пода. Под остаётся в
+  состоянии `Pending` до завершения импорта. При `false` том создаётся без ожидания такого пода. Выбирайте значение с
+  учётом StorageClass и способа использования PVC. В YAML-манифесте значение по умолчанию равно `true`. В `d8 data`:
+  `d8 data import create` без флага `--wffc` передаёт `false`.
+- При `publish: true` сервер передачи доступен извне кластера по адресу из `status.publicURL`. Без этого параметра
+  сервер доступен только из сети кластера по адресу из `status.url`. В `d8 data`: без флага `--publish` утилита `d8`
+  проверяет, доступен ли сервис `kubernetes` неймспейса `default` по его ClusterIP, и при доступности выбирает прямое
+  подключение, иначе опубликованный адрес. Явный `--publish=true` или `--publish=false` переопределяет выбор. Если
+  проверка не даёт однозначного результата, команда завершается с ошибкой, см.
+  [раздел «d8 не может определить режим публикации»](#d8-не-может-определить-режим-публикации).
+
+DataExport и DataImport создаются в неймспейсе исходного PVC или PVC, который нужно создать. В `d8 data`: команды по
+умолчанию используют неймспейс `d8-storage-volume-data-manager`, поэтому всегда указывайте `-n` с неймспейсом PVC.
+
+{{< alert level="warning" >}}
+Экспортировать PVC можно только тогда, когда он не смонтирован ни одним подом.
+{{< /alert >}}
+
+### Экспорт данных
+
+Для передачи данных используйте `d8`. Справку по аргументам можно получить командой `d8 data export download --help`.
+Если аргумент источника начинается с одного из следующих префиксов, `d8` автоматически создаёт DataExport:
+
+| Ресурс-источник | Префиксы CLI | Режим тома |
+|---|---|---|
+| PersistentVolumeClaim | `pvc/`, `persistentvolumeclaim/` | Filesystem или Block |
+| VolumeSnapshot | `vs/`, `volumesnapshot/` | Filesystem или Block, в зависимости от исходного тома |
+| VirtualDisk | `vd/`, `virtualdisk/` | Только Block |
+| VirtualDiskSnapshot | `vds/`, `virtualdisksnapshot/` | Только Block |
+
+Регистр символов в префиксах не учитывается. Без префикса передаётся имя уже созданного DataExport.
+
+{{< tabs name="export_method" >}}
+{{< tab name="Через d8" >}}
+
+Скачайте файл из PVC `data` в неймспейсе `project` одной командой. При `--cleanup=true` команда `d8` создаёт временный
+DataExport, скачивает файл и удаляет DataExport после завершения передачи:
+
+```bash
+d8 data export download -n project pvc/data mydir/file.txt -o file.txt --cleanup=true
+```
+
+Для уже созданного DataExport передайте его имя:
+
+```bash
+d8 data export create -n project my-export pvc/data --ttl 5m
+d8 data export download -n project my-export mydir/file.txt -o file.txt
+```
+
+Если скачивается директория, сначала создайте директорию назначения. Путь внутри тома должен заканчиваться на `/`:
+
+```bash
+mkdir -p out
+d8 data export download -n project pvc/data mydir/ -o out --cleanup=true
+```
+
+В блочном режиме путь внутри тома не указывается:
+
+```bash
+d8 data export download -n project vd/my-virtualdisk -o disk.img --cleanup=true
+```
+
+Без `--cleanup` утилита запрашивает подтверждение удаления временного DataExport и ждёт до 30 секунд. В неинтерактивном
+режиме без этого флага DataExport не удаляется автоматически.
+
+{{< /tab >}}
+{{< tab name="Через YAML-манифест" >}}
+
+Создайте DataExport для PVC `data` в пользовательском неймспейсе `project`:
+
+```yaml
+apiVersion: storage-foundation.deckhouse.io/v1alpha1
+kind: DataExport
 metadata:
-  name: data-exporter-test-role
-rules:
-- apiGroups: ["storage-foundation.deckhouse.io"]
-  resources: ["dataexports/download"]
-  verbs: ["create"]
-EOF
+  name: my-export
+  namespace: project
+spec:
+  ttl: 10m
+  targetRef:
+    kind: PersistentVolumeClaim
+    name: data
 ```
 
-Такая роль покрывает только HTTP-запросы: сами ресурсы `DataExport` и `DataImport` должен создать тот, у кого есть отдельные права на них.
-
-Создайте RoleBinding:
+Сохраните манифест в файл `dataexport.yaml`, примените его и проверьте состояние DataExport:
 
 ```bash
-d8 k create -f - <<EOF
-kind: RoleBinding
-apiVersion: rbac.authorization.k8s.io/v1
+d8 k apply -f dataexport.yaml
+d8 k -n project get dataexports.storage-foundation.deckhouse.io my-export
+```
+
+После применения манифеста создаётся DataExport, но данные на локальный диск не сохраняются. Скачивание по HTTP описано
+[в разделе «HTTP API: экспорт данных»](advanced_usage.html#http-api-экспорт-данных), сертификаты и аутентификация —
+[в разделе «Аутентификация HTTP-клиента»](advanced_usage.html#аутентификация-http-клиента).
+
+{{< /tab >}}
+{{< /tabs >}}
+
+### Импорт данных
+
+DataImport работает в одном из двух режимов, который задаёт поле `mode`. Режим определяет, куда попадают загруженные
+данные и кто обычно создаёт объект:
+
+| Режим | Куда попадают данные | Где создаётся том | Кто создаёт DataImport |
+|---|---|---|---|
+| `CreatePVC` (по умолчанию) | Новый PVC, который остаётся после импорта | Целевой PVC в неймспейсе пользователя и временный PVC в неймспейсе `d8-storage-foundation` | Пользователь, командой `d8 data import` или манифестом |
+| `PopulateData` | VolumeSnapshotContent, привязанный к существующему снимку | Временный PVC в неймспейсе `d8-storage-foundation` | Команда `d8 snapshot upload` |
+
+Используйте `CreatePVC`, чтобы загрузить файлы или образ блочного устройства в собственный том. `PopulateData` — этап
+передачи данных при переносе снимка между неймспейсами или кластерами.
+
+#### Импорт в новый PVC
+
+При ручном импорте в режиме `CreatePVC` создаётся новый PVC. Подготовьте шаблон PVC для `d8` либо манифест DataImport. В
+примерах используется неймспейс `project`. Укажите StorageClass, доступный в кластере.
+
+{{< tabs name="import_method" >}}
+{{< tab name="Через d8" >}}
+
+Сохраните шаблон PVC в файл `pvc-template.yaml`, заменив `<STORAGE_CLASS>` на имя класса хранения:
+
+```yaml
 metadata:
-  name: data-exporter-test-role-binding
-  namespace: ${NAMESPACE}
-subjects:
-- kind: ServiceAccount
-  name: data-exporter-test
-  namespace: ${NAMESPACE}
-roleRef:
-  kind: ClusterRole
-  name: data-exporter-test-role
-  apiGroup: rbac.authorization.k8s.io
-EOF
+  name: restored-data
+  namespace: project
+spec:
+  storageClassName: <STORAGE_CLASS>
+  volumeMode: Filesystem
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 1Gi
 ```
 
-##### Проверка доступа
-
-Какую бы из двух ролей вы ни привязали, проверьте содержимое целевого PVC:
+Создайте DataImport и загрузите файл в том. При `--wffc=false` импорт начинается без ожидания пода, который будет
+использовать PVC:
 
 ```bash
-curl -H "Authorization: Bearer $TOKEN" \
--v --cacert ca.pem ${POD_URL}api/v1/files/
+d8 data import create -n project my-import -f ./pvc-template.yaml --ttl 10m --wffc=false
+d8 data import upload -n project my-import -f ./file.txt -d /file.txt
 ```
 
-### HTTP API: экспорт данных
+Флаг `-d` задаёт путь **внутри тома**, а `-f` — путь к локальному файлу. `upload` самостоятельно завершает импорт, поэтому
+отдельный запрос `POST /api/v1/finished` не нужен. Если предыдущий запуск команды прервался, повторите загрузку с
+`--resume`, чтобы продолжить с места остановки:
 
-Все эндпоинты доступны по короткому пути `/api/v1/files|block` и по полному пути `/{namespace}/{kindShort}/{name}/api/v1/files|block`.
-
-Обозначения:
-
-- kindShort — короткое имя экспортируемого ресурса (persistentVolumeClaim => pvc);
-- name — имя экспортируемого ресурса.
-
-#### Файловый режим (экспорт)
-
-- Получить файл
-
-```http
-    GET /api/v1/files/{path} HTTP/1.1
-
-    Query (опционально, для дополнительных атрибутов):
-      attribute=stat      — вернуть статические атрибуты (uid, gid, права, modtime)
-      attribute=hash.md5  — вернуть MD5 для обычных файлов
+```bash
+d8 data import upload -n project my-import -f ./file.txt -d /file.txt --resume
 ```
 
-Ответ (обычный файл):
+Если связь обрывается во время выполнения команды, `d8` автоматически пытается продолжить передачу.
 
-```http
-    HTTP/1.1 200 OK
-    Content-Type: application/octet-stream
-    Content-Length: <размер>
-    Content-Disposition: attachment; filename=<basename>
-    X-Attribute-Uid: <uid>
-    X-Attribute-Gid: <gid>
-    X-Attribute-Permissions: <права>
-    X-Attribute-Modtime: <RFC3339>
-    X-Attribute-Hash-Md5: <md5>  # только если запрошен attribute=hash.md5
-    X-Type: file
+{{< /tab >}}
+{{< tab name="Через YAML-манифест" >}}
 
-    <содержимое файла>
+Создайте DataImport для нового PVC `restored-data` в неймспейсе `project`. Замените `<STORAGE_CLASS>` на существующий
+StorageClass:
+
+```yaml
+apiVersion: storage-foundation.deckhouse.io/v1alpha1
+kind: DataImport
+metadata:
+  name: my-import
+  namespace: project
+spec:
+  mode: CreatePVC
+  ttl: 10m
+  waitForFirstConsumer: false
+  pvcTemplate:
+    metadata:
+      name: restored-data
+    spec:
+      storageClassName: <STORAGE_CLASS>
+      volumeMode: Filesystem
+      accessModes:
+        - ReadWriteOnce
+      resources:
+        requests:
+          storage: 1Gi
 ```
 
-Ответ (символическая ссылка) — ссылка сообщается, но никогда не разыменовывается, поэтому клиент, копирующий дерево, воссоздаёт ссылку, а не дублирует её цель:
+Сохраните манифест в файл `dataimport.yaml`, примените его и проверьте состояние DataImport:
 
-```http
-    HTTP/1.1 200 OK
-    Content-Type: application/x-symlink
-    Content-Length: 0        # константа для символической ссылки
-    X-Attribute-Uid: <uid>
-    X-Attribute-Gid: <gid>
-    X-Attribute-Permissions: <права>
-    X-Attribute-Modtime: <RFC3339>
-    X-Link-Target: /dir/file
-    X-Type: link
+```bash
+d8 k apply -f dataimport.yaml
+d8 k -n project get dataimports.storage-foundation.deckhouse.io my-import
 ```
 
-- Просмотр содержимого директории
+После применения манифеста создаётся DataImport. Для передачи данных и отправки завершающего запроса используйте
+[раздел «HTTP API: импорт данных»](advanced_usage.html#http-api-импорт-данных). В отличие от приведённого примера, при
+отсутствии `waitForFirstConsumer` API устанавливает значение `true`.
 
-```http
-    GET /api/v1/files/{path/} HTTP/1.1  # путь к директории должен заканчиваться на '/'
+{{< /tab >}}
+{{< /tabs >}}
 
-    Query (опционально): attribute=stat | attribute=hash.md5
+#### Импорт в снимок
+
+В режиме `PopulateData` DataImport записывает загруженные данные не в новый PVC, а в сохраняемый артефакт снимка.
+Режим восстанавливает данные томов из архива снимка, созданного командой `d8 snapshot download`. Объекты этого режима
+создаёт сама команда `d8 snapshot upload`: VolumeSnapshot с `spec.mode: Import` и DataImport для него. Порядок действий
+описан [в разделе «Перенос снимка в другой неймспейс или кластер»](/modules/state-snapshotter/user_guide.html#перенос-снимка-в-другой-неймспейс-или-кластер)
+документации модуля `state-snapshotter`. Ниже описано, что делают созданные `d8` объекты и что проверить, если импорт
+не завершается.
+
+DataImport в режиме `PopulateData` содержит следующие поля:
+
+- `snapshotRef` ссылается на существующий снимок в том же неймспейсе, который получает данные: VolumeSnapshot с
+  `spec.mode: Import` или VirtualDiskSnapshot.
+- `storageParams` описывает временный том, в который загружаются данные: `size`, `storageClassName` и `volumeMode`
+  (по умолчанию `Filesystem`). StorageClass должен поддерживать снимки: его аннотация
+  `storage.deckhouse.io/volumesnapshotclass` должна указывать на существующий VolumeSnapshotClass. Иначе DataImport
+  завершается с причиной `TargetFailed` до загрузки данных.
+- `ttl` и `publish` работают так же, как в режиме `CreatePVC`.
+
+Импорт проходит следующим образом:
+
+1. Контроллер создаёт временный PVC с префиксом имени `import-pvc-for-` в неймспейсе `d8-storage-foundation` и
+   запускает сервер загрузки. На этот PVC действует квота неймспейса модуля, см. [раздел «Ограничения»](#ограничения).
+1. Клиент загружает данные и отправляет `POST /api/v1/finished`. Условие `UploadFinished` получает значение `True`.
+1. Контроллер останавливает сервер загрузки, создаёт CSI-снимок временного PVC и устанавливает политику удаления
+   полученного VolumeSnapshotContent в `Retain`. Ссылка на него появляется в `status.data.artifactRef`, условие
+   `Completed` получает значение `True`.
+1. Временный PVC удаляется. Модуль `state-snapshotter` привязывает VolumeSnapshotContent к снимку из `snapshotRef`, и
+   снимок получает `Ready=True`.
+1. DataImport удаляется по истечении `ttl`. VolumeSnapshotContent остаётся у снимка.
+
+Пример DataImport в режиме `PopulateData` для VolumeSnapshot `data` в неймспейсе `project`. Команда
+`d8 snapshot upload` создаёт такой объект с именем `<SNAPSHOT_NAME>-<ID>` и значением `ttl` из флага `--ttl`, по
+умолчанию `1h`:
+
+```yaml
+apiVersion: storage-foundation.deckhouse.io/v1alpha1
+kind: DataImport
+metadata:
+  name: data-import
+  namespace: project
+spec:
+  mode: PopulateData
+  ttl: 1h
+  publish: false
+  snapshotRef:
+    apiVersion: snapshot.storage.k8s.io/v1
+    kind: VolumeSnapshot
+    name: data
+  storageParams:
+    storageClassName: <STORAGE_CLASS>
+    size: 1Gi
+    volumeMode: Filesystem
 ```
 
-Ответ:
+Проверьте состояние импорта по условиям DataImport и полю `status.data.artifactRef`:
 
-```http
-    HTTP/1.1 200 OK
-    Content-Type: application/json
-    Transfer-Encoding: chunked
-    X-Attribute-Uid: <uid>
-    X-Attribute-Gid: <gid>
-    X-Attribute-Permissions: <права>
-    X-Attribute-Modtime: <RFC3339>
-    X-Type: dir
-
-    {"apiVersion":"v1","items":[{"name":"1.txt","size":12,"modTime":"2025-04-01 08:02:00.228156524 +0000 UTC","type":"file"}]}
+```bash
+d8 k -n project get dataimports.storage-foundation.deckhouse.io data-import -o jsonpath='{.status.phase}{"\n"}{.status.data.artifactRef}{"\n"}'
 ```
 
-- Метаданные без тела
+### Ограничения
 
-```http
-    HEAD /api/v1/files/{path|path/} HTTP/1.1
+При передаче данных действуют следующие ограничения:
+
+- DataExport и DataImport передают данные одного тома или снимка за операцию.
+- Один и тот же PVC или VirtualDisk экспортируйте только через один модуль — `storage-foundation` или
+  `storage-volume-data-manager`. При одновременном экспорте возникает конфликт владения PersistentVolume. Адрес берите
+  из `status.publicURL` **своего** DataExport. Для одинакового источника модули могут формировать совпадающие публичные
+  адреса.
+- В обоих режимах загружаемые данные сначала попадают во временный PVC в неймспейсе `d8-storage-foundation`, поэтому
+  на любой импорт действует ResourceQuota неймспейса модуля. Администратор должен учитывать суммарный объём
+  параллельных импортов, число PVC и ограничения конкретного StorageClass
+  (`<STORAGE_CLASS>.storageclass.storage.k8s.io/requests.storage` и
+  `<STORAGE_CLASS>.storageclass.storage.k8s.io/persistentvolumeclaims`). Для одной передачи квота на объём хранения
+  должна быть не меньше размера временного PVC: в режиме `CreatePVC` он равен размеру целевого PVC, а в режиме
+  `PopulateData` значению `spec.storageParams.size`. В режиме `CreatePVC` целевой PVC дополнительно учитывается в
+  квоте неймспейса пользователя.
+- Если DataImport в режиме `CreatePVC` переходит в фазу `Failed`, временные объекты могут сохраняться до удаления
+  DataImport или сборки мусора.
+
+## Диагностика
+
+В разделах ниже описано, как читать состояние объектов модуля и как устранять типичные ошибки.
+
+### Проверка состояния DataExport и DataImport
+
+Каждый объект сообщает этап жизненного цикла в `status.phase`, а подробности — в `status.conditions`:
+
+- DataExport: `Pending` → `Ready` → `Expired` или `Failed`. Причина указана в условии `Ready`.
+- DataImport: `Pending` → `Ready` → `Completed`, `Expired` или `Failed`. Условия `Ready`, `UploadFinished` и
+  `Completed` описывают этапы импорта.
+- `Terminating` у любого объекта означает, что объект удаляется.
+
+Посмотрите условия объекта и события неймспейса:
+
+```bash
+d8 k -n project describe dataexports.storage-foundation.deckhouse.io my-export
+d8 k -n project get events --sort-by=.lastTimestamp
 ```
 
-Ответ содержит те же заголовки, что и соответствующий GET (файл, директория или символическая ссылка), но без тела. Различает три случая именно `X-Type` — по нему клиент классифицирует запись, не скачивая её.
+Причины условия `Ready` DataExport со `status: "False"`:
 
-Основные ошибки файлового режима:
+| Причина | Значение | Что делать |
+|---|---|---|
+| `ValidationFailed` | Спецификация или целевой объект не прошли проверку: неподдерживаемый вид цели, ссылка на cluster-wide-ресурс VolumeSnapshotContent, PVC не в состоянии `Bound` или PVC используется. | Исправьте спецификацию или освободите PVC. Причина указана в сообщении. |
+| `TargetNotFound` | Целевой объект не существует или его CRD не установлен. | Проверьте `spec.targetRef` и целевой объект. |
+| `TargetNotReady` | Снимок-цель ещё не привязан к SnapshotContent модуля `state-snapshotter` или у этого SnapshotContent ещё нет данных. | Пока снимок обрабатывается, дождитесь, когда модуль `state-snapshotter` заполнит `status.boundSnapshotContentName`. Если модуль пропускает снимок, экспортировать его через DataExport нельзя. См. [«Поля VolumeSnapshot, добавленные модулем»](#поля-volumesnapshot-добавленные-модулем). |
+| `PVConflict` | PersistentVolume уже принадлежит другому экспорту или его аннотации противоречивы. | См. [«Экспорт не публикуется из-за конфликта PersistentVolume»](#экспорт-не-публикуется-из-за-конфликта-persistentvolume). |
+| `DeploymentFailed` | Не удалось запустить сервер передачи данных. | Проверьте события и логи контроллера. |
+| `PublishFailed` | Не удалось создать Service или Ingress для внешнего доступа. | Проверьте события и логи контроллера. |
+| `CleanupFailed` | Не удалось удалить временные объекты после передачи. | Проверьте события и логи контроллера. |
+| `Expired` | Истёк период бездействия из `spec.ttl`. | Создайте новый DataExport. |
 
-```http
-    400 Bad Request  — несоответствие типа (файл/директория), запрещённые ссылки и т. п.
-    404 Not Found    — путь не найден
-    405 Method Not Allowed — методы, отличные от GET/HEAD
-    500 Internal Server Error — внутренняя ошибка
+Причины DataImport, которые указывают на сбой: `Failed`, `TargetFailed` (не удалось подготовить или передать
+целевой PVC или его том) и `CleanupFailed`. Причина указана в сообщении условия.
+
+{{< alert level="info" >}}
+Для чтения логов контроллера нужны права администратора кластера.
+{{< /alert >}}
+
+Посмотрите логи контроллера:
+
+```bash
+d8 k -n d8-storage-foundation logs -l app=data-manager-controller -c data-manager-controller --prefix --tail=200
 ```
 
-#### Блочный режим (экспорт)
+### Создание VolumeSnapshot отклоняется
 
-- Скачать блочное устройство (raw-образ)
+Модуль проверяет VolumeSnapshot, создаваемый из PVC, на этапе допуска. Причина указана в сообщении об ошибке:
 
-```http
-    GET /api/v1/block HTTP/1.1
+| Сообщение | Причина | Что делать |
+|---|---|---|
+| `PVC StorageClassName is nil` | У исходного PVC не задан `storageClassName`. | Создавайте снимки только PVC с заданным StorageClass. |
+| `StorageClass does not have volume snapshot class name annotation` | StorageClass имеет лейбл `storage-foundation.deckhouse.io/managed-by`, но не имеет аннотации `storage.deckhouse.io/volumesnapshotclass`. | Обратитесь к администратору: StorageClass должен иметь аннотацию с VolumeSnapshotClass своего драйвера. |
+| `if VolumeSnapshotClassName is set, it must match the StorageClass annotation` | `volumeSnapshotClassName` отличается от аннотации StorageClass с лейблом `storage-foundation.deckhouse.io/managed-by`. | Не указывайте поле или укажите класс из аннотации. |
+
+### VolumeSnapshot не переходит в состояние готовности
+
+Если `status.readyToUse` остаётся `false`, проверьте снимок, его VolumeSnapshotContent и события:
+
+```bash
+d8 k -n project describe volumesnapshots.snapshot.storage.k8s.io my-first-snapshot
+d8 k get volumesnapshotcontents.snapshot.storage.k8s.io
+d8 k -n project get events --sort-by=.lastTimestamp
 ```
 
-Ответ:
+{{< alert level="info" >}}
+Для проверки подов контроллера снимков и чтения их логов нужны права администратора кластера.
+{{< /alert >}}
 
-```http
-    HTTP/1.1 200 OK
-    Content-Type: application/octet-stream
-    Content-Length: <размер устройства>
-    Content-Disposition: attachment; filename=data.img
+Поле `status.error` VolumeSnapshot содержит сообщение CSI-драйвера. Если сообщения нет, проверьте, что контроллер снимков
+запущен, и посмотрите его логи:
 
-    <сырое содержимое устройства>
+```bash
+d8 k -n d8-storage-foundation get pod -l app=snapshot-controller
+d8 k -n d8-storage-foundation logs -l app=snapshot-controller -c snapshot-controller --tail=200
 ```
 
-- Метаданные без тела
+Алерты `D8SnapshotControllerTargetDown`, `D8SnapshotControllerTargetAbsent`, `D8SnapshotControllerPodIsNotReady` и
+`D8SnapshotControllerPodIsNotRunning` сообщают о недоступности самого контроллера снимков.
 
-```http
-    HEAD /api/v1/block HTTP/1.1
+### d8 data не находит модуль или не имеет прав
+
+Перед каждой командой `d8 data` определяет, какой модуль обслуживает DataExport и DataImport. Возможны две ошибки:
+
+- `no module in this cluster serves this resource`: не включён ни `storage-foundation`, ни
+  `storage-volume-data-manager`, либо CRD модуля ещё не установлены. Включите модуль или дождитесь завершения
+  установки.
+- `not authorized to use this resource`: ресурс обслуживается, но пользователь не может выполнять `get` для него в
+  неймспейсе ни в одной из групп. В сообщении указаны найденные группы и команда для проверки прав, например
+  `d8 k auth can-i get dataexports.storage-foundation.deckhouse.io -n project`. Выдайте права, как описано
+  [в разделе «Права доступа»](#права-доступа).
+
+Если объекты, созданные `d8`, не появляются в группе `storage-foundation.deckhouse.io`, значит пользователь может
+выполнять `get` только в группе `storage.deckhouse.io`, и `d8` работает с модулем `storage-volume-data-manager`.
+Выдайте права в группе `storage-foundation.deckhouse.io`.
+
+### d8 не может определить режим публикации
+
+Команда завершается с сообщением `cannot auto-detect publish mode, specify --publish=true or --publish=false`, если
+флаг `--publish` не указан, а проверка сервиса `kubernetes`, описанная [в разделе «Основные параметры»](#основные-параметры),
+завершается ошибкой, отличной от недоступности сети или отказа TLS. Укажите флаг явно: `--publish=false` из сети
+кластера, `--publish=true` извне.
+
+### Экспорт не начинается, потому что PVC используется
+
+PVC экспортируется только тогда, когда он не смонтирован ни одним подом. Если под использует PVC, условие `Ready`
+DataExport получает причину `ValidationFailed` с сообщением
+`user's PVC isn't free because it's being occupied by pods <POD_NAMES>` или
+`user's PV not free because has volumeAttachments with status True: <ATTACHMENT_NAMES>`, если том ещё подключён к
+узлу. Контроллер повторяет проверку каждые 10 секунд. Остановите поды, использующие PVC, или экспортируйте
+VolumeSnapshot этого PVC.
+
+### Экспорт не публикуется из-за конфликта PersistentVolume
+
+Если DataExport не переходит в состояние готовности и условие `Ready` содержит причину `PVConflict`, PersistentVolume
+уже принадлежит другому экспорту: DataExport этого модуля, указанному в сообщении
+`PV <PV_NAME> is already owned by DataExport <NAMESPACE>/<NAME>`, или экспорту через `storage-volume-data-manager`.
+Завершите первый экспорт и дождитесь освобождения тома, прежде чем создавать другой. Для обращения к опубликованному
+экспорту используйте `status.publicURL` именно созданного вами DataExport.
+
+### Импорт не начинается из-за ограничений ResourceQuota
+
+Если квота превышена, API-сервер может отклонить создание PVC с `403 Forbidden` и сообщением `exceeded quota`. В этом
+случае PVC не создаётся. Состояние `Pending` у существующего PVC не доказывает превышение квоты и может быть связано,
+например, с нехваткой ёмкости.
+
+Какая квота действует, зависит от режима импорта:
+
+- В режиме `CreatePVC` действуют две квоты. Квота неймспейса пользователя распространяется на целевой PVC, а квота
+  неймспейса `d8-storage-foundation` на временный PVC того же размера и StorageClass, в который сначала попадают
+  данные, прежде чем том передаётся целевому PVC.
+- В режиме `PopulateData` создаётся только временный PVC в неймспейсе `d8-storage-foundation`, поэтому действует
+  квота неймспейса модуля.
+
+Проверить и изменить квоту неймспейса `d8-storage-foundation` может только администратор.
+
+Пользователь проверяет условия DataImport, события и квоту в своём неймспейсе:
+
+```bash
+d8 k -n project describe dataimports.storage-foundation.deckhouse.io my-import
+d8 k -n project get events --sort-by=.lastTimestamp
+d8 k -n project get resourcequota
 ```
 
-Ответ повторяет заголовки GET выше, но без тела — так клиент узнаёт размер устройства до начала скачивания.
+{{< alert level="info" >}}
+Для следующих проверок в неймспейсе `d8-storage-foundation` нужны права администратора кластера.
+{{< /alert >}}
 
-### HTTP API: импорт данных
+Для режима `PopulateData` администратор проверяет ResourceQuota, временные PVC и события в неймспейсе модуля, а при
+отсутствии причины в событиях — логи контроллера импорта:
 
-Все эндпоинты доступны по короткому пути `/api/v1/files|block` и по полному пути `/{namespace}/{kindShort}/{name}/api/v1/files|block`.
-
-#### Файловый режим (импорт)
-
-- Загрузить файл
-
-```http
-    PUT /api/v1/files/{path} HTTP/1.1
-    Content-Length: <bytes> — обязательный заголовок
-    X-Attribute-Permissions: 0775 — обязательный заголовок (восьмеричное 0000–0777)
-    X-Attribute-Uid: <uid> — обязательный заголовок
-    X-Attribute-Gid: <gid> — обязательный заголовок
-    X-Offset: 0 — смещение от начала файла (неотрицательное целое)
-    X-Content-Length: 10 — обязательный заголовок, ожидаемый полный размер файла
-    X-Attribute-ModTime: метка времени RFC3339
+```bash
+d8 k -n d8-storage-foundation get resourcequota
+d8 k -n d8-storage-foundation get pvc
+d8 k -n d8-storage-foundation get events --sort-by=.lastTimestamp
+d8 k -n d8-storage-foundation logs -l app=data-manager-controller -c data-manager-controller --prefix --tail=200
 ```
 
-Ответ на частичную загрузку — `X-Next-Offset` указывает, с какого смещения должен начаться следующий кусок:
+Проверьте общую квоту на хранение, число PVC и квоты по используемому StorageClass. Если ограничение превышено,
+администратор корректирует квоту или число параллельных импортов. Отсутствие ошибки в условиях DataImport не исключает
+отказ API-сервера.
 
-```http
-    HTTP/1.1 204 No Content
-    X-Next-Offset: 10
-```
+### DataImport или DataExport остаётся в состоянии Terminating
 
-Ответ на завершённую загрузку (записанный размер достиг `X-Content-Length`):
-
-```http
-    HTTP/1.1 201 Created
-```
-
-- Запрос текущего прогресса загрузки
-
-```http
-    HEAD /api/v1/files/{path} HTTP/1.1
-    Content-Length: 0
-```
-
-Ответ:
-
-```http
-    HTTP/1.1 200 OK
-    X-Next-Offset: 10
-```
-
-- Завершение импорта (сигнал на остановку файлового сервера)
-
-```http
-    POST /api/v1/finished HTTP/1.1
-    Content-Length: 0
-```
-
-Ответ:
-
-```http
-    HTTP/1.1 204 No Content
-```
-
-`POST` на сам эндпоинт данных (`/api/v1/files/{path}` или `/api/v1/block`) тоже завершает импорт и отвечает `200 OK`. Оба маршрута делают одно и то же; предпочтителен `/api/v1/finished` — он не требует пути.
-
-Ошибки импорта в файловом режиме:
-
-```http
-    400 Bad Request           — отсутствуют или некорректны обязательные заголовки; некорректные X-Offset / X-Content-Length / X-Attribute-ModTime
-    401 Unauthorized          — креды отсутствуют, пусты или некорректны
-    403 Forbidden             — нет прав на запись в файловую систему
-    404 Not Found             — HEAD для несуществующего файла
-    405 Method Not Allowed    — методы, отличные от PUT/HEAD/POST
-    409 Conflict              — расхождение смещения (ожидаемое возвращается в X-Expected-Offset);
-                                конкурирующая запись (без заголовков); файл уже загружен полностью
-    500 Internal Server Error — внутренние ошибки файловой системы (mkdir, open/seek/copy/close, установка атрибутов)
-```
-
-Клиент обязан различать два случая 409 по наличию `X-Expected-Offset`: с этим заголовком загрузка восстанавливается перепозиционированием, без него файл держит другой писатель и повтор с любым смещением не поможет.
-
-#### Блочный режим (импорт)
-
-- Загрузить raw-образ блочного устройства
-
-```http
-    PUT /api/v1/block HTTP/1.1
-    Content-Length: <bytes> — обязательный заголовок
-    X-Attribute-Permissions: 0775 — обязательный заголовок (восьмеричное 0000–0777)
-    X-Attribute-Uid: <uid> — обязательный заголовок
-    X-Attribute-Gid: <gid> — обязательный заголовок
-    X-Offset: 0 — опционально; смещение от начала устройства
-    X-Content-Length: 10 — опционально; ожидаемый полный размер
-```
-
-Ответ на частичную загрузку:
-
-```http
-    HTTP/1.1 204 No Content
-    X-Next-Offset: 10
-```
-
-Ответ на завершённую загрузку:
-
-```http
-    HTTP/1.1 201 Created
-    X-Next-Offset: 10        # равен X-Content-Length
-```
-
-- Запрос текущего прогресса загрузки
-
-```http
-    HEAD /api/v1/block HTTP/1.1
-    Content-Length: 0
-```
-
-Ответ — `X-Device-Size` не сообщается больше нигде в этом API, поэтому только так клиент узнаёт, сколько места есть на целевом устройстве:
-
-```http
-    HTTP/1.1 200 OK
-    X-Next-Offset: 10
-    X-Device-Size: 1024      # размер устройства в байтах
-```
-
-- Завершение импорта (сигнал на остановку файлового сервера)
-
-```http
-    POST /api/v1/finished HTTP/1.1
-    Content-Length: 0
-```
-
-Ответ:
-
-```http
-    HTTP/1.1 204 No Content
-```
-
-`POST` на сам эндпоинт данных (`/api/v1/files/{path}` или `/api/v1/block`) тоже завершает импорт и отвечает `200 OK`. Оба маршрута делают одно и то же; предпочтителен `/api/v1/finished` — он не требует пути.
-
-Ошибки импорта в блочном режиме:
-
-```http
-    400 Bad Request           — некорректный путь (внутри блочного префикса допустим только "/"); некорректные X-Offset / X-Content-Length
-    401 Unauthorized          — креды отсутствуют, пусты или некорректны
-    403 Forbidden             — нет прав на запись в блочное устройство
-    405 Method Not Allowed    — методы, отличные от PUT/HEAD/POST
-    409 Conflict              — расхождение смещения (возвращается X-Expected-Offset); конкурирующая запись
-    416 Range Not Satisfiable — смещение меньше нуля или за концом устройства; Content-Length превышает остаток
-    422 Unprocessable Entity  — записано больше байт, чем объявлено в X-Content-Length
-    500 Internal Server Error — внутренние ошибки (открытие устройства, чтение размера, seek/copy)
-```
-
-Обе ветки 416 отвечают вообще без заголовков — поэтому клиенту следует прочитать `X-Device-Size` из HEAD выше до начала записи: иначе образ, больший целевого устройства, обнаружится лишь в конце передачи, которая может идти часами.
-
-### Важные замечания по работе с API
-
-При работе с экспортированными данными через HTTP API учитывайте следующее:
-
-- Скачивание файлов: файлы скачиваются обычными GET-запросами с указанием пути к файлу в URL, например `GET /api/v1/files/largeimage.iso`. Путь к файлу не должен заканчиваться на `/`. Этот способ поддерживается стандартными инструментами (браузеры, curl и т. д.). Возобновление скачивания поддерживается, сжатие — нет.
-- Просмотр директорий: доступ к директории выполняется аналогичным GET-запросом, где путь к директории должен заканчиваться на `/`, например `GET /api/v1/files/` для корня или `GET /api/v1/files/directory/` для поддиректории.
-- Список файлов: при обращении к директории в теле ответа возвращается JSON со списком файлов (имя, тип и размер). Размеры файлов не кэшируются и пересчитываются при каждом запросе.
-- Квота на хранилище для `mode: PopulateData`: временный (staging) том теперь выделяется в неймспейсе модуля `d8-storage-foundation`, а не в неймспейсе пользователя — потребление хранилища учитывается в `ResourceQuota` неймспейса `d8-storage-foundation` (если она задана), а не пользовательского. Рассчитывайте квоту как минимум на наибольший ожидаемый размер `spec.storageParams.size` — заниженная квота оставит внутренний PVC в статусе `Pending` навсегда, и импорт никогда не станет Ready. Режим `mode: CreatePVC` не изменился (PVC остаётся в неймспейсе пользователя).
-- Замечание об обновлении: импорт в режиме `PopulateData`, находящийся в процессе загрузки во время обновления модуля до этой версии, необходимо перезапустить (повторно выполнить `d8 snapshot upload`); частично загруженные данные будут отброшены. Завершённые импорты и их артефакты не затрагиваются. Временный (staging) PVC, оставшийся от такого прерванного импорта в вашем неймспейсе, автоматически не удаляется — удалите его вручную; если он остаётся в статусе `Terminating`, снимите с него finalizer `storage-foundation.deckhouse.io/storage-manager-controller`.
-
-Модуль `storage-volume-data-manager` можно держать включённым одновременно с `storage-foundation`. Оба модуля продолжают работать: каждый обслуживает свои собственные ресурсы `DataExport` и `DataImport` независимо — своя API-группа, своё пространство имён и свои финализаторы на задействованных томах. При этом один и тот же живой том (`PersistentVolumeClaim` или `VirtualDisk`) следует экспортировать только через один из двух модулей. Причин тому две, и они независимы:
-
-- Публичные адреса совпадают. Оба модуля собирают `status.publicURL` на одном и том же хосте и из одного и того же пути `/<namespace>/<вид-таргета>/<имя-таргета>`, поэтому экспорт одного и того же тома получает один и тот же публичный адрес независимо от того, какой из двух модулей его создал. Если экспорт удалить в одном модуле и затем создать для того же тома в другом, адрес переиспользуется, и клиент, запомнивший адрес, не сможет определить, чей экспорт ему отвечает. Всегда берите адрес из поля `status.publicURL` того ресурса, который создали сами.
-- Экспорт живого тома забирает его `PersistentVolume`. Том на время экспорта перепривязывается к экспортеру, поэтому один и тот же том нельзя экспортировать через оба модуля одновременно: экспорт, начатый вторым, до публикации не доходит вовсе и завершается конфликтом за `PersistentVolume`. Прежде чем экспортировать тот же том через другой модуль, удалите первый экспорт или дождитесь истечения его срока.
+Удалите DataImport или DataExport штатным способом. Если объект продолжает находиться в `Terminating`, проверьте
+события и зависимые объекты и обратитесь к администратору. Удаление финалайзера допускается лишь как крайняя мера после
+проверки зависимых объектов: в противном случае временные PVC, PV или поды могут остаться в кластере. Не удаляйте PVC
+только на основании его имени или лейбла `app: data-importer`.
