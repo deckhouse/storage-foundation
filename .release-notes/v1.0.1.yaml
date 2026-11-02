@@ -1,0 +1,74 @@
+date: "2026-11-02"
+
+summary: "The data transfer servers no longer reach files outside the volume, a volume restored by a `VolumeRestoreRequest` can be mounted and goes only to its target PVC, and on DKP 1.78 the module creates its roles in the RBACv2 model."
+
+highlights:
+  - "The `DataExport` and `DataImport` servers no longer read or write files outside the exported or imported volume. A request path with an encoded `..` could read any file of the server container, including its TLS key and service account token, or create a file outside the volume."
+  - "A PersistentVolume restored by a `VolumeRestoreRequest` now carries the secret references of its StorageClass and is bound to its target PVC in advance, so it can be mounted on drivers that require a node-stage secret, such as ceph-csi, and can no longer be taken by another pending PVC."
+  - "On DKP 1.78 and later the module creates its roles in the RBACv2 model."
+
+new_features:
+  - "On DKP 1.78 and later the module creates its roles in the RBACv2 model: the ClusterRoles `d8:system-capability:storage-foundation:view` and `:edit`, and `d8:namespace-capability:storage-foundation:view`, `:edit` and `:transfer_volume_data`. The `transfer_volume_data` capability allows downloading and uploading volume data through `DataExport` and `DataImport`. It is aggregated into the namespace administrator role and into the `d8:state-snapshotter:backup-agent` role of the state-snapshotter module. On DKP below 1.78 the existing roles are created unchanged."
+
+improvements:
+  - "Up to four `DataExport` objects are now processed at the same time. Before, exports were processed one by one, and an export created while another one was starting waited for it for minutes with nothing in its status to explain why."
+  - "`DataImport` no longer relies on a separate volume populator, and the populator `Deployment` is removed from the module. In both modes the uploaded data first goes to a temporary PVC in the `d8-storage-foundation` namespace. With `mode: CreatePVC` the module creates the target PVC in the user's namespace right away and, once the upload is complete, hands the filled volume over to it. The module no longer creates a helper Job in the user's namespace to trigger the binding of a `WaitForFirstConsumer` StorageClass."
+  - "Prometheus now collects the metrics of the controller and of the data manager controller through `PodMonitor` objects. The metrics are served through `kube-rbac-proxy`."
+
+fixes:
+  - "A PersistentVolume restored by a `VolumeRestoreRequest` was created without the secret references of its StorageClass, so on drivers that require a node-stage secret, such as ceph-csi, the PVC was bound but no Pod could mount it. The restored PersistentVolume now carries the same secret references as a regularly provisioned one. A PersistentVolume restored earlier cannot be fixed in place because `spec.csi` is immutable; for such a volume the `VolumeRestoreRequest` gets a `VRRPVMissingSecretRefs` warning event that names the missing field."
+  - "A PersistentVolume restored by a `VolumeRestoreRequest` stayed `Available` until its target PVC was created, and another pending PVC of the same StorageClass could take it. That PVC then mounted data restored for another namespace, the target PVC stayed `Pending`, and deleting the foreign PVC deleted the restored volume. The PersistentVolume is now bound to its target PVC in advance."
+  - "A `VolumeRestoreRequest` on a StorageClass with reserved `csi.storage.k8s.io/` parameters, such as a csi-nfs StorageClass, never produced a volume. The parameters are now stripped before the volume is created, the volume gets the requested size and never less than the source, and deleting it passes the provisioner secret of the StorageClass to the driver."
+  - "Writers that do not know the `spec.mode` field of a `VolumeSnapshot`, such as the CSI provisioner when it sets its protection finalizer, removed the field on a full update, and for a snapshot in `Import` mode the update failed with `mode is immutable`. A PVC restored from such a snapshot got `ProvisioningFailed` and stayed `Pending`. The webhook now keeps the stored `spec.mode` when an update omits it, and the provisioner changes only the list of finalizers."
+  - "The `VolumeSnapshot` CRD described two fields of the capture state under names that state-snapshotter does not write, so the API server dropped them from every status write and state-snapshotter reconciled every `VolumeSnapshot` without end. The CRD now names them `childSubtreesManifestsPersisted` and `childrenSettled`."
+  - "The data manager controller and the `VolumeSnapshot` webhook ignored the `logLevel` setting, and snapshot-controller and data-source-validator always ran with the most verbose klog level. The level is now applied as set in all components. The levels `ERROR`, `WARN`, `INFO`, `DEBUG` and `TRACE` map to klog levels 0, 1, 2, 4 and 5."
+  - "A `DataImport` deleted during its first reconcile left its PVCs `Terminating` forever, which blocked the deletion of their namespace. The controller now releases them."
+  - "A `DataImport` failed on every reconcile when the API server returned the PVC size in another notation than requested, such as `3072Mi` for `3Gi`, because the controller took it for a change of the immutable PVC spec. Sizes are now compared by amount."
+  - "When a `DataExport` of a snapshot was deleted while the controller was down, or after its finalizer had been removed manually, the exporter Pod kept running with the volume mounted and served data for an export that no longer existed. The export volume of a snapshot is now tracked like that of a live volume and is cleaned up."
+  - "A `DataExport` of a snapshot never became ready on drivers that have to replay the filesystem journal of a restored volume, such as sds-replicated-volume, because the restored volume was mounted read-only. The volume of a snapshot export is now mounted read-write, while a live volume is still exported read-only."
+
+security:
+  - "The `DataExport` server returned files outside the exported volume for a path with an encoded `..`, such as `..%2F..%2Fetc%2Fpasswd`. Anyone allowed to download from an export could read any file of the server container, including its TLS key and service account token. Paths that leave the volume are now refused."
+  - "The `DataImport` server created files outside the imported volume for a path with an encoded `..` and answered a `HEAD` request with the size of a file outside it. For a path that resolves to the volume root, it also applied the owner, mode and modification time from the request headers to the volume root. Such paths are now refused."
+  - "The `DataExport` and `DataImport` server Pods run with a read-only root filesystem, without privilege escalation, with the `RuntimeDefault` seccomp profile and with only the Linux capabilities their work needs: `CHOWN`, `DAC_OVERRIDE` and `FOWNER`. This prepares the module for DKP 1.79, where Pod Security Standards in system namespaces reject Pods that do not meet them instead of warning."
+  - "`golang.org/x/net` is raised to v0.62.0 in all components, including the CSI sidecars, closing CVE-2026-56851, CVE-2026-78659, CVE-2026-78660, CVE-2026-78661, CVE-2026-78663, CVE-2026-78669, CVE-2026-97032 and CVE-2026-97045."
+  - "OpenTelemetry is raised to v1.45.0 in the controller, csi-attacher, csi-provisioner, csi-resizer, csi-snapshotter and snapshot-controller, closing CVE-2026-81870."
+  - "`cel-go` is raised to v0.29.0 in the webhooks, closing GHSA-gcjh-h69q-9w9g."
+  - "`github.com/klauspost/compress` is raised to v1.19.2 in the hooks, closing CVE-2026-63209."
+  - "`github.com/docker/distribution` is removed from the hooks, closing CVE-2026-85747."
+
+upgrade_notes:
+  - "The module now requires state-snapshotter v1.0.1 or later. On a cluster with an older state-snapshotter, Deckhouse does not update storage-foundation until state-snapshotter is updated."
+  - "The default `logLevel` is now `INFO` instead of `DEBUG`."
+  - "On DKP 1.78 and later the legacy roles of the module are no longer created and RBACv2 roles replace them: `d8:system-capability:storage-foundation:view` and `:edit` replace `d8:manage:permission:module:storage-foundation:view` and `:edit`, and `d8:namespace-capability:storage-foundation:view`, `:edit` and `:transfer_volume_data` replace `d8:use:capability:module:storage-foundation:view`, `:edit` and `:transfer_volume_data`. A RoleBinding or ClusterRoleBinding that refers to a legacy role by name has to be pointed at the corresponding new one. On DKP below 1.78 nothing needs to be done."
+  - "Finish the active `DataImport` uploads of both modes before updating the module, or be ready to upload the data again. An import whose upload is still in progress during the update loses the data uploaded so far: with `mode: PopulateData` it has to be started again with a new `DataImport`, and with `mode: CreatePVC` the import continues, but the data has to be uploaded again. The temporary PVC that a `PopulateData` import left in the user's namespace is not deleted automatically and has to be deleted manually. Completed imports and their artifacts are not affected."
+  - "The update removes the populator `Deployment` and restarts the csi-controller Pods of the CSI driver modules that take their provisioner sidecar from storage-foundation."
+
+docs:
+  - "The documentation is brought in line with the module's behavior and restructured, with a new page on advanced usage. It describes the scenarios of creating and restoring snapshots, cloning a PVC, exporting and importing over HTTP, resuming a transfer, and the statuses, errors and limitations of `DataExport`, `DataImport`, `VolumeCaptureRequest` and `VolumeRestoreRequest`."
+  - "The custom resource reference is fully translated into Russian."
+  - "The responses of the export and import HTTP API are specified, including file, symbolic link and directory listing responses."
+  - "The `VolumeRestoreRequest` documentation describes how the executor permission reaches every CSI driver module."
+
+dependencies:
+  - name: csi-attacher
+    from: "v4.11.0"
+    to: "v4.13.0"
+  - name: csi-provisioner
+    from: "v6.2.0"
+    to: "v6.3.0"
+  - name: csi-resizer
+    from: "v2.1.0"
+    to: "v2.3.0"
+  - name: csi-snapshotter
+    from: "v8.5.0"
+    to: "v8.6.0"
+  - name: snapshot-controller
+    from: "v8.5.0"
+    to: "v8.6.0"
+  - name: livenessprobe
+    from: "v2.18.0"
+    to: "v2.20.0"
+  - name: node-driver-registrar
+    from: "v2.16.0"
+    to: "v2.18.0"
