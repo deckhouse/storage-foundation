@@ -9,9 +9,12 @@ descriptions:
 requirements:
   deckhouse: ">= 1.76.9"
   modules:
-    # storage-foundation and state-snapshotter are released together as v1.0.0; the snapshot
-    # domain (SnapshotContent/VRR) lives in state-snapshotter, so pin the GA baseline explicitly.
-    state-snapshotter: ">= 1.0.0"
+    # The snapshot domain (SnapshotContent/VRR) lives in state-snapshotter. 1.0.1 is the first release
+    # whose ClusterRole d8:state-snapshotter:backup-agent aggregates the roles labelled
+    # state-snapshotter.deckhouse.io/aggregate-to-backup-agent. On DKP 1.78 and later that label is the
+    # only way templates/rbacv2/use/transfer_volume_data.yaml reaches a backup agent, so with an older
+    # state-snapshotter the agent would lose the DataExport/DataImport transfer permissions.
+    state-snapshotter: ">= 1.0.1"
     # A gate, not a dependency: storage-foundation never needs snapshot-controller (it embeds its
     # own copy of the controller). But snapshot-controller builds older than v0.2.0 ship an older
     # schema of the shared snapshot.storage.k8s.io CRDs — running one NEXT TO storage-foundation
