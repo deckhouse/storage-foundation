@@ -29,7 +29,11 @@ import (
 	"github.com/google/cel-go/cel"
 	"github.com/slok/kubewebhook/v2/pkg/model"
 	kwhmutating "github.com/slok/kubewebhook/v2/pkg/webhook/mutating"
+	corev1 "k8s.io/api/core/v1"
+	storagev1 "k8s.io/api/storage/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	snapv1 "github.com/deckhouse/storage-foundation/api/snapshot/v1"
 )
@@ -406,6 +410,181 @@ func TestVolumeSnapshotMatchCondition(t *testing.T) {
 			}
 			if got != tt.want {
 				t.Fatalf("reaches the webhook = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+// TestStorageClassManagedByWireLiterals pins the label keys a StorageClass is recognised as a module's by.
+// They are written by other repositories, so a rename here makes every module class look unmanaged and
+// silently drops the mismatch check, which is how the check was lost once already.
+func TestStorageClassManagedByWireLiterals(t *testing.T) {
+	t.Parallel()
+
+	if storageClassManagedByLabelName != "storage.deckhouse.io/managed-by" {
+		t.Fatalf("unexpected managed-by key: %s", storageClassManagedByLabelName)
+	}
+	if storageClassManagedByFoundationLabelName != "storage-foundation.deckhouse.io/managed-by" {
+		t.Fatalf("unexpected storage-foundation managed-by key: %s", storageClassManagedByFoundationLabelName)
+	}
+	if storageClassVolumeSnapshotAnnotationName != "storage.deckhouse.io/volumesnapshotclass" {
+		t.Fatalf("unexpected volume snapshot class annotation: %s", storageClassVolumeSnapshotAnnotationName)
+	}
+}
+
+func storageClassWith(labels, annotations map[string]string) *storagev1.StorageClass {
+	return &storagev1.StorageClass{
+		ObjectMeta:  metav1.ObjectMeta{Name: "sc", Labels: labels, Annotations: annotations},
+		Provisioner: "driver.example.com",
+	}
+}
+
+func TestStorageClassManagedBy(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name   string
+		labels map[string]string
+		want   string
+	}{
+		{name: "success: no labels", want: ""},
+		{name: "success: storage.deckhouse.io key", labels: map[string]string{storageClassManagedByLabelName: "sds-replicated-volume"}, want: "sds-replicated-volume"},
+		{name: "success: storage-foundation.deckhouse.io key", labels: map[string]string{storageClassManagedByFoundationLabelName: "csi-netapp"}, want: "csi-netapp"},
+		{
+			name: "success: storage.deckhouse.io key wins over the storage-foundation one",
+			labels: map[string]string{
+				storageClassManagedByLabelName:           "ceph-storage-class-controller",
+				storageClassManagedByFoundationLabelName: "other",
+			},
+			want: "ceph-storage-class-controller",
+		},
+		{
+			name: "success: an empty storage.deckhouse.io value falls back to the storage-foundation key",
+			labels: map[string]string{
+				storageClassManagedByLabelName:           "",
+				storageClassManagedByFoundationLabelName: "csi-nfs",
+			},
+			want: "csi-nfs",
+		},
+		{name: "success: an empty value is not a manager", labels: map[string]string{storageClassManagedByLabelName: ""}, want: ""},
+		{name: "success: an unrelated managed-by label is not a manager", labels: map[string]string{"app.kubernetes.io/managed-by": "Helm"}, want: ""},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			if got := storageClassManagedBy(storageClassWith(tt.labels, nil)); got != tt.want {
+				t.Fatalf("storageClassManagedBy() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+// TestDefaultSnapshotClass pins what a PVC-source VolumeSnapshot leaves the webhook with for each kind of
+// StorageClass: the class it is filled with, the class it keeps, or the refusal.
+func TestDefaultSnapshotClass(t *testing.T) {
+	t.Parallel()
+
+	managed := map[string]string{storageClassManagedByLabelName: "sds-local-volume"}
+	managedFoundation := map[string]string{storageClassManagedByFoundationLabelName: "sds-local-volume"}
+	annotated := map[string]string{storageClassVolumeSnapshotAnnotationName: "vsc"}
+
+	tests := []struct {
+		name        string
+		labels      map[string]string
+		annotations map[string]string
+		requested   *string
+		want        *string
+		wantErr     bool
+	}{
+		{name: "success: managed class fills an empty request", labels: managed, annotations: annotated, want: ptr("vsc")},
+		{name: "success: managed class accepts the class it names", labels: managed, annotations: annotated, requested: ptr("vsc"), want: ptr("vsc")},
+		{name: "error: managed class refuses another class", labels: managed, annotations: annotated, requested: ptr("other"), wantErr: true},
+		{name: "error: managed class refuses an empty class name", labels: managed, annotations: annotated, requested: ptr(""), wantErr: true},
+		{name: "success: class managed under the storage-foundation key fills an empty request", labels: managedFoundation, annotations: annotated, want: ptr("vsc")},
+		{name: "error: class managed under the storage-foundation key refuses another class", labels: managedFoundation, annotations: annotated, requested: ptr("other"), wantErr: true},
+		{name: "success: managed class without the annotation leaves an empty request", labels: managed},
+		{name: "success: managed class without the annotation keeps the requested class", labels: managed, requested: ptr("other"), want: ptr("other")},
+		{name: "success: unmanaged class fills an empty request", annotations: annotated, want: ptr("vsc")},
+		{name: "success: unmanaged class keeps another requested class", annotations: annotated, requested: ptr("other"), want: ptr("other")},
+		{name: "success: unmanaged class without the annotation leaves an empty request"},
+		{name: "success: an empty managed-by value is not a manager", labels: map[string]string{storageClassManagedByLabelName: ""}, annotations: annotated, requested: ptr("other"), want: ptr("other")},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			snapshot := &snapv1.VolumeSnapshot{}
+			snapshot.Spec.VolumeSnapshotClassName = tt.requested
+
+			err := defaultSnapshotClass(snapshot, storageClassWith(tt.labels, tt.annotations))
+			if tt.wantErr {
+				if err == nil {
+					t.Fatal("expected an error")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("defaultSnapshotClass: %v", err)
+			}
+
+			got := snapshot.Spec.VolumeSnapshotClassName
+			switch {
+			case got == nil && tt.want == nil:
+			case got == nil || tt.want == nil:
+				t.Fatalf("volumeSnapshotClassName = %v, want %v", got, tt.want)
+			case *got != *tt.want:
+				t.Fatalf("volumeSnapshotClassName = %q, want %q", *got, *tt.want)
+			}
+		})
+	}
+}
+
+func TestSourceStorageClass(t *testing.T) {
+	t.Parallel()
+
+	claim := func(name string, storageClassName *string) *corev1.PersistentVolumeClaim {
+		return &corev1.PersistentVolumeClaim{
+			ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "ns"},
+			Spec:       corev1.PersistentVolumeClaimSpec{StorageClassName: storageClassName},
+		}
+	}
+
+	tests := []struct {
+		name    string
+		objects []client.Object
+		pvc     string
+		wantSC  string
+		wantErr bool
+	}{
+		{name: "success: the claim's StorageClass", objects: []client.Object{claim("pvc", ptr("sc")), storageClassWith(nil, nil)}, pvc: "pvc", wantSC: "sc"},
+		{name: "error: the claim names no StorageClass", objects: []client.Object{claim("pvc", nil), storageClassWith(nil, nil)}, pvc: "pvc", wantErr: true},
+		{name: "error: the claim does not exist", objects: []client.Object{storageClassWith(nil, nil)}, pvc: "pvc", wantErr: true},
+		{name: "error: the claim's StorageClass does not exist", objects: []client.Object{claim("pvc", ptr("gone"))}, pvc: "pvc", wantErr: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			cl := fake.NewClientBuilder().WithObjects(tt.objects...).Build()
+			snapshot := &snapv1.VolumeSnapshot{ObjectMeta: metav1.ObjectMeta{Name: "snap", Namespace: "ns"}}
+			snapshot.Spec.Source.PersistentVolumeClaimName = ptr(tt.pvc)
+
+			sc, err := sourceStorageClass(context.Background(), cl, snapshot)
+			if tt.wantErr {
+				if err == nil {
+					t.Fatal("expected an error")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("sourceStorageClass: %v", err)
+			}
+			if sc.Name != tt.wantSC {
+				t.Fatalf("StorageClass = %q, want %q", sc.Name, tt.wantSC)
 			}
 		})
 	}
