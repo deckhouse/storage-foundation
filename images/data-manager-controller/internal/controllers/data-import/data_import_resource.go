@@ -34,10 +34,12 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
+	"github.com/deckhouse/sds-common-lib/conditions"
 	dev1alpha1 "github.com/deckhouse/storage-foundation/api/v1alpha1"
 	"github.com/deckhouse/storage-foundation/common"
 	"github.com/deckhouse/storage-foundation/common/config"
 	"github.com/deckhouse/storage-foundation/common/publish"
+	"github.com/deckhouse/storage-foundation/images/data-manager-controller/internal/controllers/readyevents"
 )
 
 // Sentinel errors are used as typed markers so callers can distinguish failure
@@ -61,6 +63,8 @@ type DataImportReconciler struct {
 	// Dynamic talks to CRDs SVDM has no Go types for (VolumeCaptureRequest, ObjectKeeper) without
 	// compiling in their modules.
 	Dynamic dynamic.Interface
+	// Recorder records an Event on the DataImport when its Ready condition moves. Nil records nothing.
+	Recorder conditions.EventRecorder
 	// Now returns the current time; it is injectable so tests can assert completionTimestamp
 	// deterministically. Defaults to metav1.Now.
 	Now        func() metav1.Time
@@ -107,7 +111,7 @@ func (r *DataImportReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 	defer func() {
 		mutateReadyByErr(dataImport, err)
 		r.finalizeDataImportStatus(dataImport, err)
-		updateErr := updateDataImport(ctx, r.Client, dataImportOriginal, dataImport)
+		updateErr := updateDataImport(ctx, r.Client, r.Recorder, dataImportOriginal, dataImport)
 		switch {
 		case errors.Is(err, ErrTerminal):
 			// Un-retryable failure, now recorded as phase=Failed. Do not requeue the error; surface only a
@@ -1169,8 +1173,9 @@ func (r *DataImportReconciler) deletePublish(ctx context.Context) (bool, error) 
 // (heartbeat every 30s), so a blind Status().Update off the reconcile-start snapshot would clobber a
 // concurrent serverState=Finished/IdleExpired write and hang the import. Instead the controller-owned
 // status is re-applied onto the freshly read object while the pod-owned fields are carried over from the
-// latest server-side state.
-func updateDataImport(ctx context.Context, c client.Client, dataImportOld, dataImportNew *dev1alpha1.DataImport) error {
+// latest server-side state. A status write that moves Ready records an Event through rec, which may be
+// nil, against the conditions it replaced, so a write that is retried or fails records none.
+func updateDataImport(ctx context.Context, c client.Client, rec conditions.EventRecorder, dataImportOld, dataImportNew *dev1alpha1.DataImport) error {
 	if dataImportOld == nil || dataImportNew == nil {
 		return nil
 	}
@@ -1209,10 +1214,12 @@ func updateDataImport(ctx context.Context, c client.Client, dataImportOld, dataI
 			merged.CA = fresh.Status.CA
 			merged.AccessTimestamp = fresh.Status.AccessTimestamp
 			merged.ServerState = fresh.Status.ServerState
+			before := fresh.Status.Conditions
 			fresh.Status = *merged
 			if err := c.Status().Update(ctx, fresh); err != nil {
 				return fmt.Errorf("update DataImport status failed: %w", err)
 			}
+			readyevents.Record(rec, fresh, before, fresh.Status.Conditions)
 		}
 
 		return nil

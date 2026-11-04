@@ -41,12 +41,14 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
+	"github.com/deckhouse/sds-common-lib/conditions"
 	"github.com/deckhouse/sds-common-lib/logger"
 	// dev1alpha1 "hello-world/api/v1alpha1"
 	dev1alpha1 "github.com/deckhouse/storage-foundation/api/v1alpha1"
 	. "github.com/deckhouse/storage-foundation/common"
 	"github.com/deckhouse/storage-foundation/common/config"
 	"github.com/deckhouse/storage-foundation/common/publish"
+	"github.com/deckhouse/storage-foundation/images/data-manager-controller/internal/controllers/readyevents"
 )
 
 type DataexportReconciler struct {
@@ -61,6 +63,8 @@ type DataexportReconciler struct {
 	// Now returns the current time; it is injectable so tests can assert completionTimestamp
 	// deterministically. Defaults to metav1.Now.
 	Now func() metav1.Time
+	// Recorder records an Event on the DataExport when its Ready condition moves. Nil records nothing.
+	Recorder conditions.EventRecorder
 }
 
 // dataExportRequeueInterval is the soft requeue delay used when a benign write conflict survives the
@@ -445,7 +449,8 @@ func (r *DataexportReconciler) finalizeDataExportStatus(de *dev1alpha1.DataExpor
 // status fields (serverState, accessTimestamp, url, ca) concurrently (heartbeat every 30s), so a blind
 // Status().Update off the reconcile-start snapshot would clobber a concurrent serverState=IdleExpired
 // write. Instead the controller-owned status is re-applied onto the freshly read object while the
-// pod-owned fields are carried over from the latest server-side state.
+// pod-owned fields are carried over from the latest server-side state. A status write that moves Ready
+// records an Event against the conditions it replaced, so a write that is retried or fails records none.
 func (r *DataexportReconciler) updateDataExport(ctx context.Context, dataExportOld, dataExportNew *dev1alpha1.DataExport) error {
 	if dataExportNew == nil || dataExportOld == nil {
 		return nil
@@ -486,10 +491,12 @@ func (r *DataexportReconciler) updateDataExport(ctx context.Context, dataExportO
 			merged.CA = fresh.Status.CA
 			merged.AccessTimestamp = fresh.Status.AccessTimestamp
 			merged.ServerState = fresh.Status.ServerState
+			before := fresh.Status.Conditions
 			fresh.Status = *merged
 			if err := r.Client.Status().Update(ctx, fresh); err != nil {
 				return fmt.Errorf("update DataExport status failed: %w", err)
 			}
+			readyevents.Record(r.Recorder, fresh, before, fresh.Status.Conditions)
 		}
 
 		return nil

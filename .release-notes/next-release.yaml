@@ -4,6 +4,9 @@ date: "2026-xx-xx"
 summary: ""
 highlights: []
 
+new_features:
+  - "`DataExport` and `DataImport` now record a Kubernetes Event when their `Ready` condition changes status or reason, so `kubectl describe` shows how the object got where it is: for example `Pending`, then `ServerReady`, then `Expired` or `Completed`. The reason of the Event is the reason of the condition. A failure, such as `TargetNotFound`, `DeploymentFailed` or `CleanupFailed`, is recorded as `Warning`; a step of progress and a normal ending, such as `Pending`, `TargetNotReady`, `Expired` or `Completed`, is recorded as `Normal`, even though `Ready` is `False` then. A reconcile pass that changes neither the status nor the reason records no Event. The Events are in the namespace of the object."
+
 fixes:
   - "The `DataImport` server answered `201 Created` to the last part of a file upload even when it then failed to move the completed file into place, and appended an error message to that successful response. It now answers `500` in that case, and the uploaded data is kept in the temporary file of the upload."
   - "When the `DataImport` server received a part of a file upload that did not complete the file, it applied the owner, permissions and modification time from the request to the file of the same name already in the volume, if there was one, and otherwise logged an error and appended it to the `204` response. The attributes are now applied only when the upload completes, before the file is moved into place, and a failure to apply them is answered with `500` instead of `201 Created`."

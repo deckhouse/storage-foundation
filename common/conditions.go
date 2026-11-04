@@ -105,6 +105,21 @@ const (
 	ReasonCleanupFailed    ConditionReason = "CleanupFailed"
 )
 
+// IsFailure reports whether a reason says something went wrong, as opposed to a step of progress or an
+// outcome. Ready=False alone does not say that here: Pending and PVCCreated are on the way to serving,
+// Expired and Completed are how a DataExport or a DataImport normally ends. TargetNotReady is a wait as
+// well — the target PVC is not bound yet, the snapshot has no data yet — and clears on its own. Failed
+// is the reason of Completed=False on a failed import.
+func (r ConditionReason) IsFailure() bool {
+	switch r {
+	case ReasonFailed, ReasonPublishFailed, ReasonValidationFailed, ReasonTargetNotFound,
+		ReasonTargetFailed, ReasonPVConflict, ReasonDeploymentFailed, ReasonCleanupFailed:
+		return true
+	default:
+		return false
+	}
+}
+
 // StripConditionsNotIn removes every status condition whose type is not in the allowed set and reports
 // whether anything was removed. It migrates legacy objects onto the current condition catalog: existing
 // DataImport/DataExport objects carry a stale condition (type "Expired") that the current controller

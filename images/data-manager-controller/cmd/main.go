@@ -50,6 +50,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
+	"github.com/deckhouse/sds-common-lib/conditions"
 	"github.com/deckhouse/sds-common-lib/logger"
 	"github.com/deckhouse/sds-common-lib/monitoring"
 	dev1alpha1 "github.com/deckhouse/storage-foundation/api/v1alpha1"
@@ -292,6 +293,7 @@ func createController(manager manager.Manager, cfgParams *config.Options) error 
 			Config:     cfgParams,
 			Dynamic:    dynamicClient,
 			RESTMapper: manager.GetRESTMapper(),
+			Recorder:   conditions.FromLegacyRecorder(manager.GetEventRecorderFor("dataexport-controller")),
 		})
 	if err != nil {
 		log.Log.Error(err, "Failed to create DataExport controller")
@@ -343,10 +345,11 @@ func createController(manager manager.Manager, cfgParams *config.Options) error 
 		).
 		WithEventFilter(predicateForEventFilter).
 		Complete(&dataimport.DataImportReconciler{
-			Client:  manager.GetClient(),
-			Reader:  manager.GetAPIReader(),
-			Config:  cfgParams,
-			Dynamic: dynamicClient,
+			Client:   manager.GetClient(),
+			Reader:   manager.GetAPIReader(),
+			Config:   cfgParams,
+			Dynamic:  dynamicClient,
+			Recorder: conditions.FromLegacyRecorder(manager.GetEventRecorderFor("dataimport-controller")),
 		})
 	if err != nil {
 		return err

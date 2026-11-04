@@ -38,6 +38,26 @@ func TestPhaseIsTerminal(t *testing.T) {
 	}
 }
 
+// The type of a DataExport or DataImport Event follows from its reason, not from Ready=False: a reason
+// that is a step of progress or a normal outcome must not land as a Warning.
+func TestConditionReasonIsFailure(t *testing.T) {
+	failures := []ConditionReason{
+		ReasonFailed, ReasonPublishFailed, ReasonValidationFailed, ReasonTargetNotFound,
+		ReasonTargetFailed, ReasonPVConflict, ReasonDeploymentFailed, ReasonCleanupFailed,
+	}
+	others := []ConditionReason{
+		ReasonPending, ReasonPVCCreated, ReasonServerReady, ReasonInProgress, ReasonExpired, ReasonDeleted,
+		ReasonUploadFinished, ReasonCompleted, ReasonTargetNotReady,
+	}
+
+	for _, r := range failures {
+		assert.True(t, r.IsFailure(), "%s must be a failure", r)
+	}
+	for _, r := range others {
+		assert.False(t, r.IsFailure(), "%s must NOT be a failure", r)
+	}
+}
+
 // TestStripConditionsNotIn is the load-bearing legacy migration: existing DataImport/DataExport objects
 // carry a stale condition (type "Expired") that the narrowed CRD condition-type enum no longer permits;
 // the controller must strip it (and any other out-of-catalog type) before the first status write, or every

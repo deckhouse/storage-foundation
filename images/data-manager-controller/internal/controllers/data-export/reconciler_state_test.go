@@ -42,6 +42,8 @@ func TestDataexportReconcilerHoldsNoRequestState(t *testing.T) {
 		"RESTMapper": true,
 		// injectable clock for deterministic timestamps in tests
 		"Now": true,
+		// Event recorder; the one the manager hands out is safe for concurrent use
+		"Recorder": true,
 	}
 
 	typ := reflect.TypeOf(DataexportReconciler{})

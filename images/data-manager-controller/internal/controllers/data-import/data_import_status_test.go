@@ -243,7 +243,7 @@ func TestUpdateDataImport_PreservesConcurrentPodFields(t *testing.T) {
 	newDI := old.DeepCopy()
 	meta.SetStatusCondition(&newDI.Status.Conditions, cond(common.ConditionReady, metav1.ConditionTrue, common.ReasonServerReady))
 
-	require.NoError(t, updateDataImport(context.Background(), c, old, newDI))
+	require.NoError(t, updateDataImport(context.Background(), c, nil, old, newDI))
 
 	got := &dev1alpha1.DataImport{}
 	require.NoError(t, c.Get(context.Background(), types.NamespacedName{Namespace: "ns", Name: "imp"}, got))
