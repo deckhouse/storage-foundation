@@ -4,6 +4,9 @@ date: "2026-xx-xx"
 summary: ""
 highlights: []
 
+security:
+  - "The Ingress that publishes a DataExport or a DataImport now verifies the certificate of the exporter or importer pod it proxies to. It used to speak HTTPS to the pod but accept any certificate. Each pod signs its serving certificate with its own CA, and the Ingress now trusts only that CA and only the name of the pod's Service."
+
 # Optional sections — delete rather than leave empty.
 # new_features: []
 # improvements: []

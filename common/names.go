@@ -126,3 +126,10 @@ func isValidTargetKind(targetKindShort string) bool {
 
 	return true
 }
+
+// BackendServerName is the name the Ingress expects in the certificate of an exporter or importer pod:
+// the in-cluster name of its headless Service, one of the DNS names the pod signs its certificate for
+// (images/data-exporter/internal/certutil).
+func BackendServerName(headlessServiceName, namespace string) string {
+	return fmt.Sprintf("%s.%s.svc", headlessServiceName, namespace)
+}

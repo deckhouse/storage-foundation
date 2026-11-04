@@ -29,6 +29,8 @@ import (
 	"math/big"
 	"net"
 	"time"
+
+	"github.com/deckhouse/storage-foundation/common"
 )
 
 type TLSBundle struct {
@@ -105,7 +107,7 @@ func GenerateTLSBundle(logger *slog.Logger, ip, host, namespace string, ttl time
 		srvTpl.DNSNames = []string{
 			host,
 			fmt.Sprintf("%s.%s", host, namespace),
-			fmt.Sprintf("%s.%s.svc", host, namespace),
+			common.BackendServerName(host, namespace),
 			fmt.Sprintf("%s.%s.svc.cluster.local", host, namespace),
 		}
 	}
