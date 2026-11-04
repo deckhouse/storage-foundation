@@ -24,6 +24,7 @@ import (
 	"io"
 	"io/fs"
 	"log/slog"
+	"mime"
 	"net/http"
 	"net/url"
 	"path/filepath"
@@ -278,7 +279,7 @@ func (d *FilesystemExporter) writeRequiredHeaders(w http.ResponseWriter, path st
 		fname := filepath.Base(path)
 		w.Header().Set("Content-Type", "application/octet-stream")
 		w.Header().Set("Content-Length", fmt.Sprint(fi.Size()))
-		w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=%s", fname))
+		w.Header().Set("Content-Disposition", mime.FormatMediaType("attachment", map[string]string{"filename": fname}))
 	case isSymlink(fi.Mode()):
 		// Symlink-specific headers
 		target, err := d.fs.ReadLink(path)

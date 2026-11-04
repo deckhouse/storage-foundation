@@ -171,6 +171,10 @@ X-Type: file
 <FILE_CONTENT>
 ```
 
+`<BASE_NAME>` is the file's base name, written as a header parameter per RFC 6266: a name that is not a plain token is
+quoted (`filename="a b.txt"`), and a name with non-ASCII or control characters is percent-encoded as
+`filename*=utf-8''<ENCODED_NAME>`.
+
 For a symbolic link, the server reports the link and never follows it, so a client copying a tree recreates the link
 instead of duplicating its target. `Content-Length` is always `0`:
 

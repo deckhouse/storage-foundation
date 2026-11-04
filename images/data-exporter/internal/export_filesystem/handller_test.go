@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"mime"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -752,6 +753,47 @@ func TestGetPathInsideRootStillServed(t *testing.T) {
 			body, err := readAll(response.Body)
 			assert.NoError(t, err)
 			assert.Equal(t, tc.want, string(body))
+		})
+	}
+}
+
+// A file name is a header parameter, not header syntax: spaces, ";", quotes and non-ASCII are quoted or
+// RFC 2231-encoded, and a plain name stays a bare token so existing clients see the header unchanged.
+func TestGetFileContentDispositionEscapesName(t *testing.T) {
+	for _, tc := range []struct{ name, want string }{
+		{"plain.txt", `attachment; filename=plain.txt`},
+		{"a b.txt", `attachment; filename="a b.txt"`},
+		{"a;b", `attachment; filename="a;b"`},
+		{`a"b`, `attachment; filename="a\"b"`},
+		{"файл.txt", `attachment; filename*=utf-8''%D1%84%D0%B0%D0%B9%D0%BB.txt`},
+		{"a\x01b", `attachment; filename*=utf-8''a%01b`},
+		{"a\nb", `attachment; filename*=utf-8''a%0Ab`},
+		{"a\xffb", `attachment; filename*=utf-8''a%FFb`},
+	} {
+		t.Run(fmt.Sprintf("%q", tc.name), func(t *testing.T) {
+			fsys, err := fake.NewBuilder("/").
+				WithFileAtPath("sharedir", os.ModeDir).
+				WithFileAtPath("sharedir/"+tc.name, os.FileMode(0o664), fake.RWContentFromString("data")).
+				Build()
+			assert.NoError(t, err)
+
+			req := httptest.NewRequest(http.MethodGet, "/", nil)
+			req.URL.Path = tc.name
+			rr := httptest.NewRecorder()
+
+			serve(t, fsys, rr, req)
+
+			response := rr.Result()
+			defer response.Body.Close()
+
+			assert.Equal(t, http.StatusOK, response.StatusCode)
+			header := response.Header.Get("Content-Disposition")
+			assert.Equal(t, tc.want, header)
+
+			disposition, params, err := mime.ParseMediaType(header)
+			assert.NoError(t, err)
+			assert.Equal(t, "attachment", disposition)
+			assert.Equal(t, tc.name, params["filename"])
 		})
 	}
 }
