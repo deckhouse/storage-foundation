@@ -28,6 +28,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
+	"github.com/deckhouse/sds-common-lib/logger"
 	dev1alpha1 "github.com/deckhouse/storage-foundation/api/v1alpha1"
 )
 
@@ -136,4 +137,24 @@ func TestServerSecurityContext(t *testing.T) {
 			assert.Equal(t, corev1.SeccompProfileTypeRuntimeDefault, sc.SeccompProfile.Type)
 		})
 	}
+}
+
+// TestServerEnv_LogLevel guards how the controller's level reaches the server: passed on as LOG_LEVEL when
+// there is one, and not set at all when there is none, so that the server's own default applies.
+func TestServerEnv_LogLevel(t *testing.T) {
+	envNames := func(env []corev1.EnvVar) []string {
+		names := make([]string, 0, len(env))
+		for _, e := range env {
+			names = append(names, e.Name)
+		}
+		return names
+	}
+
+	withLevel := ServerEnv(logger.DebugLevel)
+	assert.Contains(t, withLevel, corev1.EnvVar{Name: "LOG_LEVEL", Value: "3"})
+	assert.Contains(t, envNames(withLevel), "POD_IP")
+
+	withoutLevel := ServerEnv("")
+	assert.NotContains(t, envNames(withoutLevel), "LOG_LEVEL")
+	assert.Contains(t, envNames(withoutLevel), "POD_IP")
 }

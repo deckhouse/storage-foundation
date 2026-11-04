@@ -17,13 +17,13 @@ limitations under the License.
 package ttl_control
 
 import (
-	"log/slog"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/deckhouse/sds-common-lib/logger"
 	"github.com/deckhouse/storage-foundation/common"
 )
 
@@ -32,7 +32,7 @@ import (
 // crash the server pod on ParseDuration(""). The fallback keeps the pod serving with the documented
 // default idle window instead of crash-looping.
 func TestNewTTLControl_TTLParsing(t *testing.T) {
-	logger := slog.Default()
+	logger := logger.NewNop()
 
 	tests := []struct {
 		name    string

@@ -18,10 +18,10 @@ package ttl_control
 
 import (
 	"context"
-	"log/slog"
 	"sync"
 	"time"
 
+	"github.com/deckhouse/sds-common-lib/logger"
 	"github.com/deckhouse/storage-foundation/common"
 )
 
@@ -37,7 +37,7 @@ func SetDataManagerServerStateIdleExpired(
 	client DataManagerServerStateSetter,
 	dataManagerNamespace, dataManagerName string,
 	expiredChan <-chan time.Time,
-	logger *slog.Logger,
+	logger logger.Logger,
 	wg *sync.WaitGroup,
 ) {
 	defer wg.Done()
@@ -69,7 +69,7 @@ func UpdateDataManagerAccessTimestamp(
 	client DataManagerAccessTimestampUpdater,
 	dataManagerNamespace, dataManagerName string,
 	signalChan <-chan time.Time,
-	logger *slog.Logger,
+	logger logger.Logger,
 	wg *sync.WaitGroup,
 ) {
 	defer wg.Done()

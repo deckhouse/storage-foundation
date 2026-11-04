@@ -20,7 +20,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"log/slog"
 	"mime"
 	"net/http"
 	"net/http/httptest"
@@ -34,6 +33,7 @@ import (
 
 	d8fs "github.com/deckhouse/sds-common-lib/fs"
 	"github.com/deckhouse/sds-common-lib/fs/fake"
+	"github.com/deckhouse/sds-common-lib/logger"
 	"github.com/deckhouse/storage-foundation/images/data-exporter/internal/export_filesystem"
 	"github.com/deckhouse/storage-foundation/images/data-exporter/internal/test"
 )
@@ -178,7 +178,7 @@ func lstat(t *testing.T, fsys *fake.OS, path string) os.FileInfo {
 }
 
 func serve(t *testing.T, fsys d8fs.OS, w http.ResponseWriter, r *http.Request) {
-	logger := slog.New(slog.NewTextHandler(os.Stdout, nil))
+	logger := logger.NewNop()
 	d, err := export_filesystem.NewFilesystemExporter(fsys, "/sharedir", logger)
 	assert.NoError(t, err)
 	d.ServeHTTP(w, r)
@@ -216,7 +216,7 @@ func assertDir(t *testing.T, expected []export_filesystem.Item, actual io.Reader
 
 func TestInitNoSuchDir(t *testing.T) {
 	fsys := createTestFs(t)
-	logger := slog.New(slog.NewTextHandler(os.Stdout, nil))
+	logger := logger.NewNop()
 	d, err := export_filesystem.NewFilesystemExporter(fsys, "/baddir", logger)
 	assert.Error(t, err)
 	assert.Nil(t, d)
@@ -224,7 +224,7 @@ func TestInitNoSuchDir(t *testing.T) {
 
 func TestInitNotADir(t *testing.T) {
 	fsys := createTestFs(t)
-	logger := slog.New(slog.NewTextHandler(os.Stdout, nil))
+	logger := logger.NewNop()
 	d, err := export_filesystem.NewFilesystemExporter(fsys, "/outer_file", logger)
 	assert.Error(t, err)
 	assert.Nil(t, d)

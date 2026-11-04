@@ -19,7 +19,7 @@ package main
 import (
 	"bytes"
 	"encoding/base64"
-	"log/slog"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -27,6 +27,8 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/deckhouse/sds-common-lib/logger"
 )
 
 // The credential material every case below hunts for in the log. Each string is unlike anything the code or
@@ -44,13 +46,14 @@ func logRequestOutput(t *testing.T, request *http.Request) string {
 	t.Helper()
 
 	var out bytes.Buffer
-	logger := slog.New(slog.NewTextHandler(&out, nil))
+	log, err := logger.NewLoggerToWriter(&out, logger.InfoLevel)
+	require.NoError(t, err)
 
 	served := false
 	handler := logRequest(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		served = true
 		w.WriteHeader(http.StatusNoContent)
-	}), *logger)
+	}), log)
 
 	recorder := httptest.NewRecorder()
 	handler.ServeHTTP(recorder, request)
@@ -60,6 +63,27 @@ func logRequestOutput(t *testing.T, request *http.Request) string {
 	require.NotEmpty(t, out.String(), "nothing was logged at all, so this test would pass over a leak too")
 
 	return out.String()
+}
+
+// headerRecords decodes what logRequestOutput returned and indexes its "request header" records by header
+// name. The assertions read fields rather than search the text because the log is JSON, which escapes the
+// angle brackets of hiddenValue.
+func headerRecords(t *testing.T, logged string) map[string]map[string]any {
+	t.Helper()
+
+	records := map[string]map[string]any{}
+	for _, line := range strings.Split(strings.TrimSpace(logged), "\n") {
+		var record map[string]any
+		require.NoError(t, json.Unmarshal([]byte(line), &record), "every log line must be one JSON record: %s", line)
+		if record["msg"] != "request header" {
+			continue
+		}
+		name, ok := record["name"].(string)
+		require.True(t, ok, "a request header record must carry the header name: %s", line)
+		records[name] = record
+	}
+
+	return records
 }
 
 // TestLogRequestHidesCredentialHeaderValues is the guard on what the pod's log is allowed to contain. Pod
@@ -85,16 +109,23 @@ func TestLogRequestHidesCredentialHeaderValues(t *testing.T) {
 	assert.NotContains(t, logged, base64.StdEncoding.EncodeToString([]byte("user:"+proxySecret)))
 
 	// The facts that remain, and that a person reading the log needs.
-	assert.Contains(t, logged, "name=Authorization")
-	assert.Contains(t, logged, "name=Cookie")
-	assert.Contains(t, logged, "name=X-Custom-Not-Known-Here")
-	assert.Equal(t, 4, strings.Count(logged, "value=<hidden>"),
+	headers := headerRecords(t, logged)
+	for _, name := range []string{"Authorization", "Cookie", "X-Custom-Not-Known-Here"} {
+		assert.Equal(t, hiddenValue, headers[name]["value"], "%s must be logged by name with its value hidden", name)
+	}
+	hidden := 0
+	for _, record := range headers {
+		if record["value"] == hiddenValue {
+			hidden++
+		}
+	}
+	assert.Equal(t, 4, hidden,
 		"every header outside the allow-list must be logged with its value hidden: Authorization, Cookie, Proxy-Authorization and the unknown one")
-	assert.Contains(t, logged, "scheme=Bearer", "the scheme of an authentication header is diagnostics, not a secret")
-	assert.Contains(t, logged, "scheme=Basic")
+	assert.Equal(t, "Bearer", headers["Authorization"]["scheme"], "the scheme of an authentication header is diagnostics, not a secret")
+	assert.Equal(t, "Basic", headers["Proxy-Authorization"]["scheme"])
 
 	// An allow-listed header keeps its value: the point is to hide credentials, not to blind the log.
-	assert.Contains(t, logged, "value=[4096]", "an allow-listed upload header must still be logged with its value")
+	assert.Equal(t, []any{"4096"}, headers["X-Offset"]["value"], "an allow-listed upload header must still be logged with its value")
 }
 
 // TestLogRequestReportsUnrecognizedAuthorizationScheme covers the shape that would turn the scheme field
@@ -117,9 +148,9 @@ func TestLogRequestReportsUnrecognizedAuthorizationScheme(t *testing.T) {
 			logged := logRequestOutput(t, request)
 
 			assert.NotContains(t, logged, schemelessSecret)
-			assert.Contains(t, logged, "name=Authorization")
-			assert.Contains(t, logged, "value=<hidden>")
-			assert.Contains(t, logged, "scheme="+unrecognizedScheme)
+			authorization := headerRecords(t, logged)["Authorization"]
+			assert.Equal(t, hiddenValue, authorization["value"])
+			assert.Equal(t, unrecognizedScheme, authorization["scheme"])
 		})
 	}
 }

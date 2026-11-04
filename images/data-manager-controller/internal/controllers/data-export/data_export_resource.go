@@ -20,7 +20,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"log"
 	"reflect"
 	"strings"
 	"time"
@@ -40,7 +39,9 @@ import (
 	"k8s.io/client-go/util/retry"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/log"
 
+	"github.com/deckhouse/sds-common-lib/logger"
 	// dev1alpha1 "hello-world/api/v1alpha1"
 	dev1alpha1 "github.com/deckhouse/storage-foundation/api/v1alpha1"
 	. "github.com/deckhouse/storage-foundation/common"
@@ -132,14 +133,15 @@ var (
 )
 
 func (r *DataexportReconciler) Reconcile(ctx context.Context, req ctrl.Request) (result ctrl.Result, err error) {
-	log.Printf("Start reconciling DataExport resource: %s/%s\n", req.Namespace, req.Name)
+	logger := log.FromContext(ctx)
+	logger.Info("Start reconciling DataExport resource")
 
 	dataExport := &dev1alpha1.DataExport{}
 	err = r.Client.Get(ctx, req.NamespacedName, dataExport)
 	if err != nil {
 		if kubeerrors.IsNotFound(err) {
 			// DataExport resource not found, it may have been deleted after the event was received.
-			log.Printf("DataExport resource %s/%s not found, checking for orphaned resources\n", req.Namespace, req.Name)
+			logger.Info("DataExport resource not found, checking for orphaned resources")
 			return ctrl.Result{}, r.removeOrphanResources(ctx, req.Namespace, req.Name)
 		}
 		return ctrl.Result{}, fmt.Errorf("failed to get DataExport resource from cache: %w", err)
@@ -194,10 +196,10 @@ func (r *DataexportReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 	// Nothing is provisioned for an invalid spec, so if the target cannot even be classified there is
 	// nothing to restore — just drop our finalizer to unblock deletion.
 	if dataExport.DeletionTimestamp != nil {
-		log.Printf("Case 1: DataExport resource %s/%s marked for delete", req.Namespace, req.Name)
+		logger.Info("Case 1: DataExport resource marked for delete")
 		_, delTargetKindShort, delClassifyErr := classifyTargetRef(dataExport.Spec.TargetRef.Group, dataExport.Spec.TargetRef.Kind)
 		if delClassifyErr != nil {
-			log.Printf("DataExport %s/%s target unclassifiable and nothing provisioned; dropping finalizer to allow deletion", req.Namespace, req.Name)
+			logger.Info("DataExport target unclassifiable and nothing provisioned; dropping finalizer to allow deletion")
 			RemoveFinalizer(ctx, r.Client, dataExport, dev1alpha1.StorageManagerFinalizerName)
 			return ctrl.Result{}, nil
 		}
@@ -215,7 +217,7 @@ func (r *DataexportReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 
 	err = r.validateDataExportSpec(ctx, dataExport)
 	if err != nil {
-		log.Printf("DataExport resource %s/%s spec validation failed: %v\n", req.Namespace, req.Name, err)
+		logger.Error(err, "DataExport resource spec validation failed")
 		if errors.Is(err, ErrTerminal) {
 			// Genuine spec/target validation failure — terminal until the user corrects the spec. Record
 			// Ready=ValidationFailed; the deferred maps ErrTerminal to phase=Failed and stops requeueing.
@@ -238,7 +240,7 @@ func (r *DataexportReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 	// are permanent spec errors, surfaced like validation failures.
 	_, targetKindShort, classifyErr := classifyTargetRef(dataExport.Spec.TargetRef.Group, dataExport.Spec.TargetRef.Kind)
 	if classifyErr != nil {
-		log.Printf("DataExport resource %s/%s targetRef invalid: %v\n", req.Namespace, req.Name, classifyErr)
+		logger.Error(classifyErr, "DataExport resource targetRef invalid")
 		meta.SetStatusCondition(&dataExport.Status.Conditions, metav1.Condition{
 			Type:               string(ConditionReady),
 			Status:             metav1.ConditionFalse,
@@ -258,7 +260,7 @@ func (r *DataexportReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 	// Expired outcome: restore the exported PV/PVC and tear down. Deletion of the CR itself is left to the
 	// garbage collector after the retention window (no "please delete it manually" — removal is automatic).
 	if isDataExportExpired(dataExport) {
-		log.Printf("Case 2: DataExport idle TTL expired")
+		logger.Info("Case 2: DataExport idle TTL expired")
 		readyCond := meta.FindStatusCondition(dataExport.Status.Conditions, string(ConditionReady))
 		// Guard against redundant condition updates: if Ready is already Expired, skip the
 		// SetStatusCondition call to avoid a spurious lastTransitionTime bump on every reconcile.
@@ -295,7 +297,7 @@ func (r *DataexportReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 	// stamped once) is not disturbed. Expired is handled by Case 2 above; a DataExport has no Completed
 	// phase, so this only catches Failed.
 	if Phase(dataExport.Status.Phase).IsTerminal() {
-		log.Printf("DataExport %s/%s is terminal (phase=%s), skipping reconcile", req.Namespace, req.Name, dataExport.Status.Phase)
+		logger.V(1).Info("DataExport is terminal, skipping reconcile", "phase", dataExport.Status.Phase)
 		return ctrl.Result{}, nil
 	}
 
@@ -303,7 +305,7 @@ func (r *DataexportReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 	readyCond := meta.FindStatusCondition(dataExport.Status.Conditions, string(ConditionReady))
 	switch {
 	case readyCond == nil:
-		log.Printf("Case 3: DataExport resource newly created")
+		logger.Info("Case 3: DataExport resource newly created")
 		// Initialize the Ready condition so downstream cases (Expired check, mutateReadyByErr) always have
 		// a defined state to work with. The finalizer is added here to ensure clearDataExportProviding
 		// runs on deletion even if the controller restarts before implementation is complete.
@@ -317,7 +319,7 @@ func (r *DataexportReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 		EnsureFinalizer(ctx, r.Client, dataExport, dev1alpha1.StorageManagerFinalizerName)
 	// Case 4: DataExport resource needs to initial or continue implementation
 	case readyCond.Status != metav1.ConditionTrue:
-		log.Printf("Case 4: DataExport resource needs to initial or continue implementation")
+		logger.Info("Case 4: DataExport resource needs to initial or continue implementation")
 		err = r.implementDataExportProviding(ctx, dataExport, generatedNames)
 		if err != nil {
 			if errors.Is(err, ErrPVCValidationFailed) {
@@ -338,7 +340,7 @@ func (r *DataexportReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 		if err := r.reconcilePodReadyResources(ctx, dataExport, generatedNames); err != nil {
 			return ctrl.Result{}, err
 		}
-		log.Printf("Case 5: DataExport resource providing already implemented")
+		logger.V(1).Info("Case 5: DataExport resource providing already implemented")
 	}
 
 	return ctrl.Result{}, nil
@@ -498,7 +500,8 @@ func (r *DataexportReconciler) updateDataExport(ctx context.Context, dataExportO
 }
 
 func (r *DataexportReconciler) implementDataExportProviding(ctx context.Context, dataExport *dev1alpha1.DataExport, generatedNames Names) error {
-	log.Printf("Start realizing DE for resource %s, userPVC: %s, ttl: %s", dataExport.Name, dataExport.Spec.TargetRef.Name, dataExport.Spec.TTL)
+	logger := log.FromContext(ctx)
+	logger.Info("Start realizing DataExport", "target", dataExport.Spec.TargetRef.Name, "ttl", dataExport.Spec.TTL)
 
 	var exportPVC *corev1.PersistentVolumeClaim
 	// pv is fetched once during exportPVC creation and passed through to ensureExportPVReady
@@ -514,18 +517,18 @@ func (r *DataexportReconciler) implementDataExportProviding(ctx context.Context,
 	}
 
 	if exportPVC == nil {
-		log.Printf("Export PVC %s not found for DataExport resource %s, creating new one", generatedNames.ExportPVCName, dataExport.Name)
+		logger.Info("Export PVC not found for DataExport resource, creating new one", "exportPVC", generatedNames.ExportPVCName)
 
 		switch generatedNames.TargetKindShort {
 		case dev1alpha1.KindPVCShort:
-			log.Printf("Export target kind: %s", generatedNames.TargetKindShort)
+			logger.V(1).Info("Export target kind", "kind", generatedNames.TargetKindShort)
 			userPVCName = dataExport.Spec.TargetRef.Name
 			exportPVC, pv, err = r.getExportPVCFromUserPVC(ctx, dataExport.Namespace, userPVCName, generatedNames.ExportPVCName, dataExport.Name)
 			if err != nil {
 				return fmt.Errorf("failed to process user PVC export: %w", err)
 			}
 		case dev1alpha1.KindVirtualDiskShort:
-			log.Printf("Export target kind: %s", generatedNames.TargetKindShort)
+			logger.V(1).Info("Export target kind", "kind", generatedNames.TargetKindShort)
 			exportPVC, pv, userPVCName, err = r.getExportPVCFromUserVirtualDisk(ctx, dataExport, generatedNames)
 			if err != nil {
 				return fmt.Errorf("failed to process user VirtualDisk export: %w", err)
@@ -535,7 +538,7 @@ func (r *DataexportReconciler) implementDataExportProviding(ctx context.Context,
 			// Resource-agnostic snapshot path: any namespaced snapshot leaf (generic VolumeSnapshot,
 			// VirtualDiskSnapshot, domain snapshot, ...) is exported the same way — resolve the leaf's
 			// SnapshotContent.dataRef and provision the export PVC from the durable artifact via a VRR.
-			log.Printf("Export target kind: %s", generatedNames.TargetKindShort)
+			logger.V(1).Info("Export target kind", "kind", generatedNames.TargetKindShort)
 			exportPVC, err = r.getExportPVCFromSnapshot(ctx, dataExport, generatedNames)
 			if err != nil {
 				return fmt.Errorf("failed to process snapshot export: %w", err)
@@ -544,7 +547,7 @@ func (r *DataexportReconciler) implementDataExportProviding(ctx context.Context,
 			return fmt.Errorf("unknown export kind: %s", generatedNames.TargetKindShort)
 		}
 
-		log.Printf("Export PVC %s created for DataExport resource %s", exportPVC.GetName(), dataExport.Name)
+		logger.Info("Export PVC created for DataExport resource", "exportPVC", exportPVC.GetName())
 	}
 
 	// TODO: refactor this
@@ -638,7 +641,7 @@ func (r *DataexportReconciler) reconcilePodReadyResources(ctx context.Context, d
 		return err
 	}
 	if deploy == nil {
-		log.Printf("DataExport %s/%s server Deployment missing; re-provisioning", dataExport.Namespace, dataExport.Name)
+		log.FromContext(ctx).Info("DataExport server Deployment missing; re-provisioning", "deployment", generatedNames.DeployName)
 		meta.SetStatusCondition(&dataExport.Status.Conditions, metav1.Condition{
 			Type:               string(ConditionReady),
 			Status:             metav1.ConditionFalse,
@@ -867,7 +870,7 @@ func (r *DataexportReconciler) ensureExportPVReady(ctx context.Context, pv *core
 				return fmt.Errorf("export pvc volume %s not found", pvName)
 			}
 
-			log.Printf("Error getting PV %s: %v", pvName, err)
+			log.FromContext(ctx).Error(err, "Failed to get PV", "pv", pvName)
 			return err
 		}
 	}
@@ -902,7 +905,7 @@ func (r *DataexportReconciler) ensureExportPVReady(ctx context.Context, pv *core
 	}
 
 	if err := r.patchPVLabelAnnotationsClaimRef(ctx, pv, exportPVC, dataExport, generatedNames, userPVCName, mode); err != nil {
-		log.Printf("failed to patch PV %s: %v", pv.Name, err)
+		log.FromContext(ctx).Error(err, "Failed to patch PV", "pv", pv.Name)
 		return err
 	}
 
@@ -923,7 +926,8 @@ func (r *DataexportReconciler) detachPVC(ctx context.Context, userPVC *corev1.Pe
 		return nil, err
 	}
 
-	log.Printf("Detaching PVC %s/%s from PV %s", userPVC.Namespace, userPVC.Name, pv.Name)
+	logger := log.FromContext(ctx)
+	logger.Info("Detaching PVC from PV", "pvc", client.ObjectKeyFromObject(userPVC), "pv", pv.Name)
 	// Temporary PVC for dataExport pod
 	exportPVC := &corev1.PersistentVolumeClaim{
 		ObjectMeta: metav1.ObjectMeta{
@@ -942,7 +946,7 @@ func (r *DataexportReconciler) detachPVC(ctx context.Context, userPVC *corev1.Pe
 		},
 	}
 
-	log.Printf("Creating export PVC %s/%s for user PVC %s/%s", exportPVC.Namespace, exportPVC.Name, userPVC.Namespace, userPVC.Name)
+	logger.Info("Creating export PVC for user PVC", "exportPVC", client.ObjectKeyFromObject(exportPVC), "pvc", client.ObjectKeyFromObject(userPVC))
 	err := r.Client.Create(ctx, exportPVC)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create export PVC: %w", err)
@@ -1020,7 +1024,7 @@ func (r *DataexportReconciler) patchPVLabelAnnotationsClaimRef(ctx context.Conte
 	// Add labels for efficient List queries with MatchingLabels
 	updatedPv.Labels[dev1alpha1.LabelPVDataExporter] = "true"
 
-	log.Printf("Patching PV %s for attach to export PVC %s/%s", pv.Name, exportPVC.Namespace, exportPVC.Name)
+	log.FromContext(ctx).Info("Patching PV for attach to export PVC", "pv", pv.Name, "exportPVC", client.ObjectKeyFromObject(exportPVC))
 	err := r.Client.Patch(ctx, updatedPv, client.MergeFromWithOptions(pv, client.MergeFromWithOptimisticLock{}))
 	if err != nil {
 		return fmt.Errorf("failed to patch user PV: %w", err)
@@ -1107,7 +1111,7 @@ func (r *DataexportReconciler) handleInconsistentPV(ctx context.Context, pv *cor
 	}
 	updatedPV.Labels[dev1alpha1.LabelPVDataExporterInconsistent] = severity
 
-	log.Printf("Labeling PV %s as inconsistent with severity %q", pv.Name, severity)
+	log.FromContext(ctx).Info("Labeling PV as inconsistent", "pv", pv.Name, "severity", severity)
 	if err := r.Client.Patch(ctx, updatedPV, client.MergeFromWithOptions(pv, client.MergeFromWithOptimisticLock{})); err != nil {
 		return fmt.Errorf("failed to label PV %s as inconsistent: %w", pv.Name, err)
 	}
@@ -1156,6 +1160,7 @@ func (r *DataexportReconciler) ensureUserPVCExportingAnnotationAndFinalizer(ctx 
 // 1) Restores original reclaimPolicy from annotation (if saved, else return error)
 // 2) Removes all storage manager annotations and labels
 func (r *DataexportReconciler) restoreOriginalPVState(ctx context.Context, pv *corev1.PersistentVolume) error {
+	logger := log.FromContext(ctx)
 	updatedPV := pv.DeepCopy()
 
 	needUpdate, err := restorePVReclaimPolicy(updatedPV)
@@ -1163,22 +1168,25 @@ func (r *DataexportReconciler) restoreOriginalPVState(ctx context.Context, pv *c
 	if err != nil {
 		return err
 	}
+	if needUpdate {
+		logger.Info("Restoring reclaimPolicy for PV", "pv", pv.Name, "reclaimPolicy", updatedPV.Spec.PersistentVolumeReclaimPolicy)
+	}
 
 	if removePVExportMetadata(updatedPV) {
 		needUpdate = true
 	}
 
 	if !needUpdate {
-		log.Printf("PV %s already in original state, nothing to restore", pv.Name)
+		logger.V(1).Info("PV already in original state, nothing to restore", "pv", pv.Name)
 		return nil
 	}
 
-	log.Printf("Restoring PV %s to original state", pv.Name)
+	logger.Info("Restoring PV to original state", "pv", pv.Name)
 	if err := r.Client.Patch(ctx, updatedPV, client.MergeFromWithOptions(pv, client.MergeFromWithOptimisticLock{})); err != nil {
 		return fmt.Errorf("failed to restore PV %s: %w", pv.Name, err)
 	}
 
-	log.Printf("Successfully restored PV %s to original state", pv.Name)
+	logger.Info("Successfully restored PV to original state", "pv", pv.Name)
 	return nil
 }
 
@@ -1206,7 +1214,6 @@ func restorePVReclaimPolicy(pv *corev1.PersistentVolume) (bool, error) {
 	}
 
 	pv.Spec.PersistentVolumeReclaimPolicy = corev1.PersistentVolumeReclaimPolicy(originalPolicy)
-	log.Printf("Restoring reclaimPolicy %s for PV %s", originalPolicy, pv.Name)
 
 	return true, nil
 }
@@ -1302,10 +1309,11 @@ func (r *DataexportReconciler) validateExportDeploy(ctx context.Context, dataExp
 // Patch PV for attach it back to user's PVC
 // Delete the finalizer named by dev1alpha1.StorageManagerFinalizerName
 func (r *DataexportReconciler) clearDataExportProviding(ctx context.Context, dataExport *dev1alpha1.DataExport, generatedNames Names) error {
-	log.Printf("Start recovering configuration before Dataexport %s", dataExport.GetName())
+	logger := log.FromContext(ctx)
+	logger.Info("Start recovering configuration before DataExport")
 
 	// Remove deployment if exist
-	log.Printf("Deleting export deployment %s/%s", r.Config.ControllerNamespace, generatedNames.DeployName)
+	logger.Info("Deleting export deployment", "deployment", generatedNames.DeployName)
 	exportDeploy := &appsv1.Deployment{}
 	err := r.Client.Get(ctx, types.NamespacedName{Namespace: r.Config.ControllerNamespace, Name: generatedNames.DeployName}, exportDeploy)
 	if !kubeerrors.IsNotFound(err) { // if not found - do nothing
@@ -1316,16 +1324,16 @@ func (r *DataexportReconciler) clearDataExportProviding(ctx context.Context, dat
 		if err != nil {
 			return fmt.Errorf("error deletion export deployment: %w", err)
 		}
-		log.Printf("Export deployment %s deleted", generatedNames.DeployName)
+		logger.Info("Export deployment deleted", "deployment", generatedNames.DeployName)
 	}
 
 	// Delete exportPVC
-	log.Printf("Deleting export PVC %s/%s", r.Config.ControllerNamespace, generatedNames.ExportPVCName)
+	logger.Info("Deleting export PVC", "exportPVC", generatedNames.ExportPVCName)
 	exportPVC := &corev1.PersistentVolumeClaim{}
 	err = r.Client.Get(ctx, types.NamespacedName{Namespace: r.Config.ControllerNamespace, Name: generatedNames.ExportPVCName}, exportPVC)
 	if err != nil {
 		if kubeerrors.IsNotFound(err) {
-			log.Printf("Export PVC %s not found, nothing to delete. Continuing...", generatedNames.ExportPVCName)
+			logger.Info("Export PVC not found, nothing to delete. Continuing...", "exportPVC", generatedNames.ExportPVCName)
 		} else {
 			return fmt.Errorf("failed to get export PVC from cache: %w", err)
 		}
@@ -1334,12 +1342,12 @@ func (r *DataexportReconciler) clearDataExportProviding(ctx context.Context, dat
 		if err != nil {
 			return fmt.Errorf("error deletion export PVC: %w", err)
 		}
-		log.Printf("Export PVC %s deleted", generatedNames.ExportPVCName)
+		logger.Info("Export PVC deleted", "exportPVC", generatedNames.ExportPVCName)
 	}
 
 	switch generatedNames.TargetKindShort {
 	case dev1alpha1.KindPVCShort:
-		log.Printf("Export target kind: %s", generatedNames.TargetKindShort)
+		logger.V(1).Info("Export target kind", "kind", generatedNames.TargetKindShort)
 		// detach PVC from DataExport pod and patch PV for attach it back to user's PVC
 		userPVCNamespace := dataExport.Namespace
 		userPVCName := dataExport.Spec.TargetRef.Name
@@ -1349,7 +1357,7 @@ func (r *DataexportReconciler) clearDataExportProviding(ctx context.Context, dat
 		}
 
 	case dev1alpha1.KindVirtualDiskShort:
-		log.Printf("Export target kind: %s", generatedNames.TargetKindShort)
+		logger.V(1).Info("Export target kind", "kind", generatedNames.TargetKindShort)
 		err := r.recoverUserVirtualDisk(ctx, dataExport)
 		if err != nil {
 			return fmt.Errorf("failed to clear virtual disk: %w", err)
@@ -1359,7 +1367,7 @@ func (r *DataexportReconciler) clearDataExportProviding(ctx context.Context, dat
 		// Snapshot export creates no user-PVC detach and no clone VS; the only owned out-of-band object
 		// is the VolumeRestoreRequest that provisioned the export PVC. The export PVC itself is deleted
 		// above; deleting the VRR releases the restore record (it also self-expires by TTL).
-		log.Printf("Export target kind: %s", generatedNames.TargetKindShort)
+		logger.V(1).Info("Export target kind", "kind", generatedNames.TargetKindShort)
 		if err := r.deleteVolumeRestoreRequest(ctx, dataExport, generatedNames); err != nil {
 			return fmt.Errorf("failed to clear snapshot export VolumeRestoreRequest: %w", err)
 		}
@@ -1389,7 +1397,7 @@ func (r *DataexportReconciler) clearDataExportProviding(ctx context.Context, dat
 	}
 
 	// delete CA secret
-	log.Printf("Deleting CA secret for export target %s", generatedNames.TargetKindShort)
+	logger.Info("Deleting CA secret for export target", "kind", generatedNames.TargetKindShort)
 	dataExporterCASecret := &corev1.Secret{}
 	err = r.Client.Get(ctx, types.NamespacedName{Namespace: r.Config.ControllerNamespace, Name: generatedNames.CASecretName}, dataExporterCASecret)
 	if !kubeerrors.IsNotFound(err) { // if not found - do nothing
@@ -1400,7 +1408,7 @@ func (r *DataexportReconciler) clearDataExportProviding(ctx context.Context, dat
 		if err != nil {
 			return fmt.Errorf("error deletion CA secret: %w", err)
 		}
-		log.Printf("CA secret %s deleted", generatedNames.CASecretName)
+		logger.Info("CA secret deleted", "secret", generatedNames.CASecretName)
 	}
 
 	// Delete DataExoport finalizer
@@ -1408,7 +1416,7 @@ func (r *DataexportReconciler) clearDataExportProviding(ctx context.Context, dat
 		dataExport.Finalizers = []string{}
 	}
 
-	log.Printf("Recovering configuration before Dataexport %s finished", dataExport.GetName())
+	logger.Info("Recovering configuration before DataExport finished")
 	return nil
 }
 
@@ -1592,14 +1600,14 @@ func (r *DataexportReconciler) createDeployment(ctx context.Context, dataExport 
 				dev1alpha1.AnnotationStorageManagerNameKey:      dataExport.Name,
 			},
 		},
-		Spec: makeExportDeploySpec(exportPVC.Spec.VolumeMode, dataExport, dataExportPodImageName, dataExport.Spec.TTL, r.Config.ControllerNamespace, generatedNames),
+		Spec: makeExportDeploySpec(exportPVC.Spec.VolumeMode, dataExport, dataExportPodImageName, dataExport.Spec.TTL, r.Config.ControllerNamespace, r.Config.Loglevel, generatedNames),
 	}
 
 	err = r.Client.Create(ctx, &exportDeploy)
 	if err != nil {
 		return fmt.Errorf("failed to create DataExport deployment: %w", err)
 	}
-	log.Printf("DataExport deployment created!")
+	log.FromContext(ctx).Info("DataExport deployment created", "deployment", generatedNames.DeployName)
 
 	err = r.waitingForDeploymentLaunch(ctx, dataExport, generatedNames.DeployName)
 	if err != nil {
@@ -1610,6 +1618,8 @@ func (r *DataexportReconciler) createDeployment(ctx context.Context, dataExport 
 }
 
 func (r *DataexportReconciler) waitingForDeploymentLaunch(ctx context.Context, dataExport *dev1alpha1.DataExport, deployName string) error {
+	logger := log.FromContext(ctx)
+
 	// waiting for deployment launch
 	err := wait.PollUntilContextTimeout(ctx, 5*time.Second, 5*time.Minute, true, func(ctx context.Context) (bool, error) {
 		deploy := &appsv1.Deployment{}
@@ -1644,7 +1654,7 @@ func (r *DataexportReconciler) waitingForDeploymentLaunch(ctx context.Context, d
 				return false, getErr
 			}
 			if ServerState(fresh.Status.ServerState) != ServerStateReady {
-				log.Printf("Deployment %q available; awaiting exporter serverState=Ready\n", deployName)
+				logger.V(1).Info("Deployment available; awaiting exporter serverState=Ready", "deployment", deployName)
 				return false, nil
 			}
 			// The condition itself is set by the caller, after the export PV has been given its tracking
@@ -1653,10 +1663,10 @@ func (r *DataexportReconciler) waitingForDeploymentLaunch(ctx context.Context, d
 			return true, nil
 		}
 
-		log.Printf("Waiting for deployment %q: %d/%d replicas available\n",
-			deployName,
-			deploy.Status.AvailableReplicas,
-			*deploy.Spec.Replicas,
+		logger.V(1).Info("Waiting for deployment",
+			"deployment", deployName,
+			"availableReplicas", deploy.Status.AvailableReplicas,
+			"replicas", *deploy.Spec.Replicas,
 		)
 		return false, nil
 	})
@@ -1666,7 +1676,7 @@ func (r *DataexportReconciler) waitingForDeploymentLaunch(ctx context.Context, d
 	return err
 }
 
-func makeExportDeploySpec(pvMode *corev1.PersistentVolumeMode, dataExport *dev1alpha1.DataExport, dataExportPodImageName, ttl, controllerNamespace string, generatedNames Names) appsv1.DeploymentSpec {
+func makeExportDeploySpec(pvMode *corev1.PersistentVolumeMode, dataExport *dev1alpha1.DataExport, dataExportPodImageName, ttl, controllerNamespace string, logLevel logger.Verbosity, generatedNames Names) appsv1.DeploymentSpec {
 	deploySpec := appsv1.DeploymentSpec{
 		Replicas: Int32Ptr(1),
 		Selector: &metav1.LabelSelector{
@@ -1690,7 +1700,7 @@ func makeExportDeploySpec(pvMode *corev1.PersistentVolumeMode, dataExport *dev1a
 			Spec: corev1.PodSpec{
 				ServiceAccountName: ServiceAccountServer,
 				ImagePullSecrets:   []corev1.LocalObjectReference{{Name: ImagePullSecretsName}},
-				Containers:         makeContainerList(pvMode, dataExportPodImageName, ttl, dataExport.Namespace, dataExport.Name, controllerNamespace, generatedNames),
+				Containers:         makeContainerList(pvMode, dataExportPodImageName, ttl, dataExport.Namespace, dataExport.Name, controllerNamespace, logLevel, generatedNames),
 				// Read-only for a live volume, read-write for a snapshot restore -- see makeVolumeList.
 				Volumes: makeVolumeList(generatedNames.ExportPVCName, isLiveVolumeTarget(generatedNames.TargetKindShort)),
 			},
@@ -1699,7 +1709,7 @@ func makeExportDeploySpec(pvMode *corev1.PersistentVolumeMode, dataExport *dev1a
 	return deploySpec
 }
 
-func makeContainerList(pvMode *corev1.PersistentVolumeMode, image, ttl, dataExportNamespace, dataExportName, controllerNamespace string, generatedNames Names) []corev1.Container {
+func makeContainerList(pvMode *corev1.PersistentVolumeMode, image, ttl, dataExportNamespace, dataExportName, controllerNamespace string, logLevel logger.Verbosity, generatedNames Names) []corev1.Container {
 	var containers []corev1.Container
 	portArg := fmt.Sprintf("--port=%d", FileServerPort)
 	ttlArg := fmt.Sprintf("--ttl=%s", ttl)
@@ -1718,16 +1728,7 @@ func makeContainerList(pvMode *corev1.PersistentVolumeMode, image, ttl, dataExpo
 				Name:  "data-exporter",
 				Image: image,
 				Args:  []string{"--mode=block", "--path=/mnt/block-storage", portArg, ttlArg, dataExportNamespaceArg, dataExportNameArg, exportTargetKindShortArg, exportTargetNameArg, dataExportCASecretNameArg, dataExportServiceNameArg, controllerNamespaceArg},
-				Env: []corev1.EnvVar{
-					{
-						Name: "POD_IP",
-						ValueFrom: &corev1.EnvVarSource{
-							FieldRef: &corev1.ObjectFieldSelector{
-								FieldPath: "status.podIP",
-							},
-						},
-					},
-				},
+				Env:   ServerEnv(logLevel),
 				VolumeDevices: []corev1.VolumeDevice{
 					{
 						Name:       "export-pvc",
@@ -1745,16 +1746,7 @@ func makeContainerList(pvMode *corev1.PersistentVolumeMode, image, ttl, dataExpo
 				Name:  "data-exporter",
 				Image: image,
 				Args:  []string{"--mode=filesystem", "--path=/mnt/filesystem-storage", portArg, ttlArg, dataExportNamespaceArg, dataExportNameArg, exportTargetKindShortArg, exportTargetNameArg, dataExportCASecretNameArg, dataExportServiceNameArg, controllerNamespaceArg},
-				Env: []corev1.EnvVar{
-					{
-						Name: "POD_IP",
-						ValueFrom: &corev1.EnvVarSource{
-							FieldRef: &corev1.ObjectFieldSelector{
-								FieldPath: "status.podIP",
-							},
-						},
-					},
-				},
+				Env:   ServerEnv(logLevel),
 				VolumeMounts: []corev1.VolumeMount{
 					{
 						Name:      "export-pvc",
@@ -1828,12 +1820,14 @@ func (r *DataexportReconciler) getExportPVCFromUserPVC(ctx context.Context, user
 // pv is non-nil when called from removeOrphanResources, where it was already fetched
 // during the PV list scan.
 func (r *DataexportReconciler) recoverUserPVC(ctx context.Context, userPVCNamespace, userPVCName, dataExportName string, pv *corev1.PersistentVolume) error {
-	log.Printf("Recovering user PVC %s/%s", userPVCNamespace, userPVCName)
+	logger := log.FromContext(ctx)
+	userPVCKey := types.NamespacedName{Namespace: userPVCNamespace, Name: userPVCName}
+	logger.Info("Recovering user PVC", "pvc", userPVCKey)
 	userPVC := &corev1.PersistentVolumeClaim{}
-	err := r.Client.Get(ctx, types.NamespacedName{Namespace: userPVCNamespace, Name: userPVCName}, userPVC)
+	err := r.Client.Get(ctx, userPVCKey, userPVC)
 	if err != nil {
 		if kubeerrors.IsNotFound(err) {
-			log.Printf("User PVC %s not found, nothing to recover", userPVCName)
+			logger.Info("User PVC not found, nothing to recover", "pvc", userPVCKey)
 			return nil // Nothing to recover, PVC does not exist
 		}
 		return fmt.Errorf("failed to get user PVC %s/%s: %w", userPVCNamespace, userPVCName, err)
@@ -1862,7 +1856,7 @@ func (r *DataexportReconciler) recoverUserPVC(ctx context.Context, userPVCNamesp
 	// stalling cleanup forever). The absence of our export marker label means the PV was already restored
 	// (or never exported by us) — there is nothing to recover; just make the user PVC cleanup idempotent.
 	if pv.Labels[dev1alpha1.LabelPVDataExporter] != "true" {
-		log.Printf("PV %s carries no export marker; user PVC %s already restored, ensuring cleanup", pv.Name, userPVC.GetName())
+		logger.Info("PV carries no export marker; user PVC already restored, ensuring cleanup", "pv", pv.Name, "pvc", userPVCKey)
 		return r.removeUserPVCExportingAnnotationsAndFinalizer(ctx, userPVC)
 	}
 
@@ -1880,7 +1874,7 @@ func (r *DataexportReconciler) recoverUserPVC(ctx context.Context, userPVCNamesp
 	// Check if PV is in working state
 	err = validateUserPVCInWorkingState(userPVC, pv)
 	if err != nil {
-		log.Printf("User PVC %s is not in working state: %v. Attempting to recover...", userPVC.GetName(), err)
+		logger.Info("User PVC is not in working state. Attempting to recover...", "pvc", userPVCKey, "reason", err.Error())
 		// Patch PV to change ClaimRef to user PVC
 		updatedPV := pv.DeepCopy()
 		updatedPV.Spec.ClaimRef = &corev1.ObjectReference{
@@ -1894,7 +1888,7 @@ func (r *DataexportReconciler) recoverUserPVC(ctx context.Context, userPVCNamesp
 		if err != nil {
 			return fmt.Errorf("recover user PVC: failed to patch user PV: %w", err)
 		}
-		log.Printf("User PVC %s recovered successfully", userPVC.GetName())
+		logger.Info("User PVC recovered successfully", "pvc", userPVCKey)
 
 		// Update pv with the patched version (including new ResourceVersion from API server)
 		// so that restoreOriginalPVState below uses the correct ResourceVersion for optimistic locking.
@@ -1907,7 +1901,7 @@ func (r *DataexportReconciler) recoverUserPVC(ctx context.Context, userPVCNamesp
 		return err
 	}
 
-	log.Printf("User PVC %s is in working state, ready to be used again", userPVC.GetName())
+	logger.Info("User PVC is in working state, ready to be used again", "pvc", userPVCKey)
 
 	// Remove annotations and labels from PV, and restore original reclaimPolicy.
 	// NOTE: This is intentionally a separate PV patch from ClaimRef rebinding above.
@@ -1920,7 +1914,7 @@ func (r *DataexportReconciler) recoverUserPVC(ctx context.Context, userPVCNamesp
 		return fmt.Errorf("failed to remove annotations/labels from PV: %w", err)
 	}
 
-	log.Printf("Successfully removed annotations and labels from PV: %s", pv.GetName())
+	logger.Info("Successfully removed annotations and labels from PV", "pv", pv.GetName())
 	return nil
 }
 
@@ -1928,7 +1922,8 @@ func (r *DataexportReconciler) getExportPVCFromUserVirtualDisk(ctx context.Conte
 	userNamespace := dataExport.Namespace
 	userVirtualDiskName := dataExport.Spec.TargetRef.Name
 
-	log.Printf("Processing user VirtualDisk %s/%s export for DataExport resource %s", userNamespace, userVirtualDiskName, dataExport.Name)
+	logger := log.FromContext(ctx).WithValues("virtualDisk", types.NamespacedName{Namespace: userNamespace, Name: userVirtualDiskName})
+	logger.Info("Processing user VirtualDisk export for DataExport resource")
 
 	userPVCName, err := r.prepareVirtualDiskForExportAndGetPVCName(ctx, userNamespace, userVirtualDiskName)
 	if err != nil {
@@ -1944,14 +1939,14 @@ func (r *DataexportReconciler) getExportPVCFromUserVirtualDisk(ctx context.Conte
 		return nil, nil, "", fmt.Errorf("%w: VirtualDisk %s/%s is not ready for export", ErrTargetNotReady, userNamespace, userVirtualDiskName)
 	}
 
-	log.Printf("User VirtualDisk %s/%s is ready, using PVC %s/%s for export", userNamespace, userVirtualDiskName, userNamespace, userPVCName)
+	logger.Info("User VirtualDisk is ready, using its PVC for export", "pvc", userPVCName)
 
 	exportPVC, pv, err := r.getExportPVCFromUserPVC(ctx, userNamespace, userPVCName, generatedNames.ExportPVCName, dataExport.Name)
 	return exportPVC, pv, userPVCName, err
 }
 
 func (r *DataexportReconciler) prepareVirtualDiskForExportAndGetPVCName(ctx context.Context, namespace, virtualDiskName string) (string, error) {
-	log.Printf("Preparing user VirtualDisk %s/%s for export", namespace, virtualDiskName)
+	log.FromContext(ctx).Info("Preparing user VirtualDisk for export", "virtualDisk", types.NamespacedName{Namespace: namespace, Name: virtualDiskName})
 
 	// Fetch the VirtualDisk resource
 	virtualDisk := &virtv1alpha2.VirtualDisk{}
@@ -1996,7 +1991,8 @@ func (r *DataexportReconciler) prepareVirtualDiskForExportAndGetPVCName(ctx cont
 // Check if the VirtualDisk is already in use for export
 
 func (r *DataexportReconciler) isVirtualDiskReadyForExport(ctx context.Context, namespace, virtualDiskName string) (bool, error) {
-	log.Printf("Checking if user VirtualDisk %s/%s is ready for export", namespace, virtualDiskName)
+	logger := log.FromContext(ctx).WithValues("virtualDisk", types.NamespacedName{Namespace: namespace, Name: virtualDiskName})
+	logger.V(1).Info("Checking if user VirtualDisk is ready for export")
 
 	err := wait.PollUntilContextTimeout(ctx, 1*time.Second, 3*time.Second, true, func(ctx context.Context) (bool, error) {
 		// Re-fetch the VirtualDisk to ensure we have the latest state
@@ -2026,30 +2022,31 @@ func (r *DataexportReconciler) isVirtualDiskReadyForExport(ctx context.Context, 
 		}
 
 		if isReady && isReadyForExport {
-			log.Printf("VirtualDisk %s/%s is ready for export", namespace, virtualDiskName)
+			logger.V(1).Info("VirtualDisk is ready for export")
 			return true, nil
 		}
 
-		log.Printf("VirtualDisk %s/%s is not ready for export yet, waiting...", namespace, virtualDiskName)
+		logger.V(1).Info("VirtualDisk is not ready for export yet, waiting...")
 		return false, nil
 	})
 	if err != nil {
 		return false, fmt.Errorf("failed to check if user VirtualDisk %s/%s is ready for export: %w", namespace, virtualDiskName, err)
 	}
 
-	log.Printf("User VirtualDisk %s/%s is ready for export", namespace, virtualDiskName)
+	logger.Info("User VirtualDisk is ready for export")
 	return true, nil
 }
 
 func (r *DataexportReconciler) recoverUserVirtualDisk(ctx context.Context, dataExport *dev1alpha1.DataExport) error {
-	log.Printf("Recovering VirtualDisk for DataExport resource %s/%s", dataExport.Namespace, dataExport.Name)
 	userNamespace := dataExport.Namespace
 	userVirtualDiskName := dataExport.Spec.TargetRef.Name
+	logger := log.FromContext(ctx).WithValues("virtualDisk", types.NamespacedName{Namespace: userNamespace, Name: userVirtualDiskName})
+	logger.Info("Recovering VirtualDisk for DataExport resource")
 	userVirtualDisk := &virtv1alpha2.VirtualDisk{}
 	err := r.Client.Get(ctx, types.NamespacedName{Namespace: userNamespace, Name: userVirtualDiskName}, userVirtualDisk)
 	if err != nil {
 		if kubeerrors.IsNotFound(err) {
-			log.Printf("User VirtualDisk %s/%s not found, nothing to recover", userNamespace, userVirtualDiskName)
+			logger.Info("User VirtualDisk not found, nothing to recover")
 			return nil // Nothing to recover, VirtualDisk does not exist
 		}
 		return fmt.Errorf("failed to get user VirtualDisk %s/%s: %w", userNamespace, userVirtualDiskName, err)
@@ -2216,7 +2213,8 @@ func removePVExportMetadata(updatePV *corev1.PersistentVolume) bool {
 // 3) Recovers userPVC (restores PV binding and original reclaimPolicy)
 // This is triggered by the PV watch when DataExport is not found during reconciliation.
 func (r *DataexportReconciler) removeOrphanResources(ctx context.Context, dataExportNamespace, dataExportName string) error {
-	log.Printf("Starting cleanup of orphaned resources for deleted DataExport %s/%s", dataExportNamespace, dataExportName)
+	logger := log.FromContext(ctx)
+	logger.Info("Starting cleanup of orphaned resources for deleted DataExport")
 
 	// List PVs with data-exporter label. The cache now contains all PVs (no label filter),
 	// so we must use MatchingLabels to filter only PVs managed by DataExport.
@@ -2234,14 +2232,14 @@ func (r *DataexportReconciler) removeOrphanResources(ctx context.Context, dataEx
 			continue
 		}
 
-		log.Printf("Found orphaned PV %s for deleted DataExport %s/%s", pv.Name, dataExportNamespace, dataExportName)
+		logger.Info("Found orphaned PV for deleted DataExport", "pv", pv.Name)
 
 		// Validate and extract recovery info from PV annotations.
 		// If annotations are corrupted, label the PV as inconsistent and stop reconcile
 		// instead of attempting cleanup with wrong values.
 		pvInfo, err := parsePVRecoveryInfo(pv, dataExportNamespace, dataExportName)
 		if err != nil {
-			log.Printf("PV %s has inconsistent state: %v", pv.Name, err)
+			logger.Error(err, "PV has inconsistent state", "pv", pv.Name)
 			if labelErr := r.handleInconsistentPV(ctx, pv); labelErr != nil {
 				return fmt.Errorf("failed to label inconsistent PV %s: %w", pv.Name, labelErr)
 			}
@@ -2267,7 +2265,7 @@ func (r *DataexportReconciler) removeOrphanResources(ctx context.Context, dataEx
 		break
 	}
 
-	log.Printf("cleanup complete: %s/%s", dataExportNamespace, dataExportName)
+	logger.Info("Cleanup of orphaned resources complete")
 	return nil
 }
 
@@ -2283,7 +2281,7 @@ func (r *DataexportReconciler) recoverOrphanedUserPVC(ctx context.Context, pv *c
 	// be observed until now only because a snapshot export's PV carried no tracking label at all, so
 	// orphan discovery never reached it.
 	if userPVCName == "" {
-		log.Printf("No user PVC to recover (snapshot-based export), cleaning up PV annotations only")
+		log.FromContext(ctx).Info("No user PVC to recover (snapshot-based export), cleaning up PV annotations only", "pv", pv.Name)
 
 		if err := r.restoreOriginalPVState(ctx, pv); err != nil {
 			return fmt.Errorf("failed to remove storage manager annotations and labels from PV %s: %w", pv.Name, err)

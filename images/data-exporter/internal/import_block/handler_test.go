@@ -20,7 +20,6 @@ import (
 	"context"
 	"errors"
 	"io"
-	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -41,6 +40,7 @@ import (
 	"github.com/deckhouse/sds-common-lib/fs"
 	"github.com/deckhouse/sds-common-lib/fs/failer"
 	fakefs "github.com/deckhouse/sds-common-lib/fs/fake"
+	"github.com/deckhouse/sds-common-lib/logger"
 	api "github.com/deckhouse/storage-foundation/api/v1alpha1"
 	"github.com/deckhouse/storage-foundation/common"
 	"github.com/deckhouse/storage-foundation/images/data-exporter/internal/config"
@@ -117,7 +117,7 @@ func newConfig() *config.Config {
 func newHandlerWith(t *testing.T, fsys fs.OS, client *repository.Client) *importblock.ImportBlockHandler {
 	t.Helper()
 
-	handler, err := importblock.NewImportBlockHandler(fsys, devicePath, slog.New(slog.DiscardHandler), client, newConfig(), client)
+	handler, err := importblock.NewImportBlockHandler(fsys, devicePath, logger.NewNop(), client, newConfig(), client)
 	require.NoError(t, err)
 	require.NotNil(t, handler)
 
@@ -176,7 +176,7 @@ func TestNewImportBlockHandlerRefusesWhatIsNotAUsableBlockDevice(t *testing.T) {
 			dev := newDevice(t, tc.content)
 			client := newClient(t, "", interceptor.Funcs{})
 
-			handler, err := importblock.NewImportBlockHandler(dev.fsys, tc.path, slog.New(slog.DiscardHandler), client, newConfig(), client)
+			handler, err := importblock.NewImportBlockHandler(dev.fsys, tc.path, logger.NewNop(), client, newConfig(), client)
 
 			require.ErrorContains(t, err, tc.wantErr)
 			require.Nil(t, handler)
@@ -196,7 +196,7 @@ func TestNewImportBlockHandlerFailsWhenDeviceCannotBeRead(t *testing.T) {
 			}})
 			client := newClient(t, "", interceptor.Funcs{})
 
-			handler, err := importblock.NewImportBlockHandler(fsys, devicePath, slog.New(slog.DiscardHandler), client, newConfig(), client)
+			handler, err := importblock.NewImportBlockHandler(fsys, devicePath, logger.NewNop(), client, newConfig(), client)
 
 			require.ErrorIs(t, err, errInjected)
 			require.Nil(t, handler)
@@ -210,7 +210,7 @@ func TestNewImportBlockHandlerFailsWithoutDataImport(t *testing.T) {
 	require.NoError(t, api.AddToScheme(scheme))
 	client := &repository.Client{Client: fake.NewClientBuilder().WithScheme(scheme).Build()}
 
-	handler, err := importblock.NewImportBlockHandler(dev.fsys, devicePath, slog.New(slog.DiscardHandler), client, newConfig(), client)
+	handler, err := importblock.NewImportBlockHandler(dev.fsys, devicePath, logger.NewNop(), client, newConfig(), client)
 
 	require.True(t, apierrors.IsNotFound(err), "err=%v", err)
 	require.Nil(t, handler)

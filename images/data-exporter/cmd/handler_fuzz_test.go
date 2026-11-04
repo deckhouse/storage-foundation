@@ -19,7 +19,6 @@ package main
 import (
 	"bytes"
 	"encoding/base64"
-	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -31,6 +30,7 @@ import (
 
 	"github.com/deckhouse/sds-common-lib/fs/failer"
 	"github.com/deckhouse/sds-common-lib/fs/fake"
+	"github.com/deckhouse/sds-common-lib/logger"
 	"github.com/deckhouse/storage-foundation/common"
 	"github.com/deckhouse/storage-foundation/images/data-exporter/internal/authorization"
 	"github.com/deckhouse/storage-foundation/images/data-exporter/internal/config"
@@ -185,7 +185,7 @@ func FuzzHandler(f *testing.F) {
 	}
 
 	fsys := createFsFuzzTest(f)
-	logger := slog.New(slog.DiscardHandler)
+	logger := logger.NewNop()
 
 	f.Fuzz(func(t *testing.T, authType string, basicCreds string, bearerToken string, wrongAuth string, rawURL string, methodIdx int, body []byte, failSeed int64, failProb byte) {
 		// Failure injection is a decorator around the filesystem now, not a field on the

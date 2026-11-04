@@ -18,10 +18,10 @@ package main
 
 import (
 	"fmt"
-	"log/slog"
 	"net/http"
 
 	"github.com/deckhouse/sds-common-lib/fs"
+	"github.com/deckhouse/sds-common-lib/logger"
 	"github.com/deckhouse/storage-foundation/common"
 	"github.com/deckhouse/storage-foundation/images/data-exporter/internal/authorization"
 	"github.com/deckhouse/storage-foundation/images/data-exporter/internal/config"
@@ -75,7 +75,7 @@ func NewDataServerHandler(
 	finishedHandler http.Handler,
 	authorizer authorization.UserAuthorizer,
 	accounting func(http.Handler) http.Handler,
-	logger *slog.Logger,
+	logger logger.Logger,
 ) (http.Handler, error) {
 	switch cfg.Mode {
 	case config.VolumeModeBlock:
@@ -103,7 +103,7 @@ func NewDataServerHandler(
 	return middleware.Chain(mux, middlewares...), nil
 }
 
-func NewExporterHandler(fsys fs.OS, path string, mode config.VolumeMode, logger *slog.Logger) (http.Handler, error) {
+func NewExporterHandler(fsys fs.OS, path string, mode config.VolumeMode, logger logger.Logger) (http.Handler, error) {
 	switch mode {
 	case config.VolumeModeBlock:
 		return export_block.NewBlockExporter(fsys, path, logger)
@@ -114,7 +114,7 @@ func NewExporterHandler(fsys fs.OS, path string, mode config.VolumeMode, logger 
 	}
 }
 
-func NewImportHandler(fsys fs.OS, path string, mode config.VolumeMode, logger *slog.Logger, client *repository.Client, cfg *config.Config, repository *repository.Client) (http.Handler, error) {
+func NewImportHandler(fsys fs.OS, path string, mode config.VolumeMode, logger logger.Logger, client *repository.Client, cfg *config.Config, repository *repository.Client) (http.Handler, error) {
 	switch mode {
 	case config.VolumeModeBlock:
 		return importblock.NewImportBlockHandler(fsys, path, logger, client, cfg, repository)
@@ -126,7 +126,7 @@ func NewImportHandler(fsys fs.OS, path string, mode config.VolumeMode, logger *s
 }
 
 // Add handlers for filesystem export mode
-func MuxAddFSHandler(mux router, opt config.URLOpt, handler http.Handler, logger *slog.Logger) {
+func MuxAddFSHandler(mux router, opt config.URLOpt, handler http.Handler, logger logger.Logger) {
 	muxAddHandler(mux, "files/", opt, handler, logger)
 	muxAddHandler(mux, "files", opt, http.HandlerFunc(export_filesystem.WrongPrefixFilesInformer), logger)
 	muxAddHandler(mux, "block", opt, http.HandlerFunc(export_filesystem.WrongPrefixBlockInformer), logger)
@@ -134,28 +134,26 @@ func MuxAddFSHandler(mux router, opt config.URLOpt, handler http.Handler, logger
 }
 
 // Add handlers for block device export mode
-func MuxAddBlockHandler(mux router, opt config.URLOpt, handler http.Handler, logger *slog.Logger) {
+func MuxAddBlockHandler(mux router, opt config.URLOpt, handler http.Handler, logger logger.Logger) {
 	muxAddHandler(mux, "block", opt, handler, logger)
 	muxAddHandler(mux, "block/", opt, http.HandlerFunc(export_block.WrongPrefixBlockInformer), logger)
 	muxAddHandler(mux, "files", opt, http.HandlerFunc(export_block.WrongPrefixFilesInformer), logger)
 	muxAddHandler(mux, "files/", opt, http.HandlerFunc(export_block.WrongPrefixFilesInformer), logger)
 }
 
-func muxAddHandler(mux router, suffix string, opt config.URLOpt, handler http.Handler, logger *slog.Logger) {
+func muxAddHandler(mux router, suffix string, opt config.URLOpt, handler http.Handler, logger logger.Logger) {
 	shortPrefix := fmt.Sprintf("/api/v1/%s", suffix)
 	// GetPathPrefix already ends with "/", so the suffix is appended WITHOUT a leading slash. With one, the
 	// long pattern gets a "//" (".../<name>//api/v1/<suffix>") that http.ServeMux never matches against a
 	// cleaned single-slash request: a call through the published long URL 404s while the short path keeps
 	// working, which reads as a routing mystery rather than a typo.
 	longPrefix := fmt.Sprintf("%sapi/v1/%s", GetPathPrefix(opt), suffix)
-	if logger != nil {
-		logger.Info(
-			"Registering HTTP handler",
-			"shortPathPrefix", shortPrefix,
-			"servedPathPrefix", GetPathPrefix(opt),
-			"longPathPrefix", longPrefix,
-		)
-	}
+	logger.Info(
+		"Registering HTTP handler",
+		"shortPathPrefix", shortPrefix,
+		"servedPathPrefix", GetPathPrefix(opt),
+		"longPathPrefix", longPrefix,
+	)
 	mux.Handle(longPrefix, http.StripPrefix(longPrefix, handler))
 	mux.Handle(shortPrefix, http.StripPrefix(shortPrefix, handler))
 }
@@ -178,7 +176,7 @@ func GetPathPrefix(opt config.URLOpt) string {
 // wrong moment. The other side of the same coin: because the accounting is byte-based, a completion cannot
 // refresh status.accessTimestamp either, so the observable trace of this call is the serverState transition
 // it performs and not the timestamp.
-func NewFinishedHandler(stateSetter ttl_control.DataManagerServerStateSetter, cfg *config.Config, logger *slog.Logger) http.Handler {
+func NewFinishedHandler(stateSetter ttl_control.DataManagerServerStateSetter, cfg *config.Config, logger logger.Logger) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
@@ -194,6 +192,6 @@ func NewFinishedHandler(stateSetter ttl_control.DataManagerServerStateSetter, cf
 }
 
 // Register the unified end-of-upload endpoint (short and long prefixes)
-func MuxAddFinishedHandler(mux router, opt config.URLOpt, handler http.Handler, logger *slog.Logger) {
+func MuxAddFinishedHandler(mux router, opt config.URLOpt, handler http.Handler, logger logger.Logger) {
 	muxAddHandler(mux, "finished", opt, handler, logger)
 }

@@ -24,6 +24,8 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
+
+	"github.com/deckhouse/sds-common-lib/logger"
 )
 
 type ServerContainerCfg struct {
@@ -36,6 +38,8 @@ type ServerContainerCfg struct {
 	ServerMode          ServerMode
 	Names               Names
 	ControllerNamespace string
+	// LogLevel is handed to the server as LOG_LEVEL; see ServerEnv.
+	LogLevel logger.Verbosity
 }
 
 func MakeServerContainer(ctx context.Context, client client.Client, cfg ServerContainerCfg) (*corev1.Container, error) {
@@ -101,24 +105,39 @@ func MakeServerContainer(ctx context.Context, client client.Client, cfg ServerCo
 	}
 
 	return &corev1.Container{
-		Name:  "server",
-		Image: image,
-		Args:  args,
-		Env: []corev1.EnvVar{
-			{
-				Name: "POD_IP",
-				ValueFrom: &corev1.EnvVarSource{
-					FieldRef: &corev1.ObjectFieldSelector{
-						FieldPath: "status.podIP",
-					},
-				},
-			},
-		},
+		Name:            "server",
+		Image:           image,
+		Args:            args,
+		Env:             ServerEnv(cfg.LogLevel),
 		VolumeMounts:    volumeMounts,
 		VolumeDevices:   volumeDevices,
 		Ports:           []corev1.ContainerPort{{Name: "http", ContainerPort: FileServerPort}},
 		SecurityContext: ServerSecurityContext(cfg.ServerMode, cfg.VolumeMode),
 	}, nil
+}
+
+// ServerEnv is the environment of the exporter and importer server container.
+//
+// LOG_LEVEL carries the controller's own verbosity: the server pods have no Helm template of their own, so
+// the controller is the only thing that can pass the module's log level on to them. An empty logLevel leaves
+// the variable unset, and the server falls back to its default.
+func ServerEnv(logLevel logger.Verbosity) []corev1.EnvVar {
+	env := []corev1.EnvVar{
+		{
+			Name: "POD_IP",
+			ValueFrom: &corev1.EnvVarSource{
+				FieldRef: &corev1.ObjectFieldSelector{
+					FieldPath: "status.podIP",
+				},
+			},
+		},
+	}
+
+	if logLevel != "" {
+		env = append(env, corev1.EnvVar{Name: logger.EnvLogLevel, Value: string(logLevel)})
+	}
+
+	return env
 }
 
 func ServerSecurityContext(serverMode ServerMode, volumeMode corev1.PersistentVolumeMode) *corev1.SecurityContext {

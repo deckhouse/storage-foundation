@@ -63,6 +63,7 @@ func (r *DataImportReconciler) getServerContainerCfg(pvc *corev1.PersistentVolum
 		ServerMode:          common.ServerModeImport,
 		ControllerNamespace: r.Config.ControllerNamespace,
 		Names:               r.names,
+		LogLevel:            r.Config.Loglevel,
 	}
 }
 

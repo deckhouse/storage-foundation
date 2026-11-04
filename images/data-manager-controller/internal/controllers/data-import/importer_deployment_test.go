@@ -31,6 +31,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
+	"github.com/deckhouse/sds-common-lib/logger"
 	dev1alpha1 "github.com/deckhouse/storage-foundation/api/v1alpha1"
 	"github.com/deckhouse/storage-foundation/common"
 	"github.com/deckhouse/storage-foundation/common/config"
@@ -320,4 +321,23 @@ func TestStopImporter(t *testing.T) {
 		require.NoError(t, err)
 		assert.True(t, stopped)
 	})
+}
+
+// TestEnsureImporterDeployment_PassesLogLevel guards that the importer pod logs at the controller's level:
+// the level the reconciler was configured with reaches the server container as LOG_LEVEL.
+func TestEnsureImporterDeployment_PassesLogLevel(t *testing.T) {
+	t.Parallel()
+
+	pvc := scratchPVCFixture(corev1.PersistentVolumeFilesystem)
+	r, _ := newImporterDeploymentReconciler(t, nil)
+	r.Config.Loglevel = logger.DebugLevel
+
+	require.NoError(t, r.ensureImporterDeployment(context.Background(), pvc))
+
+	deploy := &appsv1.Deployment{}
+	require.NoError(t, r.Client.Get(context.Background(),
+		types.NamespacedName{Namespace: importerDeploymentControllerNS, Name: r.names.DeployName}, deploy))
+
+	require.Len(t, deploy.Spec.Template.Spec.Containers, 1)
+	assert.Contains(t, deploy.Spec.Template.Spec.Containers[0].Env, corev1.EnvVar{Name: "LOG_LEVEL", Value: "3"})
 }

@@ -18,19 +18,19 @@ package certutil
 
 import (
 	"crypto/x509"
-	"log/slog"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/require"
 
+	"github.com/deckhouse/sds-common-lib/logger"
 	"github.com/deckhouse/storage-foundation/common"
 )
 
 // TestServerCertificatePassesTheIngressCheck verifies the serving certificate the way the Ingress does:
 // against the CA the pod publishes, under the name common.BackendServerName gives the Ingress.
 func TestServerCertificatePassesTheIngressCheck(t *testing.T) {
-	bundle, err := GenerateTLSBundle(slog.Default(), "10.0.0.1", "service-for-pvc-abc", "d8-storage-foundation", time.Hour)
+	bundle, err := GenerateTLSBundle(logger.NewNop(), "10.0.0.1", "service-for-pvc-abc", "d8-storage-foundation", time.Hour)
 	require.NoError(t, err)
 
 	roots := x509.NewCertPool()

@@ -21,7 +21,6 @@ import (
 	"context"
 	"errors"
 	"io"
-	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -31,6 +30,8 @@ import (
 	"time"
 
 	"github.com/stretchr/testify/require"
+
+	"github.com/deckhouse/sds-common-lib/logger"
 )
 
 // Cadence of this suite, defined once so the tests cannot drift apart. Only the ratios matter: one idle
@@ -64,7 +65,7 @@ const (
 // the test — the production semantics (countdown after last-request, reset on transferred bytes) are
 // untouched.
 func fastIdleTimer(ttl, tick time.Duration) *IdleTimer {
-	tm := NewIdleTimer(ttl, slog.Default())
+	tm := NewIdleTimer(ttl, logger.NewNop())
 	tm.ticker.Stop()
 	tm.ticker = time.NewTicker(tick)
 	return tm

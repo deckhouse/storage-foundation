@@ -19,13 +19,13 @@ package server
 import (
 	"context"
 	"fmt"
-	"log"
 
 	corev1 "k8s.io/api/core/v1"
 	kubeerrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	dev1alpha1 "github.com/deckhouse/storage-foundation/api/v1alpha1"
 	"github.com/deckhouse/storage-foundation/common"
@@ -40,12 +40,13 @@ type PodReconciler struct {
 
 func (r *PodReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	if req.Namespace == r.Config.ControllerNamespace {
+		logger := log.FromContext(ctx)
 		pod := &corev1.Pod{}
 		err := r.Client.Get(ctx, req.NamespacedName, pod)
 		if err != nil {
 			if kubeerrors.IsNotFound(err) {
 				// Pod not found, it may have been deleted after the event was received.
-				log.Printf("Pod %s/%s not found, it may have been deleted\n", req.Namespace, req.Name)
+				logger.Info("Pod not found, it may have been deleted")
 				return ctrl.Result{}, nil
 			}
 			return ctrl.Result{}, fmt.Errorf("failed to get pod from cache: %w", err)
@@ -61,7 +62,7 @@ func (r *PodReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.R
 			if dataExportNamespacedName.Name, ok = pod.Annotations[dev1alpha1.AnnotationStorageManagerNameKey]; !ok {
 				return ctrl.Result{}, nil
 			}
-			log.Printf("Found running DataManager pod: %s/%s\n", req.Namespace, req.Name)
+			logger.V(1).Info("Found running DataManager pod")
 
 			operation, err := getOperationFromPod(pod)
 			if err != nil {
@@ -75,8 +76,7 @@ func (r *PodReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.R
 					// its pod is still terminating. There is nothing to update; the pod is reaped by the
 					// owner's finalizer cleanup, not by this reconciler. Log and stop without requeue so a
 					// short-lived orphan pod does not produce an error-requeue storm.
-					log.Printf("Owner DataManager %s/%s not found for pod %s/%s, skipping URL update\n",
-						dataExportNamespacedName.Namespace, dataExportNamespacedName.Name, req.Namespace, req.Name)
+					logger.Info("Owner DataManager not found for pod, skipping URL update", "owner", dataExportNamespacedName)
 					return ctrl.Result{}, nil
 				}
 				return ctrl.Result{}, fmt.Errorf("failed to get DataManager resource from cache: %w", err)
@@ -90,7 +90,7 @@ func (r *PodReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.R
 				if err != nil {
 					return ctrl.Result{}, fmt.Errorf("failed update URL for DataManager pod for DataManager resource %s, %s: %w", dataExportNamespacedName.Namespace, dataExportNamespacedName.Name, err)
 				}
-				log.Printf("URL for DataManager updated: %s/%s\n", req.Namespace, req.Name)
+				logger.Info("URL for DataManager updated", "owner", dataExportNamespacedName, "url", url)
 			}
 
 			return ctrl.Result{}, nil

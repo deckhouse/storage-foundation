@@ -23,7 +23,6 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
-	"log/slog"
 	"mime"
 	"net/http"
 	"net/url"
@@ -34,6 +33,7 @@ import (
 	"time"
 
 	d8fs "github.com/deckhouse/sds-common-lib/fs"
+	"github.com/deckhouse/sds-common-lib/logger"
 	"github.com/deckhouse/storage-foundation/images/data-exporter/internal/httpiohelpers"
 )
 
@@ -80,10 +80,10 @@ type attributesMask struct {
 type FilesystemExporter struct {
 	Root   string
 	fs     d8fs.OS
-	logger *slog.Logger
+	logger logger.Logger
 }
 
-func NewFilesystemExporter(fsys d8fs.OS, root string, logger *slog.Logger) (*FilesystemExporter, error) {
+func NewFilesystemExporter(fsys d8fs.OS, root string, logger logger.Logger) (*FilesystemExporter, error) {
 	// Cleaned once, here, so every later comparison against it is against one canonical form. A root
 	// carrying a trailing separator would make the containment check in resolvePath compare against
 	// "/mnt/data//", which no resolved path has as a prefix.

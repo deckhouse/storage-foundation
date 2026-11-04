@@ -21,7 +21,6 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"fmt"
-	"log/slog"
 	"net/http"
 	"os"
 	"os/signal"
@@ -31,6 +30,7 @@ import (
 	"time"
 
 	"github.com/deckhouse/sds-common-lib/fs/real"
+	"github.com/deckhouse/sds-common-lib/logger"
 	"github.com/deckhouse/storage-foundation/common"
 	"github.com/deckhouse/storage-foundation/images/data-exporter/internal/certutil"
 	"github.com/deckhouse/storage-foundation/images/data-exporter/internal/config"
@@ -45,11 +45,17 @@ const (
 )
 
 func main() {
-	logger := slog.New(slog.NewTextHandler(os.Stdout, nil))
+	// LOG_LEVEL is set on this container by data-manager-controller, which passes on its own value. A
+	// malformed one cannot get here: the controller refuses to start with it.
+	log, err := logger.NewLoggerFromEnv(logger.InfoLevel)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "unable to create the logger: %v\n", err)
+		os.Exit(1)
+	}
 
 	fsys := real.GetOS()
 
-	logger.Info("Start main()")
+	log.Info("Start main()")
 
 	// Parse CLI arguments
 	cfg := &config.Config{}
@@ -59,21 +65,21 @@ func main() {
 	// get kube client
 	k8sClient, err := repository.NewK8sClient()
 	if err != nil {
-		logger.Error("Failed to initialize kubernetes client", "error", err)
+		log.Error("Failed to initialize kubernetes client", "error", err)
 		os.Exit(1)
 	}
 
 	var mainHTTPHandler http.Handler
 	switch cfg.Operation {
 	case common.OperationExport:
-		mainHTTPHandler, err = NewExporterHandler(fsys, cfg.Path, cfg.Mode, logger)
+		mainHTTPHandler, err = NewExporterHandler(fsys, cfg.Path, cfg.Mode, log)
 	case common.OperationImport:
-		mainHTTPHandler, err = NewImportHandler(fsys, cfg.Path, cfg.Mode, logger, k8sClient, cfg, k8sClient)
+		mainHTTPHandler, err = NewImportHandler(fsys, cfg.Path, cfg.Mode, log, k8sClient, cfg, k8sClient)
 	default:
 		err = fmt.Errorf("invalid operation: %s", cfg.Operation)
 	}
 	if err != nil {
-		logger.Error("Failed to initialize handler", "error", err)
+		log.Error("Failed to initialize handler", "error", err)
 		os.Exit(1)
 	}
 
@@ -86,10 +92,10 @@ func main() {
 		cfg.DataManagerName,
 		k8sClient,
 		k8sClient,
-		logger,
+		log,
 	)
 	if err != nil {
-		logger.Error("Failed to initialize ttl control", "error", err)
+		log.Error("Failed to initialize ttl control", "error", err)
 		os.Exit(1)
 	}
 
@@ -104,15 +110,15 @@ func main() {
 	)
 
 	// Generate TLS bundle
-	tlsBundle, err := certutil.GenerateTLSBundle(logger, os.Getenv("POD_IP"), cfg.DataManagerServiceName, cfg.ControllerNamespace, tlsTTL)
+	tlsBundle, err := certutil.GenerateTLSBundle(log, os.Getenv("POD_IP"), cfg.DataManagerServiceName, cfg.ControllerNamespace, tlsTTL)
 	if err != nil {
-		logger.Error("Generate TLS bundle", "failed", err.Error())
+		log.Error("Generate TLS bundle", "failed", err.Error())
 		os.Exit(1)
 	}
 
 	err = k8sClient.CreateOrUpdateDataManagerCASecretIfNeeded(ctx, cfg.ControllerNamespace, cfg.DataManagerCASecretName, tlsBundle.CACertPEM)
 	if err != nil {
-		logger.Error("Create DataManager CA secret", "failed", err.Error())
+		log.Error("Create DataManager CA secret", "failed", err.Error())
 		os.Exit(1)
 	}
 
@@ -120,11 +126,11 @@ func main() {
 	kubernetesCACertPool := x509.NewCertPool()
 	kubernetesCACert, err := os.ReadFile(kubernetesCAPath)
 	if err != nil {
-		logger.Error("Read Kubernetes CA certificate", "failed", err.Error())
+		log.Error("Read Kubernetes CA certificate", "failed", err.Error())
 		os.Exit(1)
 	}
 	if !kubernetesCACertPool.AppendCertsFromPEM(kubernetesCACert) {
-		logger.Error("Append Kubernetes CA certificate to cert pool", "failed", "invalid CA certificate")
+		log.Error("Append Kubernetes CA certificate to cert pool", "failed", "invalid CA certificate")
 		os.Exit(1)
 	}
 
@@ -139,19 +145,19 @@ func main() {
 		mux,
 		cfg,
 		mainHTTPHandler,
-		NewFinishedHandler(k8sClient, cfg, logger),
+		NewFinishedHandler(k8sClient, cfg, log),
 		k8sClient,
 		ttlControl.Wrap,
-		logger,
+		log,
 	)
 	if err != nil {
-		logger.Error("Failed to assemble HTTP handler", "error", err)
+		log.Error("Failed to assemble HTTP handler", "error", err)
 		os.Exit(1)
 	}
 
 	server := &http.Server{
 		Addr:    cfg.Port,
-		Handler: logRequest(mainHandler, *logger),
+		Handler: logRequest(mainHandler, log),
 		// ReadHeaderTimeout (not ReadTimeout) guards against slowloris on the request line/headers.
 		// ReadTimeout caps the entire request including the body, which would abort large streaming
 		// block/filesystem uploads mid-flight (io.Copy(dev, r.Body)) once the device write is slower
@@ -167,7 +173,7 @@ func main() {
 	}
 
 	// Run file server
-	logger.Info(
+	log.Info(
 		"Starting https server",
 		"operation", cfg.Operation,
 		"mode", cfg.Mode,
@@ -180,7 +186,7 @@ func main() {
 		"served path prefix", GetPathPrefix(cfg.URLOpt))
 	go func() {
 		if err := server.ListenAndServeTLS("", ""); err != nil && err != http.ErrServerClosed {
-			logger.Error(err.Error())
+			log.Error(err.Error())
 			os.Exit(1)
 		}
 	}()
@@ -188,7 +194,7 @@ func main() {
 	// Update DataManager resource with CA certificate
 	err = k8sClient.UpdateDataManagerCA(ctx, cfg.Operation, cfg.URLOpt.DataManagerNamespace, cfg.DataManagerName, tlsBundle.CACertPEM)
 	if err != nil {
-		logger.Error("Update DataManager CA certificate", "failed", err.Error())
+		log.Error("Update DataManager CA certificate", "failed", err.Error())
 		os.Exit(1)
 	}
 
@@ -202,13 +208,13 @@ func main() {
 	// above exits for the same reason.
 	err = k8sClient.SetServerState(ctx, cfg.Operation, cfg.URLOpt.DataManagerNamespace, cfg.DataManagerName, common.ServerStateReady)
 	if err != nil {
-		logger.Error("Set DataManager serverState Ready", "failed", err.Error())
+		log.Error("Set DataManager serverState Ready", "failed", err.Error())
 		os.Exit(1)
 	}
 
 	// Waiting for shutdown events
 	<-signalChan
-	logger.Info("OS interrupt - shutting down...")
+	log.Info("OS interrupt - shutting down...")
 
 	// waiting for update DataManager resource goroutines
 	cancel()
@@ -219,13 +225,13 @@ func main() {
 	defer cancelShutdown()
 	err = server.Shutdown(ctx)
 	if err != nil {
-		logger.Error(err.Error())
+		log.Error(err.Error())
 	} else {
-		logger.Info("web server gracefully stopped")
+		log.Info("web server gracefully stopped")
 	}
 }
 
-func logRequest(handler http.Handler, logger slog.Logger) http.Handler {
+func logRequest(handler http.Handler, logger logger.Logger) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// The limit of the withholding below: the request line is logged whole, and requestUri includes the
 		// query string. That is safe only because of a property of the protocol, not because of anything this
@@ -242,7 +248,7 @@ func logRequest(handler http.Handler, logger slog.Logger) http.Handler {
 		)
 
 		for name, value := range r.Header {
-			logHeader(&logger, name, value)
+			logHeader(logger, name, value)
 		}
 
 		handler.ServeHTTP(w, r)
@@ -313,7 +319,7 @@ const unrecognizedScheme = "unrecognized"
 // its value is a secret we have no business copying anywhere.
 //
 // Guard: TestLogRequestHidesCredentialHeaderValues.
-func logHeader(logger *slog.Logger, name string, values []string) {
+func logHeader(logger logger.Logger, name string, values []string) {
 	canonical := http.CanonicalHeaderKey(name)
 
 	switch {

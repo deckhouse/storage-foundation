@@ -18,7 +18,6 @@ package main
 
 import (
 	"io/fs"
-	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -33,6 +32,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	"github.com/deckhouse/sds-common-lib/fs/real"
+	"github.com/deckhouse/sds-common-lib/logger"
 	api "github.com/deckhouse/storage-foundation/api/v1alpha1"
 	"github.com/deckhouse/storage-foundation/common"
 	"github.com/deckhouse/storage-foundation/images/data-exporter/internal/config"
@@ -48,7 +48,7 @@ func TestImportFilesRouteKeepsEncodedDotDotInsideRoot(t *testing.T) {
 		DataManagerName: "import",
 		URLOpt:          config.URLOpt{DataManagerNamespace: "project", DataManagerTargetKindShort: "pvc", DataManagerTargetName: "volume"},
 	}
-	logger := slog.New(slog.DiscardHandler)
+	logger := logger.NewNop()
 
 	newRouter := func(t *testing.T) (http.Handler, string, string) {
 		t.Helper()

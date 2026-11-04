@@ -18,7 +18,6 @@ package export_block_test
 
 import (
 	"fmt"
-	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -27,6 +26,7 @@ import (
 	"github.com/stretchr/testify/assert"
 
 	"github.com/deckhouse/sds-common-lib/fs/fake"
+	"github.com/deckhouse/sds-common-lib/logger"
 	"github.com/deckhouse/storage-foundation/images/data-exporter/internal/export_block"
 	"github.com/deckhouse/storage-foundation/images/data-exporter/internal/test"
 )
@@ -51,7 +51,7 @@ func createTestFs(t *testing.T) *fake.OS {
 	return fsys
 }
 
-func newBlockHandler(fsys *fake.OS, path string, logger *slog.Logger) (*http.ServeMux, error) {
+func newBlockHandler(fsys *fake.OS, path string, logger logger.Logger) (*http.ServeMux, error) {
 	blockExporter, err := export_block.NewBlockExporter(fsys, path, logger)
 	if err != nil {
 		return nil, err
@@ -94,8 +94,8 @@ func assertCommonHeaders(t *testing.T, response *http.Response, expectedSize int
 	test.AssertHeader(t, response, "Content-Disposition", "attachment; filename=data.img")
 }
 
-func newLogger() *slog.Logger {
-	return slog.New(slog.NewTextHandler(os.Stdout, nil))
+func newLogger() logger.Logger {
+	return logger.NewNop()
 }
 
 // Positive: init with block device

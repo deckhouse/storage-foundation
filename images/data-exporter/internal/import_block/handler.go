@@ -20,7 +20,6 @@ import (
 	"context"
 	"fmt"
 	"io"
-	"log/slog"
 	"net/http"
 	"os"
 	"strconv"
@@ -29,6 +28,7 @@ import (
 	"github.com/pkg/errors"
 
 	"github.com/deckhouse/sds-common-lib/fs"
+	"github.com/deckhouse/sds-common-lib/logger"
 	"github.com/deckhouse/storage-foundation/common"
 	"github.com/deckhouse/storage-foundation/images/data-exporter/internal/config"
 	"github.com/deckhouse/storage-foundation/images/data-exporter/internal/httpiohelpers"
@@ -43,7 +43,7 @@ var (
 type ImportBlockHandler struct {
 	fs           fs.OS
 	path         string
-	logger       *slog.Logger
+	logger       logger.Logger
 	mu           *sync.Mutex
 	written      int64
 	isWriting    bool
@@ -53,7 +53,7 @@ type ImportBlockHandler struct {
 	isServiceOff bool
 }
 
-func NewImportBlockHandler(fsys fs.OS, path string, logger *slog.Logger, client *repository.Client, cfg *config.Config, repository *repository.Client) (*ImportBlockHandler, error) {
+func NewImportBlockHandler(fsys fs.OS, path string, logger logger.Logger, client *repository.Client, cfg *config.Config, repository *repository.Client) (*ImportBlockHandler, error) {
 	isServiceOff, err := client.CheckIsServiceAvailable(context.Background(), cfg.URLOpt.DataManagerNamespace, cfg.DataManagerName)
 	if err != nil {
 		logger.Error("failed to check if service is available", "error", err)

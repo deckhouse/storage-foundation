@@ -79,20 +79,20 @@ func main() {
 
 	cfg, err := initFlags()
 	if err != nil {
-		fmt.Printf("unable to parse config: err: %s", err.Error())
+		log.Error("unable to parse config", logger.Err(err))
 		os.Exit(1)
 	}
 
 	volumeSnapshotObj := new(snapv1.VolumeSnapshot)
 	volumeSnapshotMutatingWebHookHandler, err := handlers.GetMutatingWebhookHandler(handlers.VolumeSnapshotMutate, volumeSnapshotMutatorID, volumeSnapshotObj, kwhLog)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "error creating volumeSnapshotMutatingWebHookHandler: %s", err)
+		log.Error("error creating volumeSnapshotMutatingWebHookHandler", logger.Err(err))
 		os.Exit(1)
 	}
 
 	dataExportValidatingWebHookHandler, err := handlers.NewValidatingWebhookHandler(handlers.DataExportValidateFunc(), dataExportValidatorID, &dev1alpha1.DataExport{}, kwhLog)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "error creating dataExportValidatingWebHookHandler: %s", err)
+		log.Error("error creating dataExportValidatingWebHookHandler", logger.Err(err))
 		os.Exit(1)
 	}
 
@@ -104,7 +104,7 @@ func main() {
 	log.Info("listening", "address", port)
 	err = http.ListenAndServeTLS(port, cfg.certFile, cfg.keyFile, mux)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "error serving webhook: %s", err)
+		log.Error("error serving webhook", logger.Err(err))
 		os.Exit(1)
 	}
 }

@@ -39,6 +39,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
+	"github.com/deckhouse/sds-common-lib/logger"
 	dev1alpha1 "github.com/deckhouse/storage-foundation/api/v1alpha1"
 	"github.com/deckhouse/storage-foundation/common"
 	"github.com/deckhouse/storage-foundation/common/config"
@@ -1629,5 +1630,21 @@ func TestDataExportRequestAnnotations_SetAndRemovedSymmetrically(t *testing.T) {
 	for _, key := range dataExportRequestAnnotationKeys {
 		assert.NotContains(t, removedPVC.Annotations, key,
 			"key %s is in dataExportRequestAnnotationKeys, so recoverUserPVC must remove it", key)
+	}
+}
+
+// TestMakeExportDeploySpec_PassesLogLevel guards that the exporter pod logs at the controller's level: the
+// level the reconciler was configured with reaches every container as LOG_LEVEL, in both volume modes.
+func TestMakeExportDeploySpec_PassesLogLevel(t *testing.T) {
+	dataExport := createDataExport(dev1alpha1.DataExportSpec{TTL: "10m"})
+	names := common.NewNames(dev1alpha1.KindPVC, testUserPVCName, dataExportNamespace, dataExportName)
+
+	for _, mode := range []corev1.PersistentVolumeMode{corev1.PersistentVolumeFilesystem, corev1.PersistentVolumeBlock} {
+		spec := makeExportDeploySpec(&mode, dataExport, "registry.example/data-exporter:v1", dataExport.Spec.TTL, "d8-storage-foundation", logger.DebugLevel, names)
+
+		require.NotEmpty(t, spec.Template.Spec.Containers, "%s: no containers", mode)
+		for _, container := range spec.Template.Spec.Containers {
+			assert.Contains(t, container.Env, corev1.EnvVar{Name: "LOG_LEVEL", Value: "3"}, "%s: container %s", mode, container.Name)
+		}
 	}
 }

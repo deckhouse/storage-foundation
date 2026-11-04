@@ -22,7 +22,6 @@ import (
 	"go/parser"
 	"go/token"
 	iofs "io/fs"
-	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -32,6 +31,7 @@ import (
 	"github.com/stretchr/testify/require"
 	"go.uber.org/mock/gomock"
 
+	"github.com/deckhouse/sds-common-lib/logger"
 	"github.com/deckhouse/storage-foundation/common"
 	"github.com/deckhouse/storage-foundation/images/data-exporter/internal/config"
 	"github.com/deckhouse/storage-foundation/images/data-exporter/internal/mock"
@@ -123,8 +123,8 @@ func (c serverConfiguration) config() *config.Config {
 	}
 }
 
-func discardLogger() *slog.Logger {
-	return slog.New(slog.DiscardHandler)
+func discardLogger() logger.Logger {
+	return logger.NewNop()
 }
 
 // transferCounter stands in for the idle-window timer and records what the transfer accounting reported to

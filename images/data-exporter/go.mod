@@ -20,7 +20,9 @@ replace github.com/deckhouse/storage-foundation/api => ../../api
 replace github.com/deckhouse/storage-foundation/common => ../../common
 
 require (
+	github.com/DataDog/gostackparse v0.7.0 // indirect
 	github.com/davecgh/go-spew v1.1.2-0.20180830191138-d8f796af33cc // indirect
+	github.com/deckhouse/deckhouse/pkg/log v0.2.1 // indirect
 	github.com/deckhouse/virtualization/api v0.15.0 // indirect
 	github.com/emicklei/go-restful/v3 v3.12.2 // indirect
 	github.com/evanphx/json-patch/v5 v5.9.11 // indirect

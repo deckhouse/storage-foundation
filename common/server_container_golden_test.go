@@ -28,6 +28,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
+	"github.com/deckhouse/sds-common-lib/logger"
 	dev1alpha1 "github.com/deckhouse/storage-foundation/api/v1alpha1"
 	"github.com/deckhouse/storage-foundation/common/goldentest"
 )
@@ -74,6 +75,7 @@ func buildServerContainer(t *testing.T, mode corev1.PersistentVolumeMode) *corev
 		ServerMode:          ServerModeImport,
 		ControllerNamespace: serverGoldenControllerNamespace,
 		Names:               names,
+		LogLevel:            logger.InfoLevel,
 	})
 	require.NoError(t, err)
 

@@ -21,7 +21,6 @@ import (
 	"errors"
 	"io"
 	"io/fs"
-	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -43,6 +42,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
 	"github.com/deckhouse/sds-common-lib/fs/real"
+	"github.com/deckhouse/sds-common-lib/logger"
 	api "github.com/deckhouse/storage-foundation/api/v1alpha1"
 	"github.com/deckhouse/storage-foundation/common"
 	"github.com/deckhouse/storage-foundation/images/data-exporter/internal/config"
@@ -122,7 +122,7 @@ func newClient(t *testing.T, state common.ServerState, funcs interceptor.Funcs) 
 func newHandlerWithClient(t *testing.T, root string, client *repository.Client) http.Handler {
 	t.Helper()
 
-	handler, err := importfilesystem.NewImportFilesystemHandler(real.GetOS(), root, slog.New(slog.DiscardHandler), client, newConfig(), client)
+	handler, err := importfilesystem.NewImportFilesystemHandler(real.GetOS(), root, logger.NewNop(), client, newConfig(), client)
 	require.NoError(t, err)
 
 	return handler
@@ -330,7 +330,7 @@ func TestNewImportFilesystemHandlerRefusesUnusableRoot(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			client := newClient(t, "", interceptor.Funcs{})
 
-			handler, err := importfilesystem.NewImportFilesystemHandler(real.GetOS(), tc.path, slog.New(slog.DiscardHandler), client, newConfig(), client)
+			handler, err := importfilesystem.NewImportFilesystemHandler(real.GetOS(), tc.path, logger.NewNop(), client, newConfig(), client)
 
 			require.ErrorContains(t, err, tc.wantErr)
 			require.Nil(t, handler)
@@ -343,7 +343,7 @@ func TestNewImportFilesystemHandlerFailsWithoutDataImport(t *testing.T) {
 	require.NoError(t, api.AddToScheme(scheme))
 	client := &repository.Client{Client: fake.NewClientBuilder().WithScheme(scheme).Build()}
 
-	handler, err := importfilesystem.NewImportFilesystemHandler(real.GetOS(), t.TempDir(), slog.New(slog.DiscardHandler), client, newConfig(), client)
+	handler, err := importfilesystem.NewImportFilesystemHandler(real.GetOS(), t.TempDir(), logger.NewNop(), client, newConfig(), client)
 
 	require.True(t, apierrors.IsNotFound(err), "err=%v", err)
 	require.Nil(t, handler)

@@ -24,6 +24,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
+	"github.com/deckhouse/sds-common-lib/logger"
 	dev1alpha1 "github.com/deckhouse/storage-foundation/api/v1alpha1"
 	"github.com/deckhouse/storage-foundation/common"
 	"github.com/deckhouse/storage-foundation/common/goldentest"
@@ -56,7 +57,7 @@ func buildExportDeployment(mode corev1.PersistentVolumeMode) appsv1.Deployment {
 				dev1alpha1.LabelApplicationKey: dev1alpha1.LabelDataExportValue,
 			},
 		},
-		Spec: makeExportDeploySpec(&mode, dataExport, goldenImage, dataExport.Spec.TTL, goldenControllerNamespace, names),
+		Spec: makeExportDeploySpec(&mode, dataExport, goldenImage, dataExport.Spec.TTL, goldenControllerNamespace, logger.InfoLevel, names),
 	}
 }
 

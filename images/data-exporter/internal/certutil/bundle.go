@@ -25,11 +25,11 @@ import (
 	"crypto/x509/pkix"
 	"encoding/pem"
 	"fmt"
-	"log/slog"
 	"math/big"
 	"net"
 	"time"
 
+	"github.com/deckhouse/sds-common-lib/logger"
 	"github.com/deckhouse/storage-foundation/common"
 )
 
@@ -38,7 +38,7 @@ type TLSBundle struct {
 	CACertPEM  []byte
 }
 
-func GenerateTLSBundle(logger *slog.Logger, ip, host, namespace string, ttl time.Duration) (*TLSBundle, error) {
+func GenerateTLSBundle(logger logger.Logger, ip, host, namespace string, ttl time.Duration) (*TLSBundle, error) {
 	ipParsed := net.ParseIP(ip)
 	if ipParsed == nil {
 		return nil, fmt.Errorf("invalid IP for SAN: %q", ip)

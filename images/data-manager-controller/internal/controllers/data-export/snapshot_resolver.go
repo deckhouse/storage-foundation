@@ -19,7 +19,6 @@ package dataexport
 import (
 	"context"
 	"fmt"
-	"log"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
@@ -30,6 +29,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/wait"
+	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	dev1alpha1 "github.com/deckhouse/storage-foundation/api/v1alpha1"
 	"github.com/deckhouse/storage-foundation/common"
@@ -323,8 +323,8 @@ func (r *DataexportReconciler) ensureVolumeRestoreRequest(ctx context.Context, d
 	if _, err := cli.Create(ctx, vrr, metav1.CreateOptions{}); err != nil && !kubeerrors.IsAlreadyExists(err) {
 		return fmt.Errorf("create VolumeRestoreRequest %s: %w", name, err)
 	}
-	log.Printf("Created VolumeRestoreRequest %s for snapshot export of DataExport %s/%s (artifact %s/%s)",
-		name, dataExport.Namespace, dataExport.Name, art.ArtifactKind, art.ArtifactName)
+	log.FromContext(ctx).Info("Created VolumeRestoreRequest for snapshot export of DataExport",
+		"volumeRestoreRequest", name, "artifactKind", art.ArtifactKind, "artifactName", art.ArtifactName)
 	return nil
 }
 

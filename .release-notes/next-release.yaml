@@ -16,6 +16,9 @@ fixes:
 security:
   - "The Ingress that publishes a DataExport or a DataImport now verifies the certificate of the exporter or importer pod it proxies to. It used to speak HTTPS to the pod but accept any certificate. Each pod signs its serving certificate with its own CA, and the Ingress now trusts only that CA and only the name of the pod's Service."
 
+improvements:
+  - "The `DataExport` and `DataImport` server pods now log at the level set by the module's `logLevel` parameter, in the same JSON format as the other module components. They used to log at `INFO` in plain text whatever the setting was, so their `DEBUG` messages could not be turned on. A pod takes the level when it is created. The messages the controller writes about `DataExport` objects now follow `logLevel` as well, and the routine ones among them appear only from `DEBUG` on."
+
 # Optional sections — delete rather than leave empty.
 # new_features: []
 # improvements: []

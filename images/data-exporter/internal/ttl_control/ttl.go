@@ -18,12 +18,12 @@ package ttl_control
 
 import (
 	"context"
-	"log/slog"
 	"net/http"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/deckhouse/sds-common-lib/logger"
 	"github.com/deckhouse/storage-foundation/common"
 )
 
@@ -41,7 +41,7 @@ type TTLControl struct {
 	namespace         string
 	name              string
 	ttl               time.Duration
-	logger            *slog.Logger
+	logger            logger.Logger
 	idleTimer         *IdleTimer
 }
 
@@ -52,7 +52,7 @@ func NewTTLControl(
 	name string,
 	tsUpdater DataManagerAccessTimestampUpdater,
 	serverStateSetter DataManagerServerStateSetter,
-	logger *slog.Logger,
+	logger logger.Logger,
 ) (*TTLControl, error) {
 	// Fallback for an empty --ttl (empty spec.ttl): use the documented default instead of failing
 	// ParseDuration and crash-looping the server pod.

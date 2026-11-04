@@ -19,11 +19,12 @@ package ttl_control
 import (
 	"context"
 	"io"
-	"log/slog"
 	"net/http"
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/deckhouse/sds-common-lib/logger"
 )
 
 // Time period for wake up time-to-live timer and update DataExport/DataImport.Status.AccessTimestamp
@@ -153,12 +154,12 @@ type IdleTimer struct {
 	lastRequestTimestamp         time.Time
 	ticker                       *time.Ticker
 	expired                      bool
-	logger                       *slog.Logger
+	logger                       logger.Logger
 }
 
 // NewIdleTimer returns a pointer and not a value: IdleTimer holds an atomic counter, so it must not be
 // copied after construction.
-func NewIdleTimer(timeToLive time.Duration, logger *slog.Logger) *IdleTimer {
+func NewIdleTimer(timeToLive time.Duration, logger logger.Logger) *IdleTimer {
 	return &IdleTimer{
 		TickerChan:                   make(chan time.Time, 1),
 		ExpiredChan:                  make(chan time.Time, 1),
