@@ -4,6 +4,12 @@ date: "2026-xx-xx"
 summary: ""
 highlights: []
 
+fixes:
+  - "The `DataImport` server answered `201 Created` to the last part of a file upload even when it then failed to move the completed file into place, and appended an error message to that successful response. It now answers `500` in that case, and the uploaded data is kept in the temporary file of the upload."
+  - "When the `DataImport` server received a part of a file upload that did not complete the file, it applied the owner, permissions and modification time from the request to the file of the same name already in the volume, if there was one, and otherwise logged an error and appended it to the `204` response. The attributes are now applied only when the upload completes, before the file is moved into place, and a failure to apply them is answered with `500` instead of `201 Created`."
+  - "When a part of a block device upload to `DataImport` went past the size declared in `X-Content-Length`, the server wrote the excess bytes to the device and only then answered `422`, overwriting the data that followed the image. A request with a known body length is now refused before anything is written, and a body of unknown length is written only up to the declared size."
+  - "When a file uploaded to `DataImport` already existed in the volume with a different size, the server added the size of the old file to the upload offset. The last part then did not complete the upload: the response reported a wrong `X-Next-Offset`, and the data stayed in the temporary file. The offset now counts only the data of the new upload."
+
 security:
   - "The Ingress that publishes a DataExport or a DataImport now verifies the certificate of the exporter or importer pod it proxies to. It used to speak HTTPS to the pod but accept any certificate. Each pod signs its serving certificate with its own CA, and the Ingress now trusts only that CA and only the name of the pod's Service."
 

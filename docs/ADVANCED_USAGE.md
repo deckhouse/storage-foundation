@@ -516,5 +516,5 @@ above. Authentication and authorization errors can also be returned before a req
 | Block import (PUT, HEAD, POST) | `405` | Method other than PUT, HEAD, or POST |
 | Block import (PUT) | `409` | Offset mismatch or competing writer; mismatch includes `X-Expected-Offset` |
 | Block import (PUT) | `416` | Request exceeds the remaining device size |
-| Block import (PUT) | `422` | Written bytes exceed `X-Content-Length` |
+| Block import (PUT) | `422` | Request body goes past `X-Content-Length` |
 | Block import (PUT, HEAD, POST) | `500` | Internal error |

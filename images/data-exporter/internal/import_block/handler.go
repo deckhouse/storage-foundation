@@ -171,7 +171,7 @@ func (h *ImportBlockHandler) HandlePutMethod(w http.ResponseWriter, r *http.Requ
 		return
 	}
 
-	dev, err := os.OpenFile(h.path, os.O_WRONLY, 0)
+	dev, err := h.fs.OpenFile(h.path, os.O_WRONLY, 0)
 	if err != nil {
 		if os.IsPermission(err) {
 			http.Error(w, "permission denied to write block device", http.StatusForbidden)
@@ -214,12 +214,22 @@ func (h *ImportBlockHandler) HandlePutMethod(w http.ResponseWriter, r *http.Requ
 		return
 	}
 
+	if expectedTotal >= 0 && (offset > expectedTotal || r.ContentLength > expectedTotal-offset) {
+		http.Error(w, "written exceeds expected total size", http.StatusUnprocessableEntity)
+		return
+	}
+
 	if _, err := dev.Seek(offset, io.SeekStart); err != nil {
 		http.Error(w, "failed to seek", http.StatusInternalServerError)
 		return
 	}
 
-	written, werr := io.Copy(dev, r.Body)
+	// A body of unknown length is copied only up to the declared total, so the device is never written past it.
+	body := io.Reader(r.Body)
+	if expectedTotal >= 0 {
+		body = io.LimitReader(r.Body, expectedTotal-offset)
+	}
+	written, werr := io.Copy(dev, body)
 	if werr != nil && !errors.Is(werr, io.EOF) {
 		h.logger.Error("failed to write data into block device", "error", werr)
 		http.Error(w, "failed to write data", http.StatusInternalServerError)
@@ -227,9 +237,17 @@ func (h *ImportBlockHandler) HandlePutMethod(w http.ResponseWriter, r *http.Requ
 	}
 
 	newOffset := offset + written
-	if expectedTotal >= 0 && newOffset > expectedTotal {
-		http.Error(w, "written exceeds expected total size", http.StatusUnprocessableEntity)
-		return
+	if expectedTotal >= 0 && newOffset == expectedTotal {
+		more, err := hasMoreData(r.Body)
+		if err != nil {
+			h.logger.Error("failed to read request body", "error", err)
+			http.Error(w, "failed to write data", http.StatusInternalServerError)
+			return
+		}
+		if more {
+			http.Error(w, "written exceeds expected total size", http.StatusUnprocessableEntity)
+			return
+		}
 	}
 
 	h.mu.Lock()
@@ -252,4 +270,13 @@ func (h *ImportBlockHandler) CompleteImport(w http.ResponseWriter, _ *http.Reque
 		return
 	}
 	w.WriteHeader(http.StatusOK)
+}
+
+func hasMoreData(r io.Reader) (bool, error) {
+	var b [1]byte
+	n, err := io.ReadFull(r, b[:])
+	if errors.Is(err, io.EOF) {
+		return false, nil
+	}
+	return n > 0, err
 }

@@ -159,13 +159,12 @@ func (h *ImportFilesystemHandler) CreateFile(w http.ResponseWriter, r *http.Requ
 
 	// Check if target file exists
 	var exists bool
-	var currentSize int64
+	var finalSize int64
 	if fi, err := h.fs.Lstat(absPath); err == nil {
 		exists = true
-		currentSize = fi.Size()
+		finalSize = fi.Size()
 	} else if os.IsNotExist(err) {
 		exists = false
-		currentSize = 0
 	} else {
 		h.logger.Error("failed to stat file path", "path", absPath, "error", err)
 		http.Error(w, "failed to check file", http.StatusInternalServerError)
@@ -173,9 +172,9 @@ func (h *ImportFilesystemHandler) CreateFile(w http.ResponseWriter, r *http.Requ
 	}
 
 	// Check if file is fully uploaded
-	isUploaded := exists && expectedTotal >= 0 && currentSize == expectedTotal
+	isUploaded := exists && expectedTotal >= 0 && finalSize == expectedTotal
 	if isUploaded {
-		h.logger.Info("file already exists", "path", absPath, "size", currentSize)
+		h.logger.Info("file already exists", "path", absPath, "size", finalSize)
 		http.Error(w, http.StatusText(http.StatusConflict), http.StatusConflict)
 		return
 	}
@@ -187,6 +186,7 @@ func (h *ImportFilesystemHandler) CreateFile(w http.ResponseWriter, r *http.Requ
 
 	// Check if temporary file exists
 	var tempExists bool
+	var currentSize int64
 	if fi, err := h.fs.Lstat(tempPath); err == nil {
 		tempExists = true
 		currentSize = fi.Size()
@@ -247,24 +247,26 @@ func (h *ImportFilesystemHandler) CreateFile(w http.ResponseWriter, r *http.Requ
 	}
 
 	newSize := currentSize + written
-	if expectedTotal >= 0 && newSize == expectedTotal {
-		w.WriteHeader(http.StatusCreated)
-
-		if err := os.Rename(tempPath, absPath); err != nil {
-			h.logger.Error("failed to rename temporary file", "from", tempPath, "to", absPath, "error", err)
-			http.Error(w, "error renaming temporary file", http.StatusInternalServerError)
-			return
-		}
-	} else {
+	if expectedTotal < 0 || newSize != expectedTotal {
 		w.Header().Set("X-Next-Offset", strconv.FormatInt(newSize, 10))
 		w.WriteHeader(http.StatusNoContent)
+		return
 	}
 
-	if err := httpiohelpers.SetFileAttributes(absPath, filePerm, uid, gid, modTime); err != nil {
-		h.logger.Error("failed to set file attributes", "path", absPath, "error", err)
+	// Attributes go on the completed temporary file, so a failure leaves the upload unpublished and retryable.
+	if err := httpiohelpers.SetFileAttributes(tempPath, filePerm, uid, gid, modTime); err != nil {
+		h.logger.Error("failed to set file attributes", "path", tempPath, "error", err)
 		http.Error(w, "error setting file attributes", http.StatusInternalServerError)
 		return
 	}
+
+	if err := os.Rename(tempPath, absPath); err != nil {
+		h.logger.Error("failed to rename temporary file", "from", tempPath, "to", absPath, "error", err)
+		http.Error(w, "error renaming temporary file", http.StatusInternalServerError)
+		return
+	}
+
+	w.WriteHeader(http.StatusCreated)
 }
 
 func (h *ImportFilesystemHandler) CompleteImport(w http.ResponseWriter, _ *http.Request) {
