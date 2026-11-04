@@ -1416,7 +1416,7 @@ var ErrPVCValidationFailed = errors.New("PVC validation failed")
 
 // Validate PV for attach to DataExport pod:
 // - PVC in working state: has status "Bound" and PV has references to PVC
-// - PVC detached from consumering pods: no pods, using PVC, no volumeAttachment with status "True"
+// - PVC detached from consumering pods: no unfinished pods using the PVC, no volumeAttachment with status "True"
 func (r *DataexportReconciler) validateUserPVCAndGetPV(ctx context.Context, pvc *corev1.PersistentVolumeClaim) (*corev1.PersistentVolume, error) {
 	pvName := pvc.Spec.VolumeName
 	if pvName == "" {
@@ -1441,15 +1441,7 @@ func (r *DataexportReconciler) validateUserPVCAndGetPV(ctx context.Context, pvc 
 	}
 
 	// Check for pods, using required PVC
-	targetPVC := pvc.GetName()
-	var foundPods []corev1.Pod
-	for _, pod := range podList.Items {
-		for _, volume := range pod.Spec.Volumes {
-			if (volume.PersistentVolumeClaim != nil) && (volume.PersistentVolumeClaim.ClaimName == targetPVC) {
-				foundPods = append(foundPods, pod)
-			}
-		}
-	}
+	foundPods := podsUsingClaim(podList.Items, pvc.GetName())
 	if len(foundPods) > 0 {
 		foundPodsNames := make([]string, 0, len(foundPods))
 		for _, pod := range foundPods {
@@ -1459,9 +1451,10 @@ func (r *DataexportReconciler) validateUserPVCAndGetPV(ctx context.Context, pvc 
 	}
 
 	// Check condition: no volumeAttachment with status "True"
-	// Get volumeAttachmentList
+	// Get volumeAttachmentList. VolumeAttachment is cluster-scoped: the cache keeps it under no namespace, so
+	// a list restricted to the PVC's namespace never returns one.
 	vaList := &storagev1.VolumeAttachmentList{}
-	if err := r.Client.List(ctx, vaList, client.InNamespace(pvc.Namespace)); err != nil {
+	if err := r.Client.List(ctx, vaList); err != nil {
 		return nil, fmt.Errorf("failed to get volumeAttachmentList: %w", err)
 	}
 
@@ -1483,6 +1476,27 @@ func (r *DataexportReconciler) validateUserPVCAndGetPV(ctx context.Context, pvc 
 	}
 
 	return pv, nil
+}
+
+// podsUsingClaim returns the pods that mount the claim and may still be using it. A pod in phase Succeeded or
+// Failed has stopped its containers for good, so it no longer uses the volume even though its spec still names
+// the claim; the kubelet unmounts the volume on its own, and for a driver that attaches, the VolumeAttachment
+// check in validateUserPVCAndGetPV holds the export until that is done. A pod that is being deleted but has not
+// finished still counts: its containers may be writing until they stop.
+func podsUsingClaim(pods []corev1.Pod, claim string) []corev1.Pod {
+	var using []corev1.Pod
+	for _, pod := range pods {
+		if pod.Status.Phase == corev1.PodSucceeded || pod.Status.Phase == corev1.PodFailed {
+			continue
+		}
+		for _, volume := range pod.Spec.Volumes {
+			if volume.PersistentVolumeClaim != nil && volume.PersistentVolumeClaim.ClaimName == claim {
+				using = append(using, pod)
+				break
+			}
+		}
+	}
+	return using
 }
 
 // Validate user's PVC+PV for attach to DataExport pod:
