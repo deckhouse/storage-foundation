@@ -4,6 +4,9 @@ date: "2026-xx-xx"
 summary: ""
 highlights: []
 
+improvements:
+  - "В DKP 1.78 и новее роли `d8:system-capability:storage-foundation:view` и `d8:system-capability:storage-foundation:edit` дают также доступ на чтение к ModuleConfig `storage-foundation`, а `edit` — и на запись, и несут стандартные заголовки и описания платформы, как все capability ролевой модели DKP 1.78. RBAC модуля теперь описан в `rbac.yaml`, и шаблоны RBACv2 пишутся из него; кластеры ниже DKP 1.78 сохраняют прежние роли."
+
 fixes:
   - "Пока `DataExport` или `DataImport` был опубликован, Kubernetes API, опубликованный через Ingress кластера, отвечал `502`. С v1.0.2 публикующий Ingress задавал `proxy-ssl-verify` с CA пода выгрузки или загрузки, а ingress-nginx применяет эту настройку ко всему хосту `api.<publicDomain>`, общему с Kubernetes API, поэтому nginx проверял сертификат API-сервера по CA пода и отвергал его. Ingress больше не задаёт `proxy-ssl-verify`, `proxy-ssl-secret`, `proxy-ssl-name` и `proxy-ssl-server-name`; как в v1.0.1, nginx обращается к поду по HTTPS без проверки его сертификата."
 

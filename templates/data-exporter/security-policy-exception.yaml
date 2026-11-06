@@ -1,4 +1,4 @@
-{{- if .Values.global.enabledModules | has "admission-policy-engine-crd" }}
+{{- if .Values.global.enabledModules | has "admission-policy-engine" }}
 ---
 apiVersion: deckhouse.io/v1alpha1
 kind: SecurityPolicyException

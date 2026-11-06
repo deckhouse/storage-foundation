@@ -765,7 +765,7 @@ func TestGetFileContentDispositionEscapesName(t *testing.T) {
 		{"a b.txt", `attachment; filename="a b.txt"`},
 		{"a;b", `attachment; filename="a;b"`},
 		{`a"b`, `attachment; filename="a\"b"`},
-		{"файл.txt", `attachment; filename*=utf-8''%D1%84%D0%B0%D0%B9%D0%BB.txt`},
+		{"\u0444\u0430\u0439\u043b.txt", `attachment; filename*=utf-8''%D1%84%D0%B0%D0%B9%D0%BB.txt`},
 		{"a\x01b", `attachment; filename*=utf-8''a%01b`},
 		{"a\nb", `attachment; filename*=utf-8''a%0Ab`},
 		{"a\xffb", `attachment; filename*=utf-8''a%FFb`},

@@ -1,40 +1,62 @@
 {{- if eq (include "storage-foundation.rbacv2_new_scheme" .) "true" }}
+---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
+  name: d8:namespace-capability:storage-foundation:view
   labels:
     heritage: deckhouse
     module: storage-foundation
     rbac.deckhouse.io/aggregate-to-namespace-as: viewer
+    rbac.deckhouse.io/capability: namespace-capability.storage-foundation.view
     rbac.deckhouse.io/kind: capability
-    rbac.deckhouse.io/capability: "namespace-capability.storage-foundation.view"
     rbac.deckhouse.io/scope: namespace
-  name: d8:namespace-capability:storage-foundation:view
   annotations:
+    en.meta.deckhouse.io/description: "Read-only access to storage-foundation resources in a namespace."
     en.meta.deckhouse.io/title: "Module storage-foundation: view"
+    ru.meta.deckhouse.io/description: "Доступ только на чтение к ресурсам модуля storage-foundation в пространстве имён."
     ru.meta.deckhouse.io/title: "Модуль storage-foundation: просмотр"
-    en.meta.deckhouse.io/description: "Read-only access to the VolumeCaptureRequest, VolumeRestoreRequest, DataExport, DataImport and VolumeSnapshot resources in a namespace."
-    ru.meta.deckhouse.io/description: "Доступ только на чтение к ресурсам VolumeCaptureRequest, VolumeRestoreRequest, DataExport, DataImport и VolumeSnapshot в пространстве имён."
 rules:
-  - apiGroups:
-      - storage-foundation.deckhouse.io
-    resources:
-      - volumecapturerequests
-      - volumerestorerequests
-      - dataexports
-      - dataimports
-    verbs:
-      - get
-      - list
-      - watch
-  - apiGroups:
-      - snapshot.storage.k8s.io
-    resources:
-      - volumesnapshots
-    verbs:
-      - get
-      - list
-      - watch
+- apiGroups:
+  - snapshot.storage.k8s.io
+  resources:
+  - volumesnapshots
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
+  - storage-foundation.deckhouse.io
+  resources:
+  - dataexports
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
+  - storage-foundation.deckhouse.io
+  resources:
+  - dataimports
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
+  - storage-foundation.deckhouse.io
+  resources:
+  - volumecapturerequests
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
+  - storage-foundation.deckhouse.io
+  resources:
+  - volumerestorerequests
+  verbs:
+  - get
+  - list
+  - watch
 {{- else }}
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole

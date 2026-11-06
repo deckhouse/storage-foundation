@@ -1,0 +1,927 @@
+# The module RBAC declaration, read from the RBAC objects the module renders. Review it: every TODO is a
+# decision "dmt lint" reports; then run "dmt lint --linter rbac --fix" to bring the templates in line with it.
+# Objects rendered only under values other than the defaults are not here: lint with --values-file (or
+# --matrix) before the first --fix of the templates if the module has such templates, and declare them with when.
+#
+# Notes:
+# - ServiceAccount controller mounted its token (automountServiceAccountToken unset or true); kept as true -- set false once its pods mount the token themselves
+# - ServiceAccount data-exporter mounted its token (automountServiceAccountToken unset or true); kept as true -- set false once its pods mount the token themselves
+# - ServiceAccount data-manager-controller mounted its token (automountServiceAccountToken unset or true); kept as true -- set false once its pods mount the token themselves
+# - ServiceAccount data-source-validator mounted its token (automountServiceAccountToken unset or true); kept as true -- set false once its pods mount the token themselves
+# - ServiceAccount webhooks mounted its token (automountServiceAccountToken unset or true); kept as true -- set false once its pods mount the token themselves
+#
+# Not described by the declaration (stays hand-written, as it is):
+# - kube-system/Role/d8:storage-foundation:data-manager-controller (templates/data-manager-controller/rbac-for-us.yaml): bindRoles of data-manager-controller binds it, and the declaration names the Role without writing it -- move it to a template the declaration does not write: --fix leaves templates/data-manager-controller/rbac-for-us.yaml as it is while the Role is there
+apiVersion: rbac.deckhouse.io/v1alpha1
+resources:
+  - group: snapshot.storage.k8s.io
+    resource: volumesnapshotclasses
+    system:
+      manager:
+        - create
+        - delete
+        - deletecollection
+        - patch
+        - update
+      viewer:
+        - get
+        - list
+        - watch
+    legacy:
+      ClusterEditor:
+        - create
+        - delete
+        - deletecollection
+        - patch
+        - update
+      User:
+        - get
+        - list
+        - watch
+  - group: snapshot.storage.k8s.io
+    resource: volumesnapshotcontents
+    system:
+      manager:
+        - create
+        - delete
+        - deletecollection
+        - patch
+        - update
+      viewer:
+        - get
+        - list
+        - watch
+    legacy:
+      ClusterEditor:
+        - create
+        - delete
+        - deletecollection
+        - patch
+        - update
+      User:
+        - get
+        - list
+        - watch
+  - group: snapshot.storage.k8s.io
+    resource: volumesnapshots
+    namespace:
+      manager:
+        - create
+        - delete
+        - deletecollection
+        - patch
+        - update
+      viewer:
+        - get
+        - list
+        - watch
+    legacy:
+      ClusterEditor:
+        - create
+        - delete
+        - deletecollection
+        - patch
+        - update
+      User:
+        - get
+        - list
+        - watch
+  - group: storage-foundation.deckhouse.io
+    resource: dataexports
+    namespace:
+      manager:
+        - create
+        - delete
+        - deletecollection
+        - patch
+        - update
+      transfer_volume_data:
+        - create
+        - delete
+        - get
+        - list
+        - watch
+      viewer:
+        - get
+        - list
+        - watch
+    legacy:
+      ClusterEditor:
+        - create
+        - delete
+        - deletecollection
+        - patch
+        - update
+      User:
+        - get
+        - list
+        - watch
+  - group: storage-foundation.deckhouse.io
+    resource: dataexports/download
+    namespace:
+      transfer_volume_data:
+        - create
+  - group: storage-foundation.deckhouse.io
+    resource: dataimports
+    namespace:
+      manager:
+        - create
+        - delete
+        - deletecollection
+        - patch
+        - update
+      transfer_volume_data:
+        - create
+        - delete
+        - get
+        - list
+        - watch
+      viewer:
+        - get
+        - list
+        - watch
+    legacy:
+      ClusterEditor:
+        - create
+        - delete
+        - deletecollection
+        - patch
+        - update
+      User:
+        - get
+        - list
+        - watch
+  - group: storage-foundation.deckhouse.io
+    resource: dataimports/download
+    namespace:
+      transfer_volume_data:
+        - create
+  - group: storage-foundation.deckhouse.io
+    resource: volumecapturerequests
+    namespace:
+      manager:
+        - create
+        - delete
+        - deletecollection
+        - patch
+        - update
+      viewer:
+        - get
+        - list
+        - watch
+    legacy:
+      ClusterEditor:
+        - create
+        - delete
+        - deletecollection
+        - patch
+        - update
+      User:
+        - get
+        - list
+        - watch
+  - group: storage-foundation.deckhouse.io
+    resource: volumerestorerequests
+    namespace:
+      manager:
+        - create
+        - delete
+        - deletecollection
+        - patch
+        - update
+      viewer:
+        - get
+        - list
+        - watch
+    legacy:
+      ClusterEditor:
+        - create
+        - delete
+        - deletecollection
+        - patch
+        - update
+      User:
+        - get
+        - list
+        - watch
+  - group: populator.storage.k8s.io
+    resource: volumepopulators
+    noAccess: 'the registration of the populators the module ships, read by the volume data source validator; there is nothing in it for users to read or change'
+capabilities:
+  namespace.transfer_volume_data:
+    level: admin
+    labels:
+      state-snapshotter.deckhouse.io/aggregate-to-backup-agent: "true"
+    title:
+      en: 'Module storage-foundation: transfer volume data'
+      ru: 'Модуль storage-foundation: перенос данных томов'
+    description:
+      en: 'Move the contents of a volume out of the cluster and back in over HTTP: create, read and delete DataExport and DataImport resources in a namespace and call their download subresources.'
+      ru: 'Перенос содержимого тома из кластера и обратно по HTTP: создание, чтение и удаление ресурсов DataExport и DataImport в пространстве имён и обращение к их субресурсам download.'
+serviceAccounts:
+  - name: controller
+    path: controller
+    labels:
+      app: controller
+    clusterRules:
+      - apiGroups:
+          - storage-foundation.deckhouse.io
+        resources:
+          - volumecapturerequests
+        verbs:
+          - get
+          - list
+          - watch
+          - create
+          - update
+          - patch
+          - delete
+      - apiGroups:
+          - storage-foundation.deckhouse.io
+        resources:
+          - volumecapturerequests/status
+        verbs:
+          - get
+          - update
+          - patch
+      - apiGroups:
+          - storage-foundation.deckhouse.io
+        resources:
+          - volumerestorerequests
+        verbs:
+          - get
+          - list
+          - watch
+          - create
+          - update
+          - patch
+          - delete
+      - apiGroups:
+          - storage-foundation.deckhouse.io
+        resources:
+          - volumerestorerequests/status
+        verbs:
+          - get
+          - update
+          - patch
+      - apiGroups:
+          - deckhouse.io
+        resources:
+          - objectkeepers
+        verbs:
+          - get
+          - list
+          - watch
+          - create
+          - update
+          - patch
+          - delete
+      - apiGroups:
+          - deckhouse.io
+        resources:
+          - objectkeepers/status
+        verbs:
+          - get
+          - update
+          - patch
+      - apiGroups:
+          - snapshot.storage.k8s.io
+        resources:
+          - volumesnapshotcontents
+        verbs:
+          - get
+          - list
+          - watch
+          - create
+          - update
+          - patch
+          - delete
+      - apiGroups:
+          - snapshot.storage.k8s.io
+        resources:
+          - volumesnapshotcontents/status
+        verbs:
+          - get
+          - update
+          - patch
+      - apiGroups:
+          - snapshot.storage.k8s.io
+        resources:
+          - volumesnapshotclasses
+        verbs:
+          - get
+          - list
+          - watch
+      - apiGroups:
+          - ""
+        resources:
+          - persistentvolumes
+        verbs:
+          - get
+          - list
+          - watch
+          - update
+          - patch
+      - apiGroups:
+          - ""
+        resources:
+          - persistentvolumeclaims
+        verbs:
+          - get
+          - list
+          - watch
+          - delete
+      - apiGroups:
+          - ""
+        resources:
+          - namespaces
+        verbs:
+          - get
+          - list
+          - watch
+      - apiGroups:
+          - ""
+        resources:
+          - configmaps
+        verbs:
+          - get
+          - list
+          - watch
+      - apiGroups:
+          - storage.k8s.io
+        resources:
+          - storageclasses
+        verbs:
+          - get
+          - list
+          - watch
+      - apiGroups:
+          - snapshot.storage.k8s.io
+        resources:
+          - volumesnapshots
+        verbs:
+          - get
+          - list
+          - watch
+          - create
+          - update
+          - patch
+          - delete
+      - apiGroups:
+          - snapshot.storage.k8s.io
+        resources:
+          - volumesnapshots/status
+        verbs:
+          - get
+          - update
+          - patch
+      - apiGroups:
+          - state-snapshotter.deckhouse.io
+        resources:
+          - manifestcapturerequests
+        verbs:
+          - get
+          - list
+          - watch
+          - create
+          - update
+          - patch
+          - delete
+      - apiGroups:
+          - ""
+        resources:
+          - events
+        verbs:
+          - create
+          - patch
+      - apiGroups:
+          - state-snapshotter.deckhouse.io
+        resources:
+          - snapshotcontents
+        verbs:
+          - get
+      - apiGroups:
+          - subresources.state-snapshotter.deckhouse.io
+        resources:
+          - snapshotcontents/manifests-download
+        verbs:
+          - get
+      - apiGroups:
+          - subresources.state-snapshotter.deckhouse.io
+        resources:
+          - snapshotcontents/manifests-upload
+        verbs:
+          - create
+    namespaceRules:
+      - apiGroups:
+          - coordination.k8s.io
+        resources:
+          - leases
+        verbs:
+          - get
+          - list
+          - watch
+          - create
+          - update
+          - patch
+          - delete
+      - apiGroups:
+          - ""
+        resources:
+          - events
+        verbs:
+          - create
+          - patch
+    roleName: controller-leader-election
+    bindClusterRoles:
+      - name: system:auth-delegator
+        bindingName: d8:storage-foundation:controller:auth-delegator
+      - d8:rbac-proxy
+    bindRoles:
+      - namespace: kube-system
+        name: extension-apiserver-authentication-reader
+        bindingName: d8:storage-foundation:controller-auth-reader
+    automountServiceAccountToken: true
+  - name: data-exporter
+    path: data-exporter
+    labels:
+      app: data-exporter
+    clusterRules:
+      - apiGroups:
+          - storage-foundation.deckhouse.io
+        resources:
+          - dataexports/status
+          - dataexports
+          - dataimports/status
+          - dataimports
+        verbs:
+          - list
+          - get
+          - watch
+          - update
+      - apiGroups:
+          - authentication.k8s.io
+        resources:
+          - tokenreviews
+        verbs:
+          - create
+      - apiGroups:
+          - authorization.k8s.io
+        resources:
+          - subjectaccessreviews
+        verbs:
+          - create
+    namespaceRules:
+      - apiGroups:
+          - ""
+        resources:
+          - secrets
+        verbs:
+          - get
+          - create
+          - update
+    automountServiceAccountToken: true
+  - name: data-manager-controller
+    path: data-manager-controller
+    labels:
+      app: data-manager-controller
+    clusterRules:
+      - apiGroups:
+          - storage-foundation.deckhouse.io
+        resources:
+          - dataexports
+          - dataexports/status
+          - dataimports
+          - dataimports/status
+        verbs:
+          - create
+          - delete
+          - list
+          - get
+          - watch
+          - update
+      - apiGroups:
+          - storage-foundation.deckhouse.io
+        resources:
+          - volumecapturerequests
+          - volumerestorerequests
+        verbs:
+          - create
+          - delete
+          - list
+          - get
+          - watch
+          - update
+      - apiGroups:
+          - state-snapshotter.deckhouse.io
+        resources:
+          - snapshotcontents
+        verbs:
+          - get
+          - list
+          - watch
+      - apiGroups:
+          - deckhouse.io
+        resources:
+          - objectkeepers
+        verbs:
+          - create
+          - get
+          - list
+          - watch
+          - update
+          - patch
+      - apiGroups:
+          - ""
+        resources:
+          - events
+        verbs:
+          - create
+          - list
+          - patch
+      - apiGroups:
+          - storage.k8s.io
+        resources:
+          - storageclasses
+          - volumeattachments
+        verbs:
+          - list
+          - get
+          - watch
+      - apiGroups:
+          - ""
+        resources:
+          - persistentvolumes
+          - persistentvolumeclaims
+          - pods
+          - configmaps
+        verbs:
+          - get
+          - list
+          - watch
+          - create
+          - update
+          - patch
+          - delete
+      - apiGroups:
+          - virtualization.deckhouse.io
+        resources:
+          - virtualdisks
+          - virtualdisksnapshots
+        verbs:
+          - get
+          - list
+          - watch
+      - apiGroups:
+          - ""
+        resources:
+          - services
+        verbs:
+          - get
+          - list
+          - watch
+          - update
+          - patch
+          - delete
+      - apiGroups:
+          - apps
+        resources:
+          - deployments
+        verbs:
+          - list
+          - watch
+          - create
+      - apiGroups:
+          - networking.k8s.io
+        resources:
+          - ingresses
+        verbs:
+          - get
+          - list
+          - watch
+          - create
+          - delete
+          - update
+          - patch
+      - apiGroups:
+          - snapshot.storage.k8s.io
+        resources:
+          - volumesnapshots
+          - volumesnapshotcontents
+        verbs:
+          - get
+          - list
+          - watch
+          - create
+          - delete
+          - update
+          - patch
+      - apiGroups:
+          - snapshot.storage.k8s.io
+        resources:
+          - volumesnapshotclasses
+        verbs:
+          - get
+          - list
+          - watch
+      - apiGroups:
+          - apiextensions.k8s.io
+        resources:
+          - customresourcedefinitions
+        verbs:
+          - get
+          - list
+    namespaceRules:
+      - apiGroups:
+          - coordination.k8s.io
+        resources:
+          - leases
+        verbs:
+          - get
+          - watch
+          - list
+          - delete
+          - update
+          - create
+      - apiGroups:
+          - ""
+        resources:
+          - persistentvolumeclaims
+          - pods
+          - configmaps
+          - services
+          - secrets
+        verbs:
+          - get
+          - list
+          - watch
+          - update
+          - create
+          - delete
+          - patch
+      - apiGroups:
+          - apps
+        resources:
+          - deployments
+        verbs:
+          - get
+          - list
+          - watch
+          - create
+          - delete
+          - update
+          - patch
+      - apiGroups:
+          - networking.k8s.io
+        resources:
+          - ingresses
+        verbs:
+          - get
+          - list
+          - watch
+          - create
+          - delete
+          - update
+          - patch
+    bindClusterRoles:
+      - d8:rbac-proxy
+    bindRoles:
+      - namespace: kube-system
+        name: d8:storage-foundation:data-manager-controller
+        bindingName: d8:storage-foundation:data-manager-controller
+    automountServiceAccountToken: true
+  - name: data-source-validator
+    path: data-source-validator
+    labels:
+      app: data-source-validator
+    clusterRules:
+      - apiGroups:
+          - populator.storage.k8s.io
+        resources:
+          - volumepopulators
+        verbs:
+          - get
+          - list
+          - watch
+      - apiGroups:
+          - ""
+        resources:
+          - persistentvolumeclaims
+        verbs:
+          - get
+          - list
+          - watch
+      - apiGroups:
+          - ""
+        resources:
+          - events
+        verbs:
+          - list
+          - watch
+          - create
+          - update
+          - patch
+    automountServiceAccountToken: true
+  - name: snapshot-controller
+    path: snapshot-controller
+    labels:
+      app: snapshot-controller
+    namespaceRules:
+      - apiGroups:
+          - coordination.k8s.io
+        resources:
+          - leases
+        verbs:
+          - get
+          - watch
+          - list
+          - delete
+          - update
+          - create
+    roleName: snapshot-controller:leader-election
+    bindClusterRoles:
+      - d8:rbac-proxy
+    extraClusterRoles:
+      - name: runner
+        rules:
+          - apiGroups:
+              - ""
+            resources:
+              - persistentvolumes
+            verbs:
+              - get
+              - list
+              - watch
+          - apiGroups:
+              - ""
+            resources:
+              - persistentvolumeclaims
+            verbs:
+              - get
+              - list
+              - watch
+              - update
+          - apiGroups:
+              - storage.k8s.io
+            resources:
+              - storageclasses
+            verbs:
+              - get
+              - list
+              - watch
+          - apiGroups:
+              - ""
+            resources:
+              - events
+            verbs:
+              - list
+              - watch
+              - create
+              - update
+              - patch
+          - apiGroups:
+              - snapshot.storage.k8s.io
+            resources:
+              - volumesnapshotclasses
+            verbs:
+              - get
+              - list
+              - watch
+          - apiGroups:
+              - snapshot.storage.k8s.io
+            resources:
+              - volumesnapshotcontents
+            verbs:
+              - create
+              - get
+              - list
+              - watch
+              - update
+              - patch
+              - delete
+          - apiGroups:
+              - snapshot.storage.k8s.io
+            resources:
+              - volumesnapshotcontents/status
+            verbs:
+              - patch
+          - apiGroups:
+              - snapshot.storage.k8s.io
+            resources:
+              - volumesnapshots
+            verbs:
+              - get
+              - list
+              - watch
+              - update
+              - patch
+          - apiGroups:
+              - snapshot.storage.k8s.io
+            resources:
+              - volumesnapshots/status
+            verbs:
+              - update
+              - patch
+          - apiGroups:
+              - ""
+            resources:
+              - secrets
+            verbs:
+              - get
+  - name: webhooks
+    path: webhooks
+    labels:
+      app: webhooks
+    clusterRules:
+      - apiGroups:
+          - storage.k8s.io
+        resources:
+          - storageclasses
+        verbs:
+          - get
+          - list
+      - apiGroups:
+          - ""
+        resources:
+          - persistentvolumeclaims
+        verbs:
+          - get
+          - list
+      - apiGroups:
+          - snapshot.storage.k8s.io
+        resources:
+          - volumesnapshotclasses
+        verbs:
+          - get
+          - list
+    automountServiceAccountToken: true
+prometheusAccess:
+  - deployments:
+      - snapshot-controller
+    when: (.Values.global.enabledModules | has "prometheus")
+  - path: controller
+    name: prometheus-metrics
+    deployments:
+      - controller
+    when: (.Values.global.enabledModules | has "prometheus")
+    labels:
+      app: controller
+  - path: data-manager-controller
+    name: prometheus-metrics
+    deployments:
+      - data-manager-controller
+    when: (.Values.global.enabledModules | has "prometheus")
+    labels:
+      app: data-manager-controller
+access:
+  - name: admin-kubeconfig
+    subjects:
+      - kind: Group
+        name: kubeadm:cluster-admins
+    clusterRules:
+      - apiGroups:
+          - storage-foundation.deckhouse.io
+        resources:
+          - volumecapturerequests
+          - volumerestorerequests
+          - dataexports
+          - dataimports
+        verbs:
+          - get
+          - list
+          - watch
+          - create
+          - delete
+          - deletecollection
+          - patch
+          - update
+      - apiGroups:
+          - snapshot.storage.k8s.io
+        resources:
+          - volumesnapshotclasses
+          - volumesnapshotcontents
+          - volumesnapshots
+        verbs:
+          - get
+          - list
+          - watch
+          - create
+          - delete
+          - deletecollection
+          - patch
+          - update
+  - name: snapshot-core-restore-delegation
+    subjects:
+      - kind: ServiceAccount
+        name: controller
+        namespace: d8-state-snapshotter
+    path: controller
+    labels:
+      app: controller
+    clusterRules:
+      - apiGroups:
+          - subresources.storage-foundation.deckhouse.io
+        resources:
+          - volumesnapshots/manifests-with-data-restoration
+        verbs:
+          - get

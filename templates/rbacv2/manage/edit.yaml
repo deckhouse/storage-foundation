@@ -1,38 +1,47 @@
 {{- if eq (include "storage-foundation.rbacv2_new_scheme" .) "true" }}
+---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
-  creationTimestamp: null
+  name: d8:system-capability:storage-foundation:edit
   labels:
     heritage: deckhouse
     module: storage-foundation
     rbac.deckhouse.io/aggregate-to-storage-as: manager
+    rbac.deckhouse.io/capability: system-capability.storage-foundation.edit
     rbac.deckhouse.io/kind: capability
-    rbac.deckhouse.io/capability: "system-capability.storage-foundation.edit"
-    rbac.deckhouse.io/scope: system
     rbac.deckhouse.io/namespace: d8-storage-foundation
-  name: d8:system-capability:storage-foundation:edit
+    rbac.deckhouse.io/scope: system
   annotations:
-    en.meta.deckhouse.io/title: "Module storage-foundation: edit configuration and cluster resources"
-    ru.meta.deckhouse.io/title: "Модуль storage-foundation: управление конфигурацией и кластерными ресурсами"
-    en.meta.deckhouse.io/description: "Manage the storage-foundation module configuration and the cluster-scoped VolumeSnapshotClass and VolumeSnapshotContent resources."
-    ru.meta.deckhouse.io/description: "Управление конфигурацией модуля storage-foundation и кластерными ресурсами VolumeSnapshotClass и VolumeSnapshotContent."
+    en.meta.deckhouse.io/description: "Manage the storage-foundation module configuration."
+    en.meta.deckhouse.io/title: "Module storage-foundation: edit configuration"
+    ru.meta.deckhouse.io/description: "Управление конфигурацией модуля storage-foundation."
+    ru.meta.deckhouse.io/title: "Модуль storage-foundation: управление конфигурацией"
 rules:
 - apiGroups:
   - deckhouse.io
-  resourceNames:
-  - storage-foundation
   resources:
   - moduleconfigs
+  resourceNames:
+  - storage-foundation
   verbs:
   - create
-  - update
-  - patch
   - delete
+  - patch
+  - update
 - apiGroups:
   - snapshot.storage.k8s.io
   resources:
   - volumesnapshotclasses
+  verbs:
+  - create
+  - delete
+  - deletecollection
+  - patch
+  - update
+- apiGroups:
+  - snapshot.storage.k8s.io
+  resources:
   - volumesnapshotcontents
   verbs:
   - create
