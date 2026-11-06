@@ -30,7 +30,6 @@ import (
 	"time"
 
 	"github.com/deckhouse/sds-common-lib/logger"
-	"github.com/deckhouse/storage-foundation/common"
 )
 
 type TLSBundle struct {
@@ -107,7 +106,7 @@ func GenerateTLSBundle(logger logger.Logger, ip, host, namespace string, ttl tim
 		srvTpl.DNSNames = []string{
 			host,
 			fmt.Sprintf("%s.%s", host, namespace),
-			common.BackendServerName(host, namespace),
+			fmt.Sprintf("%s.%s.svc", host, namespace),
 			fmt.Sprintf("%s.%s.svc.cluster.local", host, namespace),
 		}
 	}

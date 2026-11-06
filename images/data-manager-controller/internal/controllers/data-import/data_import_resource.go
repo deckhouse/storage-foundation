@@ -1124,9 +1124,6 @@ func (r *DataImportReconciler) makeIngressCfg() publish.IngressCfg {
 		// (1m, which 413s any real upload) — bounded to avoid unbounded nginx request buffering on the
 		// ingress node while still allowing arbitrarily large volumes via chunked PUTs.
 		ProxyBodySize: "64m",
-		// The importer signs its serving certificate for the headless Service with its own CA.
-		BackendCASecretName: r.names.CASecretName,
-		BackendServerName:   common.BackendServerName(r.names.HeadlessServiceName, r.Config.ControllerNamespace),
 	}
 }
 

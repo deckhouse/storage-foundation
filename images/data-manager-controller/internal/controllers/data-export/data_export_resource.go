@@ -827,9 +827,6 @@ func (r *DataexportReconciler) makePublishConfigs(dataExport *dev1alpha1.DataExp
 		// carrying the filename, the range bookkeeping and the file attributes on the way back.
 		CorsAllowHeaders:  exportCORSAllowHeaders,
 		CorsExposeHeaders: exportCORSExposeHeaders,
-		// The exporter signs its serving certificate for the headless Service with its own CA.
-		BackendCASecretName: generatedNames.CASecretName,
-		BackendServerName:   BackendServerName(generatedNames.HeadlessServiceName, r.Config.ControllerNamespace),
 	}
 
 	return serviceCfg, ingressCfg

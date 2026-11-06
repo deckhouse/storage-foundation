@@ -4,6 +4,9 @@ date: "2026-xx-xx"
 summary: ""
 highlights: []
 
+fixes:
+  - "While a `DataExport` or `DataImport` was published, the Kubernetes API published through the cluster Ingress answered `502`. Since v1.0.2 the publishing Ingress set `proxy-ssl-verify` with the CA of the exporter or importer pod, and ingress-nginx applies that setting to the whole `api.<publicDomain>` host it shares with the Kubernetes API, so nginx checked the API server certificate against the pod's CA and refused it. The Ingress no longer sets `proxy-ssl-verify`, `proxy-ssl-secret`, `proxy-ssl-name` and `proxy-ssl-server-name`; as in v1.0.1, nginx speaks HTTPS to the pod without verifying its certificate."
+
 
 
 

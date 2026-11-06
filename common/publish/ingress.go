@@ -41,17 +41,13 @@ const (
 	ConsoleSubdomain = "console"
 
 	// Nginx Ingress annotations
-	AnnotationBackendProtocol    = "nginx.ingress.kubernetes.io/backend-protocol"
-	AnnotationEnableCORS         = "nginx.ingress.kubernetes.io/enable-cors"
-	AnnotationCORSAllowMethods   = "nginx.ingress.kubernetes.io/cors-allow-methods"
-	AnnotationCORSAllowOrigin    = "nginx.ingress.kubernetes.io/cors-allow-origin"
-	AnnotationCORSAllowHeaders   = "nginx.ingress.kubernetes.io/cors-allow-headers"
-	AnnotationCORSExposeHeaders  = "nginx.ingress.kubernetes.io/cors-expose-headers"
-	AnnotationProxyBodySize      = "nginx.ingress.kubernetes.io/proxy-body-size"
-	AnnotationProxySSLVerify     = "nginx.ingress.kubernetes.io/proxy-ssl-verify"
-	AnnotationProxySSLSecret     = "nginx.ingress.kubernetes.io/proxy-ssl-secret"
-	AnnotationProxySSLName       = "nginx.ingress.kubernetes.io/proxy-ssl-name"
-	AnnotationProxySSLServerName = "nginx.ingress.kubernetes.io/proxy-ssl-server-name"
+	AnnotationBackendProtocol   = "nginx.ingress.kubernetes.io/backend-protocol"
+	AnnotationEnableCORS        = "nginx.ingress.kubernetes.io/enable-cors"
+	AnnotationCORSAllowMethods  = "nginx.ingress.kubernetes.io/cors-allow-methods"
+	AnnotationCORSAllowOrigin   = "nginx.ingress.kubernetes.io/cors-allow-origin"
+	AnnotationCORSAllowHeaders  = "nginx.ingress.kubernetes.io/cors-allow-headers"
+	AnnotationCORSExposeHeaders = "nginx.ingress.kubernetes.io/cors-expose-headers"
+	AnnotationProxyBodySize     = "nginx.ingress.kubernetes.io/proxy-body-size"
 )
 
 // CORSStandardAllowHeaders is the baseline request-header list every cors-allow-headers value must
@@ -86,14 +82,6 @@ type IngressCfg struct {
 	// download-only ingresses (DataExport). Upload ingresses (DataImport PUT) must raise it, otherwise
 	// nginx rejects a body larger than 1m with 413 before the request reaches the exporter.
 	ProxyBodySize string
-	// BackendCASecretName, when non-empty, makes nginx verify the certificate of the backend: the
-	// Secret (in the Ingress namespace) holds the CA, under ca.crt, that the exporter or importer pod
-	// signed its serving certificate with, and the certificate must name BackendServerName. Without it
-	// nginx speaks HTTPS to the pod but would accept any certificate.
-	BackendCASecretName string
-	// BackendServerName is the name nginx expects in the backend certificate and sends as SNI, one of
-	// the DNS names the pod puts in its certificate.
-	BackendServerName string
 }
 
 // Ensures Ingress resource is created or updated
@@ -236,13 +224,6 @@ func makeIngress(cfg IngressCfg, host, path string, pathType *networkingv1.PathT
 
 	if cfg.ProxyBodySize != "" {
 		annotations[AnnotationProxyBodySize] = cfg.ProxyBodySize
-	}
-
-	if cfg.BackendCASecretName != "" {
-		annotations[AnnotationProxySSLVerify] = "on"
-		annotations[AnnotationProxySSLSecret] = cfg.IngressName.Namespace + "/" + cfg.BackendCASecretName
-		annotations[AnnotationProxySSLName] = cfg.BackendServerName
-		annotations[AnnotationProxySSLServerName] = "on"
 	}
 
 	return &networkingv1.Ingress{

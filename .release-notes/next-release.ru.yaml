@@ -4,6 +4,9 @@ date: "2026-xx-xx"
 summary: ""
 highlights: []
 
+fixes:
+  - "Пока `DataExport` или `DataImport` был опубликован, Kubernetes API, опубликованный через Ingress кластера, отвечал `502`. С v1.0.2 публикующий Ingress задавал `proxy-ssl-verify` с CA пода выгрузки или загрузки, а ingress-nginx применяет эту настройку ко всему хосту `api.<publicDomain>`, общему с Kubernetes API, поэтому nginx проверял сертификат API-сервера по CA пода и отвергал его. Ingress больше не задаёт `proxy-ssl-verify`, `proxy-ssl-secret`, `proxy-ssl-name` и `proxy-ssl-server-name`; как в v1.0.1, nginx обращается к поду по HTTPS без проверки его сертификата."
+
 
 
 
