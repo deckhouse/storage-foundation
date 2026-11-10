@@ -33,12 +33,14 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
 	"sigs.k8s.io/controller-runtime/pkg/manager"
+	ctrlmetrics "sigs.k8s.io/controller-runtime/pkg/metrics"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 
 	"github.com/deckhouse/sds-common-lib/logger"
 	v1alpha1 "github.com/deckhouse/storage-foundation/api/v1alpha1"
 	"github.com/deckhouse/storage-foundation/images/controller/internal/controllers"
 	"github.com/deckhouse/storage-foundation/images/controller/internal/domainapi"
+	"github.com/deckhouse/storage-foundation/images/controller/metrics"
 	"github.com/deckhouse/storage-foundation/images/controller/pkg/config"
 	"github.com/deckhouse/storage-foundation/images/controller/pkg/kubutils"
 )
@@ -162,6 +164,13 @@ func main() {
 		os.Exit(1)
 	}
 	log.Info("aggregated API server added to manager")
+
+	// Register metrics
+	if err = metrics.Register(ctrlmetrics.Registry); err != nil {
+		log.Error("unable to register metrics", logger.Err(err))
+		os.Exit(1)
+	}
+	log.Info("metrics registered")
 
 	if err = mgr.AddHealthzCheck("healthz", healthz.Ping); err != nil {
 		log.Error("unable to mgr.AddHealthzCheck", logger.Err(err))
