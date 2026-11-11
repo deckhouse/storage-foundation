@@ -25,9 +25,10 @@ import (
 )
 
 // Register registers the controller's collectors in reg; they publish only after elected is closed.
-func Register(reg prometheus.Registerer, reader client.Reader, elected <-chan struct{}) error {
+// apiReader reads StorageClasses straight from the API server.
+func Register(reg prometheus.Registerer, reader, apiReader client.Reader, elected <-chan struct{}) error {
 	collectors := []prometheus.Collector{
-		newVCRCollector(reader),
+		newVCRCollector(reader, apiReader),
 	}
 
 	for _, c := range collectors {

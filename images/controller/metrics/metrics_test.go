@@ -22,6 +22,7 @@ import (
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/testutil"
+	storagev1 "k8s.io/api/storage/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
@@ -62,8 +63,10 @@ func TestRegister(t *testing.T) {
 			t.Parallel()
 
 			scheme := runtime.NewScheme()
-			if err := v1alpha1.AddToScheme(scheme); err != nil {
-				t.Fatalf("add to scheme: %v", err)
+			for _, add := range []func(*runtime.Scheme) error{v1alpha1.AddToScheme, storagev1.AddToScheme} {
+				if err := add(scheme); err != nil {
+					t.Fatalf("add to scheme: %v", err)
+				}
 			}
 			vcr := &v1alpha1.VolumeCaptureRequest{
 				Name:      "a",
@@ -79,7 +82,7 @@ func TestRegister(t *testing.T) {
 
 			var err error
 			for range tt.registrations {
-				err = metrics.Register(reg, reader, elected)
+				err = metrics.Register(reg, reader, reader, elected)
 			}
 
 			if (err != nil) != tt.wantErr {

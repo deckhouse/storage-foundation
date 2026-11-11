@@ -31,21 +31,26 @@ var _ prometheus.Collector = (*vcrCollector)(nil)
 // vcrCollector counts VolumeCaptureRequests from the cache on every scrape.
 type vcrCollector struct {
 	reader client.Reader
-	desc   *prometheus.Desc
+	// apiReader lists StorageClasses without an informer in the manager cache.
+	apiReader client.Reader
+	desc      *prometheus.Desc
 }
 
 type vcrKey struct {
-	mode  string
-	state string
+	mode         string
+	driver       string
+	storageClass string
+	state        string
 }
 
-func newVCRCollector(reader client.Reader) *vcrCollector {
+func newVCRCollector(reader, apiReader client.Reader) *vcrCollector {
 	return &vcrCollector{
-		reader: reader,
+		reader:    reader,
+		apiReader: apiReader,
 		desc: prometheus.NewDesc(
 			"storage_foundation_vcr_objects",
-			"VolumeCaptureRequests in the cluster by mode and state.",
-			[]string{"mode", "state"},
+			"VolumeCaptureRequests in the cluster by mode, CSI driver, StorageClass and state.",
+			[]string{"mode", "driver", "storage_class", "state"},
 			nil,
 		),
 	}
@@ -56,10 +61,9 @@ func (c *vcrCollector) Describe(ch chan<- *prometheus.Desc) {
 	ch <- c.desc
 }
 
-// Collect sends one gauge per label set. It sends nothing when the requests cannot be read:
-// a gap in the scrape is visible, a wrong number is not.
+// Collect sends one gauge per label set.
 func (c *vcrCollector) Collect(ch chan<- prometheus.Metric) {
-	// Collect has no context parameter, so a scrape sets its own deadline.
+	// prometheus.Collector.Collect has no ctx parameter.
 	ctx, cancel := context.WithTimeout(context.Background(), collectTimeout)
 	defer cancel()
 
@@ -69,17 +73,41 @@ func (c *vcrCollector) Collect(ch chan<- prometheus.Metric) {
 		return
 	}
 
-	for key, n := range countRequests(requests.Items) {
-		sendGauge(ctx, ch, c.desc, float64(n), key.mode, key.state)
+	// No requests, so the StorageClasses are not needed.
+	if len(requests.Items) == 0 {
+		return
+	}
+
+	provisioners, err := storageClassProvisioners(ctx, c.apiReader)
+	if err != nil {
+		log.FromContext(ctx).Error(err, "list StorageClasses")
+		return
+	}
+
+	for key, n := range c.countRequests(ctx, requests.Items, provisioners) {
+		sendGauge(ctx, ch, c.desc, float64(n), key.mode, key.driver, key.storageClass, key.state)
 	}
 }
 
-// countRequests counts the requests by label set.
-func countRequests(requests []v1alpha1.VolumeCaptureRequest) map[vcrKey]int {
+// countRequests counts the requests by label set. It reads the source PVC and PV of each request.
+func (c *vcrCollector) countRequests(
+	ctx context.Context,
+	requests []v1alpha1.VolumeCaptureRequest,
+	provisioners map[string]string,
+) map[vcrKey]int {
 	counts := make(map[vcrKey]int)
 
 	for i := range requests {
-		counts[vcrKey{mode: vcrMode(&requests[i]), state: vcrState(&requests[i])}]++
+		vcr := &requests[i]
+		driver, scName := vcrVolumeLabels(ctx, c.reader, vcr, provisioners)
+		key := vcrKey{
+			mode:         vcrMode(vcr),
+			driver:       driver,
+			storageClass: scName,
+			state:        vcrState(vcr),
+		}
+
+		counts[key]++
 	}
 
 	return counts
