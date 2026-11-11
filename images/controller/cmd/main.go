@@ -166,7 +166,7 @@ func main() {
 	log.Info("aggregated API server added to manager")
 
 	// Register metrics
-	if err = metrics.Register(ctrlmetrics.Registry); err != nil {
+	if err = metrics.Register(ctrlmetrics.Registry, mgr.GetClient(), mgr.Elected()); err != nil {
 		log.Error("unable to register metrics", logger.Err(err))
 		os.Exit(1)
 	}

@@ -21,16 +21,20 @@ import (
 	"fmt"
 
 	"github.com/prometheus/client_golang/prometheus"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
-// Register registers the controller's own collectors in reg
-func Register(reg prometheus.Registerer) error {
-	var collectors []prometheus.Collector
+// Register registers the controller's collectors in reg; they publish only after elected is closed.
+func Register(reg prometheus.Registerer, reader client.Reader, elected <-chan struct{}) error {
+	collectors := []prometheus.Collector{
+		newVCRCollector(reader),
+	}
 
 	for _, c := range collectors {
-		if err := reg.Register(c); err != nil {
+		if err := reg.Register(newLeaderCollector(c, elected)); err != nil {
 			return fmt.Errorf("register metrics: %w", err)
 		}
 	}
+
 	return nil
 }
