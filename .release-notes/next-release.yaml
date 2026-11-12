@@ -4,11 +4,21 @@ date: "2026-xx-xx"
 summary: ""
 highlights: []
 
+new_features:
+  - "The module registers the grants on `StorageClass` and `VolumeSnapshotClass` for project tenants when `multitenancy-manager` is enabled. A project limited by a `ClusterResourceGrantPolicy` can no longer name a `StorageClass` it is not allowed to use in a `DataImport` (target PVC and scratch volume) or a `VolumeRestoreRequest`, nor a `VolumeSnapshotClass` it is not allowed to use in a `VolumeSnapshot`; such objects are denied on creation. Without a policy every class stays available. The module ships the `storageclasses` definition and the `storageclasses-pvc` reference with the same spec as `multitenancy-manager` does; while `multitenancy-manager` still ships its copy, either module may own these objects, and ownership passing between them does not change the check."
+
 improvements:
   - "On DKP 1.78 and later, the `d8:system-capability:storage-foundation:view` and `d8:system-capability:storage-foundation:edit` roles also give read access to the `storage-foundation` ModuleConfig, and `edit` write access to it, and carry the standard titles and descriptions of the platform, as every capability of the DKP 1.78 role model does. The RBAC of the module is now declared in `rbac.yaml`, and the RBACv2 templates are written from it; clusters below DKP 1.78 keep the roles they had."
 
 fixes:
   - "While a `DataExport` or `DataImport` was published, the Kubernetes API published through the cluster Ingress answered `502`. Since v1.0.2 the publishing Ingress set `proxy-ssl-verify` with the CA of the exporter or importer pod, and ingress-nginx applies that setting to the whole `api.<publicDomain>` host it shares with the Kubernetes API, so nginx checked the API server certificate against the pod's CA and refused it. The Ingress no longer sets `proxy-ssl-verify`, `proxy-ssl-secret`, `proxy-ssl-name` and `proxy-ssl-server-name`; as in v1.0.1, nginx speaks HTTPS to the pod without verifying its certificate."
+
+upgrade_notes:
+  - "With `multitenancy-manager` enabled, disabling storage-foundation removes the grants the module registers: the `volumesnapshotclasses` grant and the `DataImport` and `VolumeRestoreRequest` references, and also the `storageclasses` grant and its `PersistentVolumeClaim` reference `storageclasses-pvc` if the storage-foundation release owns them at that moment (annotation `meta.helm.sh/release-name: storage-foundation`). Until a grant is registered again, a `ClusterResourceGrantPolicy` does not restrict the classes of that grant in projects; enable storage-foundation again to restore the restrictions."
+
+docs:
+  - "The usage page describes how to restrict `StorageClass` and `VolumeSnapshotClass` per project with a `ClusterResourceGrantPolicy`, how the class of a `VolumeSnapshot` that names none is checked, and what disabling the module does to the grants."
+
 
 
 

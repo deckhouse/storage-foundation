@@ -1,0 +1,38 @@
+{{- if and (.Values.global.enabledModules | has "multitenancy-manager") (.Capabilities.APIVersions.Has "multitenancy.deckhouse.io/v1alpha1/GrantableClusterResourceDefinition") }}
+---
+apiVersion: multitenancy.deckhouse.io/v1alpha1
+kind: GrantableClusterResourceDefinition
+metadata:
+  name: volumesnapshotclasses
+  {{- include "helm_lib_module_labels" (list .) | nindent 2 }}
+spec:
+  grantedResource:
+    apiGroup: snapshot.storage.k8s.io
+    kind: VolumeSnapshotClass
+  enforcement: Managed
+  defaultAvailability: All
+  catalogFields:
+  - name: driver
+    path: $.driver
+  - name: deletionPolicy
+    path: $.deletionPolicy
+---
+apiVersion: multitenancy.deckhouse.io/v1alpha1
+kind: GrantableClusterResourceReference
+metadata:
+  name: volumesnapshotclasses-volumesnapshot
+  {{- include "helm_lib_module_labels" (list .) | nindent 2 }}
+spec:
+  grantableClusterResourceName: volumesnapshotclasses
+  rule:
+    apiGroups:
+    - snapshot.storage.k8s.io
+    apiVersions:
+    - v1
+    - v1beta1
+    resources:
+    - volumesnapshots
+  fieldPaths:
+  - path: $.spec.volumeSnapshotClassName
+    defaulting: None
+{{- end }}

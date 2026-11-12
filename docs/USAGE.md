@@ -480,6 +480,58 @@ The following restrictions apply to volume transfers:
 - If a DataImport in `CreatePVC` mode enters the `Failed` phase, temporary objects can remain until the DataImport is
   deleted or the objects are garbage-collected.
 
+## Restricting StorageClass and VolumeSnapshotClass per project
+
+When the `multitenancy-manager` module is enabled, the module registers the grants of two cluster-wide resources with it: `StorageClass` (the `storageclasses` definition) and `VolumeSnapshotClass` (the `volumesnapshotclasses` definition). Nothing is restricted until a cluster administrator creates a `ClusterResourceGrantPolicy` for the projects: by default every class is available to every project. If `multitenancy-manager` is disabled, the module registers nothing.
+
+multitenancy-manager ships the `storageclasses` definition and the `storageclasses-pvc` reference too, with the same spec. While it does, either module may own these objects (the `meta.helm.sh/release-name` annotation names the owning release), and ownership can pass from one module to the other when they are updated. The spec stays the same, so the check does not change.
+
+A policy that lists the allowed classes makes the module's objects in the project namespaces follow it. The check is applied to the following fields:
+
+| Object | Field | Resource |
+|---|---|---|
+| PersistentVolumeClaim | `spec.storageClassName` | `storageclasses` |
+| DataImport | `spec.pvcTemplate.spec.storageClassName` (class of the target PVC) | `storageclasses` |
+| DataImport | `spec.storageParams.storageClassName` (class of the temporary volume) | `storageclasses` |
+| VolumeRestoreRequest | `spec.pvcTemplate.spec.storageClassName` | `storageclasses` |
+| VolumeSnapshot | `spec.volumeSnapshotClassName` | `volumesnapshotclasses` |
+
+A request that names a class not available to the project is rejected on creation with the message `[multitenancy] <KIND> "<NAME>" references "<CLASS>" which is not available to project "<PROJECT>"`. The only exception is a PersistentVolumeClaim: its class is replaced with the default class of the project, and the response carries a warning; if the project has no available default class, the claim is rejected. The DataImport and VolumeRestoreRequest fields are only validated and never replaced, so the volume is not created in a class the user did not ask for.
+
+For example, to leave a project only the class `fast-ssd` and the snapshot class `fast-ssd-snapclass`:
+
+```yaml
+apiVersion: multitenancy.deckhouse.io/v1alpha2
+kind: ClusterResourceGrantPolicy
+metadata:
+  name: production-storage
+spec:
+  projectSelector:
+    matchLabels:
+      environment: production
+  resources:
+    - resourceName: storageclasses
+      allowed:
+        - fast-ssd
+    - resourceName: volumesnapshotclasses
+      allowed:
+        - fast-ssd-snapclass
+```
+
+Take the following into account:
+
+- If a VolumeSnapshot does not name a class, the grant does not fill one in, but the class the cluster chooses for it is checked as well:
+  - If the StorageClass of the source PersistentVolumeClaim has the `storage.deckhouse.io/volumesnapshotclass` annotation, storage-foundation sets that class when the snapshot is created, and the request is rejected if the class is not available to the project.
+  - Otherwise, snapshot-controller writes the default VolumeSnapshotClass of the CSI driver into the snapshot after it is created. snapshot-controller runs in the `d8-storage-foundation` namespace and is not exempt from the check, so if the default class is not available to the project, this write is rejected: the snapshot stays without a class and does not become ready, and its `status.error` and a `SnapshotContentCreationFailed` event report `failed to take snapshot <NAME> without a snapshot class`.
+- The checked fields are the ones in the table above. Objects of other modules that name a class are checked only if that module registers its own reference.
+- Requests from members of the `system:masters` group, from nodes, and from ServiceAccounts of the `kube-system`, `d8-system`, and `d8-user-authz` namespaces are not checked, so a cluster administrator and the platform controllers are never blocked by a policy. The controllers of this module are not exempt: a PersistentVolumeClaim they create in a project namespace is checked like a user's one.
+- Disabling storage-foundation while multitenancy-manager is enabled removes the grants the module registers: the `volumesnapshotclasses` grant and the DataImport and VolumeRestoreRequest references, and also the `storageclasses` grant and its PersistentVolumeClaim reference `storageclasses-pvc` if the storage-foundation release owns them at that moment (they carry the `meta.helm.sh/release-name: storage-foundation` annotation). Until a grant is registered again, a ClusterResourceGrantPolicy does not restrict the classes of that grant in projects. To restore the restrictions, enable storage-foundation again.
+- A project user sees the classes available to the project in the `AvailableClusterResource` objects. For `storageclasses` it shows `provisioner`, `reclaimPolicy`, `volumeBindingMode`, and `allowVolumeExpansion` of every class; for `volumesnapshotclasses`, `driver` and `deletionPolicy`. The `parameters` field of a class is not shown, because it can name secrets. Check the available classes with the following command:
+
+  ```bash
+  d8 k get available volumesnapshotclasses -n <PROJECT_NAME> -o yaml
+  ```
+
 ## Troubleshooting
 
 The sections below describe how to read the state of module objects and how to fix typical errors.

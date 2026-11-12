@@ -1,0 +1,97 @@
+{{- if and (.Values.global.enabledModules | has "multitenancy-manager") (.Capabilities.APIVersions.Has "multitenancy.deckhouse.io/v1alpha1/GrantableClusterResourceDefinition") }}
+---
+apiVersion: multitenancy.deckhouse.io/v1alpha1
+kind: GrantableClusterResourceDefinition
+metadata:
+  name: storageclasses
+  {{- include "helm_lib_module_labels" (list .) | nindent 2 }}
+spec:
+  grantedResource:
+    apiGroup: storage.k8s.io
+    kind: StorageClass
+  enforcement: Managed
+  defaultAvailability: All
+  defaultFrom:
+    annotationKey: storageclass.kubernetes.io/is-default-class
+  catalogFields:
+  - name: provisioner
+    path: $.provisioner
+  - name: reclaimPolicy
+    path: $.reclaimPolicy
+  - name: volumeBindingMode
+    path: $.volumeBindingMode
+  - name: allowVolumeExpansion
+    path: $.allowVolumeExpansion
+---
+apiVersion: multitenancy.deckhouse.io/v1alpha1
+kind: GrantableClusterResourceReference
+metadata:
+  name: storageclasses-pvc
+  {{- include "helm_lib_module_labels" (list .) | nindent 2 }}
+spec:
+  grantableClusterResourceName: storageclasses
+  rule:
+    apiGroups:
+    - ""
+    apiVersions:
+    - v1
+    resources:
+    - persistentvolumeclaims
+  fieldPaths:
+  - path: $.spec.storageClassName
+    defaulting: Coerce
+---
+apiVersion: multitenancy.deckhouse.io/v1alpha1
+kind: GrantableClusterResourceReference
+metadata:
+  name: storageclasses-dataimport-pvc
+  {{- include "helm_lib_module_labels" (list .) | nindent 2 }}
+spec:
+  grantableClusterResourceName: storageclasses
+  rule:
+    apiGroups:
+    - storage-foundation.deckhouse.io
+    apiVersions:
+    - v1alpha1
+    resources:
+    - dataimports
+  fieldPaths:
+  - path: $.spec.pvcTemplate.spec.storageClassName
+    defaulting: None
+---
+apiVersion: multitenancy.deckhouse.io/v1alpha1
+kind: GrantableClusterResourceReference
+metadata:
+  name: storageclasses-dataimport-scratch
+  {{- include "helm_lib_module_labels" (list .) | nindent 2 }}
+spec:
+  grantableClusterResourceName: storageclasses
+  rule:
+    apiGroups:
+    - storage-foundation.deckhouse.io
+    apiVersions:
+    - v1alpha1
+    resources:
+    - dataimports
+  fieldPaths:
+  - path: $.spec.storageParams.storageClassName
+    defaulting: None
+---
+apiVersion: multitenancy.deckhouse.io/v1alpha1
+kind: GrantableClusterResourceReference
+metadata:
+  name: storageclasses-volumerestorerequest-pvc
+  {{- include "helm_lib_module_labels" (list .) | nindent 2 }}
+spec:
+  grantableClusterResourceName: storageclasses
+  rule:
+    apiGroups:
+    - storage-foundation.deckhouse.io
+    apiVersions:
+    - v1alpha1
+    resources:
+    - volumerestorerequests
+  fieldPaths:
+  - path: $.spec.pvcTemplate.spec.storageClassName
+    defaulting: None
+{{- end }}
