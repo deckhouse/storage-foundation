@@ -4,10 +4,6 @@ date: "2026-xx-xx"
 summary: ""
 highlights: []
 
-fixes:
-  - "В DKP ниже 1.78 модуль больше не блокирует запуск Deckhouse. С v1.0.3 определения грантов `storageclasses` и `volumesnapshotclasses` содержали `catalogFields`, которого нет в CRD `GrantableClusterResourceDefinition` модуля `multitenancy-manager` в DKP 1.77, поэтому server-side apply модуля падал с `.spec.catalogFields: field not declared in schema` и очередь Deckhouse останавливалась. Теперь `catalogFields` рендерится только в DKP 1.78 и новее; в более старых кластерах определения совпадают с теми, что поставляет там `multitenancy-manager`."
-  - "В DKP 1.78 и новее заголовки и описания ролей `d8:system-capability:storage-foundation:view` и `d8:system-capability:storage-foundation:edit` называют кластерные ресурсы `VolumeSnapshotClass` и `VolumeSnapshotContent`, к которым роли дают доступ, а не только конфигурацию модуля. Сам доступ не изменился."
-
 
 
 
