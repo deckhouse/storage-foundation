@@ -13,10 +13,10 @@ metadata:
     rbac.deckhouse.io/namespace: d8-storage-foundation
     rbac.deckhouse.io/scope: system
   annotations:
-    en.meta.deckhouse.io/description: "Read-only access to the storage-foundation module configuration."
-    en.meta.deckhouse.io/title: "Module storage-foundation: view configuration"
-    ru.meta.deckhouse.io/description: "Доступ только на чтение к конфигурации модуля storage-foundation."
-    ru.meta.deckhouse.io/title: "Модуль storage-foundation: просмотр конфигурации"
+    en.meta.deckhouse.io/description: "Read-only access to the storage-foundation module configuration and to the cluster-scoped VolumeSnapshotClass and VolumeSnapshotContent resources."
+    en.meta.deckhouse.io/title: "Module storage-foundation: view configuration and cluster resources"
+    ru.meta.deckhouse.io/description: "Доступ только на чтение к конфигурации модуля storage-foundation и к кластерным ресурсам VolumeSnapshotClass и VolumeSnapshotContent."
+    ru.meta.deckhouse.io/title: "Модуль storage-foundation: просмотр конфигурации и кластерных ресурсов"
 rules:
 - apiGroups:
   - deckhouse.io

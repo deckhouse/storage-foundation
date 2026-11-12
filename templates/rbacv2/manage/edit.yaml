@@ -13,10 +13,10 @@ metadata:
     rbac.deckhouse.io/namespace: d8-storage-foundation
     rbac.deckhouse.io/scope: system
   annotations:
-    en.meta.deckhouse.io/description: "Manage the storage-foundation module configuration."
-    en.meta.deckhouse.io/title: "Module storage-foundation: edit configuration"
-    ru.meta.deckhouse.io/description: "Управление конфигурацией модуля storage-foundation."
-    ru.meta.deckhouse.io/title: "Модуль storage-foundation: управление конфигурацией"
+    en.meta.deckhouse.io/description: "Manage the storage-foundation module configuration and the cluster-scoped VolumeSnapshotClass and VolumeSnapshotContent resources."
+    en.meta.deckhouse.io/title: "Module storage-foundation: edit configuration and cluster resources"
+    ru.meta.deckhouse.io/description: "Управление конфигурацией модуля storage-foundation и кластерными ресурсами VolumeSnapshotClass и VolumeSnapshotContent."
+    ru.meta.deckhouse.io/title: "Модуль storage-foundation: управление конфигурацией и кластерными ресурсами"
 rules:
 - apiGroups:
   - deckhouse.io
