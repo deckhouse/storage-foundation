@@ -1,0 +1,35 @@
+date: "2026-11-12"
+
+summary: "ClusterResourceGrantPolicy теперь ограничивает StorageClass и VolumeSnapshotClass, которые проект может указать в DataImport, VolumeRestoreRequest и VolumeSnapshot, Kubernetes API, опубликованный через Ingress кластера, больше не отвечает 502, пока опубликован DataExport или DataImport, а образы пересобраны на базовых образах v4.0.12 с Go 1.27.4."
+
+highlights:
+  - "При включённом `multitenancy-manager` проект, ограниченный `ClusterResourceGrantPolicy`, больше не может указать недоступный ему `StorageClass` или `VolumeSnapshotClass` в `DataImport`, `VolumeRestoreRequest` или `VolumeSnapshot`: такие объекты отклоняются при создании."
+  - "Пока опубликован `DataExport` или `DataImport`, Kubernetes API, опубликованный через Ingress кластера, больше не отвечает `502`."
+
+new_features:
+  - "При включённом `multitenancy-manager` модуль регистрирует гранты (разрешения на кластерные ресурсы) на `StorageClass` и `VolumeSnapshotClass` для проектов. Проект, ограниченный `ClusterResourceGrantPolicy`, больше не может указать недоступный ему `StorageClass` в `DataImport` (`storage-foundation.deckhouse.io`; целевой PVC и временный том) или `VolumeRestoreRequest`, а также недоступный `VolumeSnapshotClass` в `VolumeSnapshot`, отправленном как `snapshot.storage.k8s.io/v1` или `v1beta1`: такие объекты отклоняются при создании. Без политики доступны все классы. Модуль поставляет определение `storageclasses` и ссылку `storageclasses-pvc` с тем же spec, что и `multitenancy-manager`; пока `multitenancy-manager` поставляет свою копию, владельцем этих объектов может быть любой из двух модулей, и переход владения между ними проверку не меняет."
+
+improvements:
+  - "В DKP 1.78 и новее роли `d8:system-capability:storage-foundation:view`, `d8:system-capability:storage-foundation:edit`, `d8:namespace-capability:storage-foundation:view` и `d8:namespace-capability:storage-foundation:edit` несут стандартные заголовки и описания платформы, как все capability (роли-возможности) ролевой модели DKP 1.78; доступ, который они дают, не меняется. RBAC модуля теперь описан в `rbac.yaml`, и шаблоны RBACv2 пишутся из него; кластеры ниже DKP 1.78 сохраняют прежние роли."
+
+fixes:
+  - "Пока `DataExport` или `DataImport` был опубликован, Kubernetes API, опубликованный через Ingress кластера, отвечал `502`. С v1.0.2 публикующий Ingress задавал `proxy-ssl-verify` с CA пода выгрузки или загрузки, а ingress-nginx применяет эту настройку ко всему хосту `api.<publicDomain>`, общему с Kubernetes API, поэтому nginx проверял сертификат API-сервера по CA пода и отвергал его. Ingress больше не задаёт `proxy-ssl-verify`, `proxy-ssl-secret`, `proxy-ssl-name` и `proxy-ssl-server-name`; как в v1.0.1, nginx обращается к поду по HTTPS без проверки его сертификата."
+
+upgrade_notes:
+  - "При включённом `multitenancy-manager` отключение storage-foundation удаляет гранты, которые регистрирует модуль: грант `volumesnapshotclasses` и ссылки из `DataImport` и `VolumeRestoreRequest`, а также грант `storageclasses` и его ссылку из `PersistentVolumeClaim` `storageclasses-pvc`, если в этот момент ими владеет релиз storage-foundation (аннотация `meta.helm.sh/release-name: storage-foundation`). Пока грант не зарегистрирован снова, `ClusterResourceGrantPolicy` не ограничивает в проектах классы этого гранта; чтобы вернуть ограничения, снова включите storage-foundation."
+
+known_issues:
+  - "Публикующий Ingress `DataExport` или `DataImport` снова не проверяет сертификат пода выгрузки или загрузки, как в v1.0.1: nginx обращается к поду по HTTPS, но принимает любой сертификат. Проверка сможет вернуться только после того, как публикация уйдёт с хоста `api.<publicDomain>`, общего с Kubernetes API."
+
+docs:
+  - "На странице использования описано, как ограничить `StorageClass` и `VolumeSnapshotClass` для проектов с помощью `ClusterResourceGrantPolicy`, как проверяется класс `VolumeSnapshot`, в котором класс не указан, и что отключение модуля делает с грантами."
+
+dependencies:
+  - name: base images
+    from: "v4.0.7"
+    to: "v4.0.12"
+    notes: "Все образы модуля пересобраны на актуальных базовых образах."
+  - name: Go
+    from: "1.27.3"
+    to: "1.27.4"
+    notes: "Тулчейн (набор инструментов сборки), которым собираются компоненты модуля на Go."

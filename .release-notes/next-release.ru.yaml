@@ -4,22 +4,6 @@ date: "2026-xx-xx"
 summary: ""
 highlights: []
 
-new_features:
-  - "При включённом `multitenancy-manager` модуль регистрирует гранты (разрешения на кластерные ресурсы) на `StorageClass` и `VolumeSnapshotClass` для проектов. Проект, ограниченный `ClusterResourceGrantPolicy`, больше не может указать недоступный ему `StorageClass` в `DataImport` (целевой PVC и временный том) или `VolumeRestoreRequest`, а также недоступный `VolumeSnapshotClass` в `VolumeSnapshot`: такие объекты отклоняются при создании. Без политики доступны все классы. Модуль поставляет определение `storageclasses` и ссылку `storageclasses-pvc` с тем же spec, что и `multitenancy-manager`; пока `multitenancy-manager` поставляет свою копию, владельцем этих объектов может быть любой из двух модулей, и переход владения между ними проверку не меняет."
-
-improvements:
-  - "В DKP 1.78 и новее роли `d8:system-capability:storage-foundation:view` и `d8:system-capability:storage-foundation:edit` дают также доступ на чтение к ModuleConfig `storage-foundation`, а `edit` — и на запись, и несут стандартные заголовки и описания платформы, как все capability ролевой модели DKP 1.78. RBAC модуля теперь описан в `rbac.yaml`, и шаблоны RBACv2 пишутся из него; кластеры ниже DKP 1.78 сохраняют прежние роли."
-
-fixes:
-  - "Пока `DataExport` или `DataImport` был опубликован, Kubernetes API, опубликованный через Ingress кластера, отвечал `502`. С v1.0.2 публикующий Ingress задавал `proxy-ssl-verify` с CA пода выгрузки или загрузки, а ingress-nginx применяет эту настройку ко всему хосту `api.<publicDomain>`, общему с Kubernetes API, поэтому nginx проверял сертификат API-сервера по CA пода и отвергал его. Ingress больше не задаёт `proxy-ssl-verify`, `proxy-ssl-secret`, `proxy-ssl-name` и `proxy-ssl-server-name`; как в v1.0.1, nginx обращается к поду по HTTPS без проверки его сертификата."
-
-upgrade_notes:
-  - "При включённом `multitenancy-manager` отключение storage-foundation удаляет гранты, которые регистрирует модуль: грант `volumesnapshotclasses` и ссылки из `DataImport` и `VolumeRestoreRequest`, а также грант `storageclasses` и его ссылку из `PersistentVolumeClaim` `storageclasses-pvc`, если в этот момент ими владеет релиз storage-foundation (аннотация `meta.helm.sh/release-name: storage-foundation`). Пока грант не зарегистрирован снова, `ClusterResourceGrantPolicy` не ограничивает в проектах классы этого гранта; чтобы вернуть ограничения, снова включите storage-foundation."
-
-docs:
-  - "На странице использования описано, как ограничить `StorageClass` и `VolumeSnapshotClass` для проектов с помощью `ClusterResourceGrantPolicy`, как проверяется класс `VolumeSnapshot`, в котором класс не указан, и что отключение модуля делает с грантами."
-
-
 
 
 

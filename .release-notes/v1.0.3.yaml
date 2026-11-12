@@ -1,0 +1,35 @@
+date: "2026-11-12"
+
+summary: "A ClusterResourceGrantPolicy now restricts the StorageClass and VolumeSnapshotClass a project can name in DataImport, VolumeRestoreRequest and VolumeSnapshot, the Kubernetes API published through the cluster Ingress no longer answers 502 while a DataExport or DataImport is published, and the images are rebuilt on base images v4.0.12 with Go 1.27.4."
+
+highlights:
+  - "With `multitenancy-manager` enabled, a project limited by a `ClusterResourceGrantPolicy` can no longer name a `StorageClass` or a `VolumeSnapshotClass` it is not allowed to use in a `DataImport`, a `VolumeRestoreRequest` or a `VolumeSnapshot`: such objects are denied on creation."
+  - "While a `DataExport` or `DataImport` is published, the Kubernetes API published through the cluster Ingress no longer answers `502`."
+
+new_features:
+  - "The module registers the grants on `StorageClass` and `VolumeSnapshotClass` for project tenants when `multitenancy-manager` is enabled. A project limited by a `ClusterResourceGrantPolicy` can no longer name a `StorageClass` it is not allowed to use in a `DataImport` (`storage-foundation.deckhouse.io`; target PVC and scratch volume) or a `VolumeRestoreRequest`, nor a `VolumeSnapshotClass` it is not allowed to use in a `VolumeSnapshot`, sent as `snapshot.storage.k8s.io/v1` or `v1beta1`; such objects are denied on creation. Without a policy every class stays available. The module ships the `storageclasses` definition and the `storageclasses-pvc` reference with the same spec as `multitenancy-manager` does; while `multitenancy-manager` still ships its copy, either module may own these objects, and ownership passing between them does not change the check."
+
+improvements:
+  - "On DKP 1.78 and later, the `d8:system-capability:storage-foundation:view`, `d8:system-capability:storage-foundation:edit`, `d8:namespace-capability:storage-foundation:view` and `d8:namespace-capability:storage-foundation:edit` roles carry the standard titles and descriptions of the platform, as every capability of the DKP 1.78 role model does; the access they give does not change. The RBAC of the module is now declared in `rbac.yaml`, and the RBACv2 templates are written from it; clusters below DKP 1.78 keep the roles they had."
+
+fixes:
+  - "While a `DataExport` or `DataImport` was published, the Kubernetes API published through the cluster Ingress answered `502`. Since v1.0.2 the publishing Ingress set `proxy-ssl-verify` with the CA of the exporter or importer pod, and ingress-nginx applies that setting to the whole `api.<publicDomain>` host it shares with the Kubernetes API, so nginx checked the API server certificate against the pod's CA and refused it. The Ingress no longer sets `proxy-ssl-verify`, `proxy-ssl-secret`, `proxy-ssl-name` and `proxy-ssl-server-name`; as in v1.0.1, nginx speaks HTTPS to the pod without verifying its certificate."
+
+upgrade_notes:
+  - "With `multitenancy-manager` enabled, disabling storage-foundation removes the grants the module registers: the `volumesnapshotclasses` grant and the `DataImport` and `VolumeRestoreRequest` references, and also the `storageclasses` grant and its `PersistentVolumeClaim` reference `storageclasses-pvc` if the storage-foundation release owns them at that moment (annotation `meta.helm.sh/release-name: storage-foundation`). Until a grant is registered again, a `ClusterResourceGrantPolicy` does not restrict the classes of that grant in projects; enable storage-foundation again to restore the restrictions."
+
+known_issues:
+  - "The publishing Ingress of a `DataExport` or `DataImport` again does not verify the certificate of the exporter or importer pod, as in v1.0.1: nginx speaks HTTPS to the pod but accepts any certificate. The verification can come back only when the publication moves off the `api.<publicDomain>` host it shares with the Kubernetes API."
+
+docs:
+  - "The usage page describes how to restrict `StorageClass` and `VolumeSnapshotClass` per project with a `ClusterResourceGrantPolicy`, how the class of a `VolumeSnapshot` that names none is checked, and what disabling the module does to the grants."
+
+dependencies:
+  - name: base images
+    from: "v4.0.7"
+    to: "v4.0.12"
+    notes: "Every image of the module is rebuilt on the current base images."
+  - name: Go
+    from: "1.27.3"
+    to: "1.27.4"
+    notes: "The toolchain the Go components of the module are built with."
