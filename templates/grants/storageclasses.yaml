@@ -13,6 +13,7 @@ spec:
   defaultAvailability: All
   defaultFrom:
     annotationKey: storageclass.kubernetes.io/is-default-class
+  {{- if eq (include "storage-foundation.rbacv2_new_scheme" .) "true" }}
   catalogFields:
   - name: provisioner
     path: $.provisioner
@@ -22,6 +23,7 @@ spec:
     path: $.volumeBindingMode
   - name: allowVolumeExpansion
     path: $.allowVolumeExpansion
+  {{- end }}
 ---
 apiVersion: multitenancy.deckhouse.io/v1alpha1
 kind: GrantableClusterResourceReference

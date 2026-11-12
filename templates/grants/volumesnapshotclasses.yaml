@@ -11,11 +11,13 @@ spec:
     kind: VolumeSnapshotClass
   enforcement: Managed
   defaultAvailability: All
+  {{- if eq (include "storage-foundation.rbacv2_new_scheme" .) "true" }}
   catalogFields:
   - name: driver
     path: $.driver
   - name: deletionPolicy
     path: $.deletionPolicy
+  {{- end }}
 ---
 apiVersion: multitenancy.deckhouse.io/v1alpha1
 kind: GrantableClusterResourceReference
