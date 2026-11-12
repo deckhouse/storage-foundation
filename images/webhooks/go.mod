@@ -1,6 +1,6 @@
 module github.com/deckhouse/storage-foundation/images/webhooks
 
-go 1.27.3
+go 1.27.4
 require (
 	github.com/deckhouse/sds-common-lib v0.15.0
 	github.com/deckhouse/storage-foundation/api v0.0.0-00010101000000-000000000000

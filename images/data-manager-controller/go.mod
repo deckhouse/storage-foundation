@@ -1,6 +1,6 @@
 module github.com/deckhouse/storage-foundation/images/data-manager-controller
 
-go 1.27.3
+go 1.27.4
 require (
 	github.com/deckhouse/sds-common-lib v0.19.0
 	github.com/deckhouse/storage-foundation/api v0.0.0-00010101000000-000000000000
