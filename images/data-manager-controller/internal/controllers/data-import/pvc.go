@@ -152,7 +152,7 @@ func needsPVCSpecUpdate(existingPVC *corev1.PersistentVolumeClaim, newPVC *corev
 	if !reflect.DeepEqual(existingPVC.Spec.AccessModes, newPVC.Spec.AccessModes) {
 		return true
 	}
-	if !ptrEqual(existingPVC.Spec.StorageClassName, newPVC.Spec.StorageClassName) {
+	if newPVC.Spec.StorageClassName != nil && !ptrEqual(existingPVC.Spec.StorageClassName, newPVC.Spec.StorageClassName) {
 		return true
 	}
 	if !ptrEqual(existingPVC.Spec.VolumeMode, newPVC.Spec.VolumeMode) {

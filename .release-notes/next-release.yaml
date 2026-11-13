@@ -4,6 +4,10 @@ date: "2026-xx-xx"
 summary: ""
 highlights: []
 
+fixes:
+  - "In a project limited by a `ClusterResourceGrantPolicy`, a DataImport in `CreatePVC` mode whose PersistentVolumeClaim is rejected by the grant check reports it in the `Ready` condition with the `TargetFailed` reason and the message of the refusal instead of retrying silently. A claim that got the default class of the project instead of the one in `pvcTemplate` keeps that class."
+  - "A VolumeRestoreRequest whose PersistentVolumeClaim is rejected by the grant check reports it with a `VRRPVCCreateFailed` event, and one whose claim got another class with a `VRRStorageClassReplaced` event."
+
 
 
 

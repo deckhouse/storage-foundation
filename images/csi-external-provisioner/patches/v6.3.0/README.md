@@ -109,6 +109,18 @@ be mounted. When the executor reuses such a PV from an earlier attempt, it
 reports `VRRPVMissingSecretRefs` on the VolumeRestoreRequest with every
 missing field.
 
+The target PVC is created by the ServiceAccount of the CSI driver, which the
+grant webhooks of multitenancy-manager do not exempt, so in a project limited
+by a ClusterResourceGrantPolicy the claim goes through the same checks as a
+user's one. When the API server refuses it (Forbidden or Invalid, e.g. the class
+is no longer granted to the project), the executor reports
+`VRRPVCCreateFailed` on the VolumeRestoreRequest with the refusal and retries.
+When the admission chain admits the claim with a different class (the
+`storageclasses-pvc` reference uses `defaulting: Coerce` and replaces a class
+the project lost with the project default), the PV keeps the requested class
+and binds anyway, because it is pre-bound by `claimRef`; the executor reports
+`VRRStorageClassReplaced` with both names.
+
 The executor **never writes VRR status** — that is owned by the
 storage-foundation VRR controller, which observes the bound target PVC
 and sets `Ready`. No `volumerestorerequests/status` RBAC is required for

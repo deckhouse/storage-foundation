@@ -289,10 +289,10 @@ index 6ef3c9f..617f978 100644
  golang.org/x/xerrors v0.0.0-20191204190536-9bdfabe68543/go.mod h1:I/5z698sn9Ka8TeJc9MKroUUfqBBauWjQqLJ2OPfmY0=
 diff --git a/pkg/controller/vrr_handler.go b/pkg/controller/vrr_handler.go
 new file mode 100644
-index 0000000..dbe5a59
+index 0000000..b874137
 --- /dev/null
 +++ b/pkg/controller/vrr_handler.go
-@@ -0,0 +1,1036 @@
+@@ -0,0 +1,1048 @@
 +/*
 +Copyright 2025 Flant JSC
 +
@@ -1046,12 +1046,24 @@ index 0000000..dbe5a59
 +		}
 +	}
 +
-+	if _, err := e.kubeClient.CoreV1().PersistentVolumeClaims(vrrTargetNamespace(vrr)).Create(ctx, pvc, metav1.CreateOptions{}); err != nil {
++	created, err := e.kubeClient.CoreV1().PersistentVolumeClaims(vrrTargetNamespace(vrr)).Create(ctx, pvc, metav1.CreateOptions{})
++	if err != nil {
 +		if apierrors.IsAlreadyExists(err) {
 +			klog.V(2).Infof("createPVCFromVRR: PVC %s/%s already exists, idempotent success", vrrTargetNamespace(vrr), vrrTargetPVCName(vrr))
 +			return nil
 +		}
++		if apierrors.IsForbidden(err) || apierrors.IsInvalid(err) {
++			e.eventRecorder.Eventf(vrr, v1.EventTypeWarning, "VRRPVCCreateFailed",
++				"Failed to create PVC %s/%s: %v", vrrTargetNamespace(vrr), vrrTargetPVCName(vrr), err)
++		}
 +		return fmt.Errorf("failed to create PVC %s/%s: %w", vrrTargetNamespace(vrr), vrrTargetPVCName(vrr), err)
++	}
++	if created.Spec.StorageClassName != nil && *created.Spec.StorageClassName != storageClassName {
++		e.eventRecorder.Eventf(vrr, v1.EventTypeWarning, "VRRStorageClassReplaced",
++			"PVC %s/%s was admitted with StorageClass %s instead of %s; the restored PersistentVolume %s belongs to %s",
++			vrrTargetNamespace(vrr), vrrTargetPVCName(vrr), *created.Spec.StorageClassName, storageClassName, pv.Name, storageClassName)
++		klog.Warningf("createPVCFromVRR: PVC %s/%s was admitted with StorageClass %s instead of %s",
++			vrrTargetNamespace(vrr), vrrTargetPVCName(vrr), *created.Spec.StorageClassName, storageClassName)
 +	}
 +
 +	klog.V(2).Infof("createPVCFromVRR: created PVC %s/%s for VRR %s/%s", vrrTargetNamespace(vrr), vrrTargetPVCName(vrr), vrr.Namespace, vrr.Name)
@@ -1331,10 +1343,10 @@ index 0000000..dbe5a59
 +}
 diff --git a/pkg/controller/vrr_handler_test.go b/pkg/controller/vrr_handler_test.go
 new file mode 100644
-index 0000000..323d222
+index 0000000..10cbca2
 --- /dev/null
 +++ b/pkg/controller/vrr_handler_test.go
-@@ -0,0 +1,1838 @@
+@@ -0,0 +1,1922 @@
 +/*
 +Copyright 2025 Flant JSC
 +
@@ -1355,6 +1367,7 @@ index 0000000..323d222
 +
 +import (
 +	"context"
++	"errors"
 +	"reflect"
 +	"strings"
 +	"testing"
@@ -1370,10 +1383,12 @@ index 0000000..323d222
 +	"k8s.io/apimachinery/pkg/api/resource"
 +	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 +	"k8s.io/apimachinery/pkg/labels"
++	"k8s.io/apimachinery/pkg/runtime"
 +	"k8s.io/apimachinery/pkg/types"
 +	"k8s.io/client-go/kubernetes"
 +	fakeclientset "k8s.io/client-go/kubernetes/fake"
 +	storagelistersv1 "k8s.io/client-go/listers/storage/v1"
++	clienttesting "k8s.io/client-go/testing"
 +	"k8s.io/client-go/tools/cache"
 +	"k8s.io/client-go/tools/record"
 +
@@ -1928,6 +1943,87 @@ index 0000000..323d222
 +	}
 +	if len(pvc.OwnerReferences) != 1 || pvc.OwnerReferences[0].Name != "test-ok" {
 +		t.Errorf("Expected single ObjectKeeper owner reference 'test-ok', got %v", pvc.OwnerReferences)
++	}
++}
++
++func TestCreatePVCFromVRR_AdmissionDenied(t *testing.T) {
++	for _, tc := range []struct {
++		name string
++		err  error
++	}{
++		{name: "forbidden", err: apierrors.NewForbidden(v1.Resource("persistentvolumeclaims"), vrrTestTargetPVCName,
++			errors.New(`admission webhook "cluster-objects-grants-validator.multitenancy.deckhouse.io" denied the request: not available to project "team"`))},
++		{name: "invalid", err: apierrors.NewInvalid(v1.SchemeGroupVersion.WithKind("PersistentVolumeClaim").GroupKind(), vrrTestTargetPVCName, nil)},
++	} {
++		t.Run(tc.name, func(t *testing.T) {
++			kubeClient := fakeclientset.NewSimpleClientset()
++			kubeClient.PrependReactor("create", "persistentvolumeclaims", func(clienttesting.Action) (bool, runtime.Object, error) {
++				return true, nil, tc.err
++			})
++			eventRecorder := record.NewFakeRecorder(10)
++			e := newTestExecutor(&mockControllerClient{}, nil, kubeClient, nil, eventRecorder)
++
++			vrr := createTestVRR("test-vrr", "test-ns", "VolumeSnapshotContent", "test-vsc")
++			if err := e.createPVCFromVRR(context.Background(), vrr, simplePV("test-pv")); err == nil {
++				t.Fatal("a refused PVC must be retried")
++			}
++			if !waitForEvent(eventRecorder, "VRRPVCCreateFailed") {
++				t.Error("Expected a VRRPVCCreateFailed event naming the refusal")
++			}
++		})
++	}
++}
++
++func TestCreatePVCFromVRR_TransientErrorRecordsNoEvent(t *testing.T) {
++	kubeClient := fakeclientset.NewSimpleClientset()
++	kubeClient.PrependReactor("create", "persistentvolumeclaims", func(clienttesting.Action) (bool, runtime.Object, error) {
++		return true, nil, apierrors.NewServiceUnavailable("try again")
++	})
++	eventRecorder := record.NewFakeRecorder(10)
++	e := newTestExecutor(&mockControllerClient{}, nil, kubeClient, nil, eventRecorder)
++
++	vrr := createTestVRR("test-vrr", "test-ns", "VolumeSnapshotContent", "test-vsc")
++	if err := e.createPVCFromVRR(context.Background(), vrr, simplePV("test-pv")); err == nil {
++		t.Fatal("a failed create must be retried")
++	}
++	if len(eventRecorder.Events) != 0 {
++		t.Errorf("Expected no event for a transient error, got %q", <-eventRecorder.Events)
++	}
++}
++
++func TestCreatePVCFromVRR_StorageClassReplacedByAdmission(t *testing.T) {
++	kubeClient := fakeclientset.NewSimpleClientset()
++	kubeClient.PrependReactor("create", "persistentvolumeclaims", func(action clienttesting.Action) (bool, runtime.Object, error) {
++		pvc := action.(clienttesting.CreateAction).GetObject().(*v1.PersistentVolumeClaim).DeepCopy()
++		replaced := "project-default"
++		pvc.Spec.StorageClassName = &replaced
++		return true, pvc, nil
++	})
++	eventRecorder := record.NewFakeRecorder(10)
++	e := newTestExecutor(&mockControllerClient{}, nil, kubeClient, nil, eventRecorder)
++
++	vrr := createTestVRR("test-vrr", "test-ns", "VolumeSnapshotContent", "test-vsc")
++	if err := e.createPVCFromVRR(context.Background(), vrr, simplePV("test-pv")); err != nil {
++		t.Fatalf("createPVCFromVRR failed: %v", err)
++	}
++	if !waitForEvent(eventRecorder, "VRRStorageClassReplaced") {
++		t.Error("Expected a VRRStorageClassReplaced event when the admission chain changes the class")
++	}
++}
++
++func TestCreatePVCFromVRR_KeptStorageClassRecordsNoWarning(t *testing.T) {
++	kubeClient := fakeclientset.NewSimpleClientset()
++	eventRecorder := record.NewFakeRecorder(10)
++	e := newTestExecutor(&mockControllerClient{}, nil, kubeClient, nil, eventRecorder)
++
++	vrr := createTestVRR("test-vrr", "test-ns", "VolumeSnapshotContent", "test-vsc")
++	if err := e.createPVCFromVRR(context.Background(), vrr, simplePV("test-pv")); err != nil {
++		t.Fatalf("createPVCFromVRR failed: %v", err)
++	}
++	for len(eventRecorder.Events) > 0 {
++		if event := <-eventRecorder.Events; strings.Contains(event, v1.EventTypeWarning) {
++			t.Errorf("Expected no warning, got %q", event)
++		}
 +	}
 +}
 +

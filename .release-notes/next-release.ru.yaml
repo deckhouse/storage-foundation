@@ -4,6 +4,10 @@ date: "2026-xx-xx"
 summary: ""
 highlights: []
 
+fixes:
+  - "В проекте, ограниченном `ClusterResourceGrantPolicy`, DataImport в режиме `CreatePVC`, чей PersistentVolumeClaim отклонила проверка грантов, сообщает об этом в условии `Ready` с причиной `TargetFailed` и текстом отказа, а не повторяет попытку молча. PVC, который получил класс проекта по умолчанию вместо указанного в `pvcTemplate`, сохраняет этот класс."
+  - "VolumeRestoreRequest, чей PersistentVolumeClaim отклонила проверка грантов, сообщает об этом событием `VRRPVCCreateFailed`, а если PVC получил другой класс — событием `VRRStorageClassReplaced`."
+
 
 
 

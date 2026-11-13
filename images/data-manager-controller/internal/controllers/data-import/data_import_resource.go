@@ -675,7 +675,11 @@ func (r *DataImportReconciler) ensureImportPVC(ctx context.Context, pvcTemplate 
 		Name:     r.dataImport.Name,
 	}
 	resourceName := types.NamespacedName{Namespace: r.dataImport.Namespace, Name: r.dataImport.Name}
-	return EnsurePVC(ctx, r.Client, r.dataImport.Namespace, resourceName, pvcTemplate, dataSourceRef)
+	pvc, err := EnsurePVC(ctx, r.Client, r.dataImport.Namespace, resourceName, pvcTemplate, dataSourceRef)
+	if err != nil && (kubeerrors.IsForbidden(err) || kubeerrors.IsInvalid(err)) {
+		return nil, fmt.Errorf("%w: create target PVC %s/%s: %w", ErrTargetFailed, r.dataImport.Namespace, pvcTemplate.Name, err)
+	}
+	return pvc, err
 }
 
 // scratchPVCTemplate builds the PVC template from the spec-derived parameters: RWO access, the requested
