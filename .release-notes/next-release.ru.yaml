@@ -4,9 +4,15 @@ date: "2026-xx-xx"
 summary: ""
 highlights: []
 
+improvements:
+  - "Отключение storage-foundation больше не удаляет грант `storageclasses` и его ссылку из `PersistentVolumeClaim` `storageclasses-pvc`: у обоих аннотация `helm.sh/resource-policy: keep`, они остаются в кластере, и их забирает себе `multitenancy-manager`, поэтому `StorageClass` в проектах по-прежнему ограничен. С версиями `multitenancy-manager`, которые регистрируют их, только пока storage-foundation выключен, при включении и отключении storage-foundation объекты переходят от одного модуля к другому и не удаляются. Грант `volumesnapshotclasses` и ссылки из `DataImport` и `VolumeRestoreRequest` отключение storage-foundation по-прежнему удаляет."
+
 fixes:
   - "В проекте, ограниченном `ClusterResourceGrantPolicy`, DataImport в режиме `CreatePVC`, чей PersistentVolumeClaim отклонила проверка грантов, сообщает об этом в условии `Ready` с причиной `TargetFailed` и текстом отказа, а не повторяет попытку молча. PVC, который получил класс проекта по умолчанию вместо указанного в `pvcTemplate`, сохраняет этот класс."
   - "VolumeRestoreRequest, чей PersistentVolumeClaim отклонила проверка грантов, сообщает об этом событием `VRRPVCCreateFailed`, а если PVC получил другой класс — событием `VRRStorageClassReplaced`."
+
+docs:
+  - "На странице использования описано, какие гранты остаются после отключения storage-foundation и как грант `storageclasses` переходит между storage-foundation и `multitenancy-manager`."
 
 
 

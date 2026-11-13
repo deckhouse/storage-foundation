@@ -5,6 +5,8 @@ kind: GrantableClusterResourceDefinition
 metadata:
   name: storageclasses
   {{- include "helm_lib_module_labels" (list .) | nindent 2 }}
+  annotations:
+    helm.sh/resource-policy: keep
 spec:
   grantedResource:
     apiGroup: storage.k8s.io
@@ -30,6 +32,8 @@ kind: GrantableClusterResourceReference
 metadata:
   name: storageclasses-pvc
   {{- include "helm_lib_module_labels" (list .) | nindent 2 }}
+  annotations:
+    helm.sh/resource-policy: keep
 spec:
   grantableClusterResourceName: storageclasses
   rule:

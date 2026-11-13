@@ -4,9 +4,15 @@ date: "2026-xx-xx"
 summary: ""
 highlights: []
 
+improvements:
+  - "Disabling storage-foundation no longer removes the `storageclasses` grant and its `PersistentVolumeClaim` reference `storageclasses-pvc`: both carry `helm.sh/resource-policy: keep`, stay in the cluster and are taken over by `multitenancy-manager`, so `StorageClass` stays restricted in projects. With versions of `multitenancy-manager` that register them only while storage-foundation is disabled, enabling and disabling storage-foundation passes the objects between the two modules without removing them. Disabling storage-foundation still removes the `volumesnapshotclasses` grant and the `DataImport` and `VolumeRestoreRequest` references."
+
 fixes:
   - "In a project limited by a `ClusterResourceGrantPolicy`, a DataImport in `CreatePVC` mode whose PersistentVolumeClaim is rejected by the grant check reports it in the `Ready` condition with the `TargetFailed` reason and the message of the refusal instead of retrying silently. A claim that got the default class of the project instead of the one in `pvcTemplate` keeps that class."
   - "A VolumeRestoreRequest whose PersistentVolumeClaim is rejected by the grant check reports it with a `VRRPVCCreateFailed` event, and one whose claim got another class with a `VRRStorageClassReplaced` event."
+
+docs:
+  - "The usage page describes which grants stay when storage-foundation is disabled and how the `storageclasses` grant passes between storage-foundation and `multitenancy-manager`."
 
 
 
