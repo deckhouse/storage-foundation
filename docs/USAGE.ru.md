@@ -15,7 +15,7 @@ d8 k get volumesnapshotclasses.snapshot.storage.k8s.io
 
 При создании VolumeSnapshot из PVC модуль выбирает VolumeSnapshotClass следующим образом:
 
-- Если StorageClass этого PVC имеет лейбл `storage-foundation.deckhouse.io/managed-by`, модуль берёт класс из аннотации
+- Если StorageClass этого PVC имеет лейбл `storage.deckhouse.io/managed-by`, модуль берёт класс из аннотации
   `storage.deckhouse.io/volumesnapshotclass` этого StorageClass. Поле `volumeSnapshotClassName` можно не указывать.
   Если оно указано, значение должно совпадать с аннотацией, иначе создание VolumeSnapshot отклоняется.
 - Для остальных StorageClass модуль заполняет `volumeSnapshotClassName` из той же аннотации, только если поле не указано
@@ -585,8 +585,8 @@ d8 k -n d8-storage-foundation logs -l app=data-manager-controller -c data-manage
 | Сообщение | Причина | Что делать |
 |---|---|---|
 | `PVC StorageClassName is nil` | У исходного PVC не задан `storageClassName`. | Создавайте снимки только PVC с заданным StorageClass. |
-| `StorageClass does not have volume snapshot class name annotation` | StorageClass имеет лейбл `storage-foundation.deckhouse.io/managed-by`, но не имеет аннотации `storage.deckhouse.io/volumesnapshotclass`. | Обратитесь к администратору: StorageClass должен иметь аннотацию с VolumeSnapshotClass своего драйвера. |
-| `if VolumeSnapshotClassName is set, it must match the StorageClass annotation` | `volumeSnapshotClassName` отличается от аннотации StorageClass с лейблом `storage-foundation.deckhouse.io/managed-by`. | Не указывайте поле или укажите класс из аннотации. |
+| `StorageClass does not have volume snapshot class name annotation` | StorageClass имеет лейбл `storage.deckhouse.io/managed-by`, но не имеет аннотации `storage.deckhouse.io/volumesnapshotclass`. | Обратитесь к администратору: StorageClass должен иметь аннотацию с VolumeSnapshotClass своего драйвера. |
+| `if VolumeSnapshotClassName is set, it must match the StorageClass annotation` | `volumeSnapshotClassName` отличается от аннотации StorageClass с лейблом `storage.deckhouse.io/managed-by`. | Не указывайте поле или укажите класс из аннотации. |
 
 ### VolumeSnapshot не переходит в состояние готовности
 

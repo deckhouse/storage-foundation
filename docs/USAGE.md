@@ -15,7 +15,7 @@ d8 k get volumesnapshotclasses.snapshot.storage.k8s.io
 
 When a VolumeSnapshot is created from a PVC, the module selects the VolumeSnapshotClass as follows:
 
-- If the StorageClass of the PVC carries the `storage-foundation.deckhouse.io/managed-by` label, the module takes the
+- If the StorageClass of the PVC carries the `storage.deckhouse.io/managed-by` label, the module takes the
   class from the `storage.deckhouse.io/volumesnapshotclass` annotation of that StorageClass. The
   `volumeSnapshotClassName` field can be omitted. If it is set, it must match the annotation; otherwise the
   VolumeSnapshot is rejected.
@@ -585,8 +585,8 @@ The module validates a VolumeSnapshot created from a PVC at admission time. The 
 | Message | Cause | What to do |
 |---|---|---|
 | `PVC StorageClassName is nil` | The source PVC has no `storageClassName`. | Create snapshots only of PVCs that have a StorageClass. |
-| `StorageClass does not have volume snapshot class name annotation` | The StorageClass carries the `storage-foundation.deckhouse.io/managed-by` label but has no `storage.deckhouse.io/volumesnapshotclass` annotation. | Contact the administrator: the StorageClass must be annotated with the VolumeSnapshotClass of its driver. |
-| `if VolumeSnapshotClassName is set, it must match the StorageClass annotation` | `volumeSnapshotClassName` differs from the annotation of a StorageClass with the `storage-foundation.deckhouse.io/managed-by` label. | Omit the field or set it to the annotated class. |
+| `StorageClass does not have volume snapshot class name annotation` | The StorageClass carries the `storage.deckhouse.io/managed-by` label but has no `storage.deckhouse.io/volumesnapshotclass` annotation. | Contact the administrator: the StorageClass must be annotated with the VolumeSnapshotClass of its driver. |
+| `if VolumeSnapshotClassName is set, it must match the StorageClass annotation` | `volumeSnapshotClassName` differs from the annotation of a StorageClass with the `storage.deckhouse.io/managed-by` label. | Omit the field or set it to the annotated class. |
 
 ### VolumeSnapshot does not become ready
 

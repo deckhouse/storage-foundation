@@ -424,9 +424,6 @@ func TestStorageClassManagedByWireLiterals(t *testing.T) {
 	if storageClassManagedByLabelName != "storage.deckhouse.io/managed-by" {
 		t.Fatalf("unexpected managed-by key: %s", storageClassManagedByLabelName)
 	}
-	if storageClassManagedByFoundationLabelName != "storage-foundation.deckhouse.io/managed-by" {
-		t.Fatalf("unexpected storage-foundation managed-by key: %s", storageClassManagedByFoundationLabelName)
-	}
 	if storageClassVolumeSnapshotAnnotationName != "storage.deckhouse.io/volumesnapshotclass" {
 		t.Fatalf("unexpected volume snapshot class annotation: %s", storageClassVolumeSnapshotAnnotationName)
 	}
@@ -449,23 +446,7 @@ func TestStorageClassManagedBy(t *testing.T) {
 	}{
 		{name: "success: no labels", want: ""},
 		{name: "success: storage.deckhouse.io key", labels: map[string]string{storageClassManagedByLabelName: "sds-replicated-volume"}, want: "sds-replicated-volume"},
-		{name: "success: storage-foundation.deckhouse.io key", labels: map[string]string{storageClassManagedByFoundationLabelName: "csi-netapp"}, want: "csi-netapp"},
-		{
-			name: "success: storage.deckhouse.io key wins over the storage-foundation one",
-			labels: map[string]string{
-				storageClassManagedByLabelName:           "ceph-storage-class-controller",
-				storageClassManagedByFoundationLabelName: "other",
-			},
-			want: "ceph-storage-class-controller",
-		},
-		{
-			name: "success: an empty storage.deckhouse.io value falls back to the storage-foundation key",
-			labels: map[string]string{
-				storageClassManagedByLabelName:           "",
-				storageClassManagedByFoundationLabelName: "csi-nfs",
-			},
-			want: "csi-nfs",
-		},
+		{name: "success: the storage-foundation.deckhouse.io key is not a manager", labels: map[string]string{"storage-foundation.deckhouse.io/managed-by": "csi-netapp"}, want: ""},
 		{name: "success: an empty value is not a manager", labels: map[string]string{storageClassManagedByLabelName: ""}, want: ""},
 		{name: "success: an unrelated managed-by label is not a manager", labels: map[string]string{"app.kubernetes.io/managed-by": "Helm"}, want: ""},
 	}
@@ -487,7 +468,7 @@ func TestDefaultSnapshotClass(t *testing.T) {
 	t.Parallel()
 
 	managed := map[string]string{storageClassManagedByLabelName: "sds-local-volume"}
-	managedFoundation := map[string]string{storageClassManagedByFoundationLabelName: "sds-local-volume"}
+	foundationKey := map[string]string{"storage-foundation.deckhouse.io/managed-by": "sds-local-volume"}
 	annotated := map[string]string{storageClassVolumeSnapshotAnnotationName: "vsc"}
 
 	tests := []struct {
@@ -502,8 +483,8 @@ func TestDefaultSnapshotClass(t *testing.T) {
 		{name: "success: managed class accepts the class it names", labels: managed, annotations: annotated, requested: ptr("vsc"), want: ptr("vsc")},
 		{name: "error: managed class refuses another class", labels: managed, annotations: annotated, requested: ptr("other"), wantErr: true},
 		{name: "error: managed class refuses an empty class name", labels: managed, annotations: annotated, requested: ptr(""), wantErr: true},
-		{name: "success: class managed under the storage-foundation key fills an empty request", labels: managedFoundation, annotations: annotated, want: ptr("vsc")},
-		{name: "error: class managed under the storage-foundation key refuses another class", labels: managedFoundation, annotations: annotated, requested: ptr("other"), wantErr: true},
+		{name: "success: the storage-foundation key does not make a class managed, an empty request is filled", labels: foundationKey, annotations: annotated, want: ptr("vsc")},
+		{name: "success: the storage-foundation key does not make a class managed, another class is kept", labels: foundationKey, annotations: annotated, requested: ptr("other"), want: ptr("other")},
 		{name: "success: managed class without the annotation leaves an empty request", labels: managed},
 		{name: "success: managed class without the annotation keeps the requested class", labels: managed, requested: ptr("other"), want: ptr("other")},
 		{name: "success: unmanaged class fills an empty request", annotations: annotated, want: ptr("vsc")},

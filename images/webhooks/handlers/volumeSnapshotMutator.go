@@ -44,11 +44,8 @@ const (
 	storageClassVolumeSnapshotAnnotationName = "storage.deckhouse.io/volumesnapshotclass"
 
 	// storageClassManagedByLabelName is the label a storage module puts on every StorageClass it makes from
-	// its own resources; the value names the module or its controller and differs between modules. The same
-	// label under this module's API group is accepted too, though nothing sets it yet: a module moving to it
-	// must not drop out of the check below by doing so.
-	storageClassManagedByLabelName           = "storage.deckhouse.io/managed-by"
-	storageClassManagedByFoundationLabelName = "storage-foundation.deckhouse.io/managed-by"
+	// its own resources; the value names the module or its controller and differs between modules.
+	storageClassManagedByLabelName = "storage.deckhouse.io/managed-by"
 
 	// provenanceLabelName records WHO created a VolumeSnapshot, and provenanceUserInCluster is the value for
 	// one an ordinary client of the cluster API made. Only somebody present at the creation can state that,
@@ -228,10 +225,7 @@ func sourceStorageClass(ctx context.Context, cl client.Reader, snapshot *snapv1.
 
 // storageClassManagedBy returns the module that manages the StorageClass, or "" for a class no module does.
 func storageClassManagedBy(sc *storagev1.StorageClass) string {
-	if managedBy := sc.Labels[storageClassManagedByLabelName]; managedBy != "" {
-		return managedBy
-	}
-	return sc.Labels[storageClassManagedByFoundationLabelName]
+	return sc.Labels[storageClassManagedByLabelName]
 }
 
 // defaultSnapshotClass fills an empty spec.volumeSnapshotClassName from the StorageClass annotation and, on
