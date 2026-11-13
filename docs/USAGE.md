@@ -484,7 +484,7 @@ The following restrictions apply to volume transfers:
 
 When the `multitenancy-manager` module is enabled, the module registers the grants of two cluster-wide resources with it: `StorageClass` (the `storageclasses` definition) and `VolumeSnapshotClass` (the `volumesnapshotclasses` definition). Nothing is restricted until a cluster administrator creates a `ClusterResourceGrantPolicy` for the projects: by default every class is available to every project. If `multitenancy-manager` is disabled, the module registers nothing.
 
-multitenancy-manager ships the `storageclasses` definition and the `storageclasses-pvc` reference too. Versions of multitenancy-manager that render them whatever the state of storage-foundation use the same spec; while such a version is installed, either module may own these objects (the `meta.helm.sh/release-name` annotation names the owning release), and ownership can pass from one module to the other when they are updated. The spec stays the same, so the check does not change. Newer versions of multitenancy-manager render them only while storage-foundation is disabled, so while it is enabled, storage-foundation is their only owner. storage-foundation and these newer versions of multitenancy-manager mark the two objects with `helm.sh/resource-policy: keep`, so the module that stops rendering them leaves them in the cluster, and the other one takes them over.
+multitenancy-manager ships the `storageclasses` definition and the `storageclasses-pvc` reference too. Versions of multitenancy-manager that render them whatever the state of storage-foundation use the same spec; while such a version is installed, either module may own these objects (the `meta.helm.sh/release-name` annotation names the owning release), and ownership can pass from one module to the other when they are updated. The spec stays the same, so the check does not change. Newer versions of multitenancy-manager render them only while storage-foundation is disabled, so while it is enabled, storage-foundation is their only owner. storage-foundation and these newer versions of multitenancy-manager mark the two objects with `helm.sh/resource-policy: keep`, so the module that stops rendering them leaves them in the cluster, and the other one takes them over. The copy of multitenancy-manager has no `excluded` rule, so the `storage.deckhouse.io/internal` label described below has no effect while multitenancy-manager owns the objects: while storage-foundation is disabled and, with a version of multitenancy-manager that renders them whatever the state of storage-foundation, until the storage-foundation release applies the objects again. On DKP versions earlier than 1.78, storage-foundation does not set this rule either, so that its objects stay the same as the copy of multitenancy-manager, and the label has no effect there.
 
 A policy that lists the allowed classes makes the module's objects in the project namespaces follow it. The check is applied to the following fields:
 
@@ -517,6 +517,26 @@ spec:
       allowed:
         - fast-ssd-snapclass
 ```
+
+The StorageClasses that the Deckhouse storage modules create carry the `storage.deckhouse.io/managed-by` label with the name of the module, for example, `csi-ceph`, `sds-local-volume`, or `sds-replicated-volume`. A policy can select the classes of a module with `allowedSelector` or `deniedSelector` instead of listing their names. For example, to leave projects only the classes of sds-replicated-volume:
+
+```yaml
+apiVersion: multitenancy.deckhouse.io/v1alpha2
+kind: ClusterResourceGrantPolicy
+metadata:
+  name: replicated-only
+spec:
+  projectSelector:
+    matchLabels:
+      environment: production
+  resources:
+    - resourceName: storageclasses
+      allowedSelector:
+        matchLabels:
+          storage.deckhouse.io/managed-by: sds-replicated-volume
+```
+
+On DKP 1.78 and later, a StorageClass with the `storage.deckhouse.io/internal: "true"` label is never available to projects, whatever a ClusterResourceGrantPolicy says: it is not listed in `AvailableClusterResource`, and a request that names it is rejected even if a policy lists the class in `allowed`. A PersistentVolumeClaim is handled as described above: its class is replaced with the default class of the project if the project has one. Storage modules set the label on the classes they create for their own components, for example, on `sds-elastic-osd` of the sds-elastic module, which binds the volumes of Ceph OSDs. An administrator can set it on any other StorageClass that projects must never use. The label does not affect namespaces outside projects, where the module components run.
 
 Take the following into account:
 

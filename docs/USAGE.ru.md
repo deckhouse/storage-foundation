@@ -484,7 +484,7 @@ d8 k -n project get dataimports.storage-foundation.deckhouse.io data-import -o j
 
 Если включён модуль `multitenancy-manager`, модуль регистрирует в нём гранты (разрешения на использование) двух cluster-wide-ресурсов (ресурсов уровня кластера): `StorageClass` (определение `storageclasses`) и `VolumeSnapshotClass` (определение `volumesnapshotclasses`). Пока администратор кластера не создал `ClusterResourceGrantPolicy` для проектов, ничего не ограничено: по умолчанию каждому проекту доступны все классы. Если `multitenancy-manager` выключен, модуль ничего не регистрирует.
 
-Определение `storageclasses` и ссылку `storageclasses-pvc` поставляет и multitenancy-manager. Версии multitenancy-manager, которые рендерят их независимо от состояния storage-foundation, используют тот же spec; пока установлена такая версия, владельцем этих объектов может быть любой из двух модулей (релиз-владелец указан в аннотации `meta.helm.sh/release-name`), и при обновлении модулей владение может переходить от одного к другому. Spec при этом не меняется, поэтому не меняется и проверка. Более новые версии multitenancy-manager рендерят их, только пока storage-foundation выключен, поэтому при включённом storage-foundation владелец у них один — storage-foundation. storage-foundation и эти новые версии multitenancy-manager помечают оба объекта аннотацией `helm.sh/resource-policy: keep`, поэтому модуль, который перестаёт их рендерить, оставляет их в кластере, а другой модуль забирает их себе.
+Определение `storageclasses` и ссылку `storageclasses-pvc` поставляет и multitenancy-manager. Версии multitenancy-manager, которые рендерят их независимо от состояния storage-foundation, используют тот же spec; пока установлена такая версия, владельцем этих объектов может быть любой из двух модулей (релиз-владелец указан в аннотации `meta.helm.sh/release-name`), и при обновлении модулей владение может переходить от одного к другому. Spec при этом не меняется, поэтому не меняется и проверка. Более новые версии multitenancy-manager рендерят их, только пока storage-foundation выключен, поэтому при включённом storage-foundation владелец у них один — storage-foundation. storage-foundation и эти новые версии multitenancy-manager помечают оба объекта аннотацией `helm.sh/resource-policy: keep`, поэтому модуль, который перестаёт их рендерить, оставляет их в кластере, а другой модуль забирает их себе. В копии multitenancy-manager нет правила `excluded`, поэтому, пока объектами владеет multitenancy-manager, описанная ниже метка `storage.deckhouse.io/internal` не действует: пока storage-foundation выключен, а с версией multitenancy-manager, которая рендерит их независимо от состояния storage-foundation, — пока релиз storage-foundation снова не применит объекты. В версиях DKP ниже 1.78 storage-foundation тоже не задаёт это правило, чтобы его объекты совпадали с копией multitenancy-manager, и метка там не действует.
 
 Политика со списком разрешённых классов распространяется на объекты модуля в неймспейсах проектов. Проверка применяется к следующим полям:
 
@@ -517,6 +517,26 @@ spec:
       allowed:
         - fast-ssd-snapclass
 ```
+
+На StorageClass, которые создают модули хранения Deckhouse, стоит метка `storage.deckhouse.io/managed-by` с именем модуля, например `csi-ceph`, `sds-local-volume` или `sds-replicated-volume`. Политика может выбирать классы модуля через `allowedSelector` или `deniedSelector`, не перечисляя их имена. Например, чтобы оставить проектам только классы sds-replicated-volume:
+
+```yaml
+apiVersion: multitenancy.deckhouse.io/v1alpha2
+kind: ClusterResourceGrantPolicy
+metadata:
+  name: replicated-only
+spec:
+  projectSelector:
+    matchLabels:
+      environment: production
+  resources:
+    - resourceName: storageclasses
+      allowedSelector:
+        matchLabels:
+          storage.deckhouse.io/managed-by: sds-replicated-volume
+```
+
+В DKP 1.78 и новее StorageClass с меткой `storage.deckhouse.io/internal: "true"` никогда не доступен проектам, что бы ни было указано в ClusterResourceGrantPolicy: его нет в `AvailableClusterResource`, а запрос с этим классом отклоняется, даже если политика перечисляет класс в `allowed`. С PersistentVolumeClaim поступают так, как описано выше: его класс заменяется классом проекта по умолчанию, если он у проекта есть. Модули хранения ставят эту метку на классы, которые создают для своих компонентов, например на `sds-elastic-osd` модуля sds-elastic, к которому привязываются тома OSD Ceph. Администратор может поставить её на любой другой StorageClass, которым проекты не должны пользоваться никогда. На неймспейсы вне проектов, где работают компоненты модулей, метка не влияет.
 
 Учитывайте следующее:
 

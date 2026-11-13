@@ -4,6 +4,9 @@ date: "2026-xx-xx"
 summary: ""
 highlights: []
 
+new_features:
+  - "В DKP 1.78 и новее при включённом `multitenancy-manager` `StorageClass` с меткой `storage.deckhouse.io/internal: \"true\"` никогда не доступен проектам: определение `storageclasses` исключает его, поэтому его нет в `AvailableClusterResource`, а `DataImport` или `VolumeRestoreRequest` с этим классом отклоняется, даже если `ClusterResourceGrantPolicy` класс разрешает; `PersistentVolumeClaim` с этим классом получает класс проекта по умолчанию или отклоняется. Модули хранения ставят эту метку на классы своих компонентов. В более ранних версиях DKP определение совпадает с копией `multitenancy-manager`, и метка не действует. В версии `multitenancy-manager`, которая рендерит свою копию `storageclasses` независимо от состояния storage-foundation, такого правила нет, и, пока объектом владеет она, метка тоже не действует."
+
 improvements:
   - "Отключение storage-foundation больше не удаляет грант `storageclasses` и его ссылку из `PersistentVolumeClaim` `storageclasses-pvc`: у обоих аннотация `helm.sh/resource-policy: keep`, они остаются в кластере, и их забирает себе `multitenancy-manager`, поэтому `StorageClass` в проектах по-прежнему ограничен. С версиями `multitenancy-manager`, которые регистрируют их, только пока storage-foundation выключен, при включении и отключении storage-foundation объекты переходят от одного модуля к другому и не удаляются. Грант `volumesnapshotclasses` и ссылки из `DataImport` и `VolumeRestoreRequest` отключение storage-foundation по-прежнему удаляет."
 
@@ -13,6 +16,7 @@ fixes:
 
 docs:
   - "На странице использования описано, какие гранты остаются после отключения storage-foundation и как грант `storageclasses` переходит между storage-foundation и `multitenancy-manager`."
+  - "На странице использования показано, как выбрать классы модуля хранения в `ClusterResourceGrantPolicy` по метке `storage.deckhouse.io/managed-by`, и описана метка `storage.deckhouse.io/internal`."
 
 
 

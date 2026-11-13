@@ -4,6 +4,9 @@ date: "2026-xx-xx"
 summary: ""
 highlights: []
 
+new_features:
+  - "On DKP 1.78 and later, a `StorageClass` with the `storage.deckhouse.io/internal: \"true\"` label is never available to projects with `multitenancy-manager` enabled: the `storageclasses` definition excludes it, so it is not listed in `AvailableClusterResource` and a `DataImport` or `VolumeRestoreRequest` naming it is denied even if a `ClusterResourceGrantPolicy` allows the class; a `PersistentVolumeClaim` naming it gets the default class of the project or is denied. The storage modules set the label on the classes of their own components. On earlier DKP versions the definition stays the same as the copy of `multitenancy-manager`, so the label has no effect there. A `multitenancy-manager` version that renders its own copy of `storageclasses` whatever the state of storage-foundation has no such rule, and while it owns the object, the label has no effect either."
+
 improvements:
   - "Disabling storage-foundation no longer removes the `storageclasses` grant and its `PersistentVolumeClaim` reference `storageclasses-pvc`: both carry `helm.sh/resource-policy: keep`, stay in the cluster and are taken over by `multitenancy-manager`, so `StorageClass` stays restricted in projects. With versions of `multitenancy-manager` that register them only while storage-foundation is disabled, enabling and disabling storage-foundation passes the objects between the two modules without removing them. Disabling storage-foundation still removes the `volumesnapshotclasses` grant and the `DataImport` and `VolumeRestoreRequest` references."
 
@@ -13,6 +16,7 @@ fixes:
 
 docs:
   - "The usage page describes which grants stay when storage-foundation is disabled and how the `storageclasses` grant passes between storage-foundation and `multitenancy-manager`."
+  - "The usage page shows how to select the classes of a storage module in a `ClusterResourceGrantPolicy` by the `storage.deckhouse.io/managed-by` label and describes the `storage.deckhouse.io/internal` label."
 
 
 

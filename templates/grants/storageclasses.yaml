@@ -16,6 +16,9 @@ spec:
   defaultFrom:
     annotationKey: storageclass.kubernetes.io/is-default-class
   {{- if eq (include "storage-foundation.rbacv2_new_scheme" .) "true" }}
+  excluded:
+  - matchLabels:
+      storage.deckhouse.io/internal: "true"
   catalogFields:
   - name: provisioner
     path: $.provisioner
