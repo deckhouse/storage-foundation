@@ -26,6 +26,19 @@ requirements:
     # snapshot-controller is enabled, storage-foundation refuses to enable or update, and unblocks
     # itself once v0.2.0 arrives on that module's release channel.
     snapshot-controller: ">= 0.2.0 !optional"
+disable:
+  confirmation: true
+  message: |
+    Attention!
+
+    Disabling this module stops the snapshot controller embedded in it and the controllers that run data export and import and volume restore. After that:
+
+    - VolumeSnapshot objects and PersistentVolumeClaim clones from snapshots are no longer processed.
+    - DataExport and DataImport resources are no longer processed, and running exports and imports stop.
+    - VolumeRestoreRequest resources and the namespace snapshots of the state-snapshotter module that rely on them stop working.
+    - With multitenancy-manager enabled, the `volumesnapshotclasses` grant and the DataImport and VolumeRestoreRequest references are removed, so a ClusterResourceGrantPolicy no longer restricts VolumeSnapshotClass in projects. The `storageclasses` grant stays and is taken over by multitenancy-manager.
+
+    Before disabling the module, make sure that no snapshots, exports, imports or restores are in progress and that nothing in the cluster depends on them. Enable the module again to restore the restrictions on VolumeSnapshotClass.
 accessibility:
   editions:
     _default:
