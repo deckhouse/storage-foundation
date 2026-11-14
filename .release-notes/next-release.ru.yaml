@@ -14,6 +14,7 @@ improvements:
 fixes:
   - "В проекте, ограниченном `ClusterResourceGrantPolicy`, DataImport в режиме `CreatePVC`, чей PersistentVolumeClaim отклонила проверка грантов, сообщает об этом в условии `Ready` с причиной `TargetFailed` и текстом отказа, а не повторяет попытку молча. PVC, который получил класс проекта по умолчанию вместо указанного в `pvcTemplate`, сохраняет этот класс."
   - "VolumeRestoreRequest, чей PersistentVolumeClaim отклонила проверка грантов, сообщает об этом событием `VRRPVCCreateFailed`, а если PVC получил другой класс — событием `VRRStorageClassReplaced`."
+  - "В DKP 1.78 и новее при включённом `multitenancy-manager` `PersistentVolumeClaim`, который восстанавливает `VolumeSnapshot` или клонирует другой `PersistentVolumeClaim`, сохраняет указанный класс и не получает класс проекта по умолчанию, в котором том другого CSI-драйвера создать нельзя: если класс недоступен проекту, claim (заявка на том) отклоняется с сообщением, что нужно указать доступный проекту класс, который обслуживает CSI-драйвер источника. В более ранних версиях DKP такие claim обрабатываются как раньше."
 
 docs:
   - "На странице использования описано, какие гранты остаются после отключения storage-foundation и как грант `storageclasses` переходит между storage-foundation и `multitenancy-manager`."
