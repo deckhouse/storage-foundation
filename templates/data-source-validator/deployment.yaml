@@ -14,7 +14,7 @@ metadata:
 spec:
   targetRef:
     apiVersion: "apps/v1"
-    kind: StatefulSet
+    kind: Deployment
     name: data-source-validator
   updatePolicy:
     updateMode: "Initial"
@@ -35,20 +35,25 @@ metadata:
   namespace: d8-{{ .Chart.Name }}
   {{- include "helm_lib_module_labels" (list . (dict "app" "data-source-validator" )) | nindent 2 }}
 spec:
-  minAvailable: {{ include "helm_lib_is_ha_to_value" (list . 1 0) }}
+  maxUnavailable: 1
   selector:
     matchLabels:
       app: data-source-validator
 ---
-kind: StatefulSet
+kind: Deployment
 apiVersion: apps/v1
 metadata:
   name: data-source-validator
   namespace: d8-{{ .Chart.Name }}
   {{- include "helm_lib_module_labels" (list . (dict "app" "data-source-validator")) | nindent 2 }}
 spec:
-  serviceName: data-source-validator
   replicas: 1
+  revisionHistoryLimit: 2
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
   selector:
     matchLabels:
       app: data-source-validator
