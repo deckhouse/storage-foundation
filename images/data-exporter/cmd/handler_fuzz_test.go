@@ -18,12 +18,16 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/base64"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"strings"
+	"sync"
 	"testing"
+	"testing/synctest"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"go.uber.org/mock/gomock"
@@ -35,6 +39,7 @@ import (
 	"github.com/deckhouse/storage-foundation/images/data-exporter/internal/authorization"
 	"github.com/deckhouse/storage-foundation/images/data-exporter/internal/config"
 	"github.com/deckhouse/storage-foundation/images/data-exporter/internal/mock"
+	"github.com/deckhouse/storage-foundation/images/data-exporter/internal/ttl_control"
 )
 
 func createFsFuzzTest(t assert.TestingT) *fake.OS {
@@ -188,66 +193,87 @@ func FuzzHandler(f *testing.F) {
 	logger := logger.NewNop()
 
 	f.Fuzz(func(t *testing.T, authType string, basicCreds string, bearerToken string, wrongAuth string, rawURL string, methodIdx int, body []byte, failSeed int64, failProb byte) {
-		// Failure injection is a decorator around the filesystem now, not a field on the
-		// mock, so the handlers are constructed per iteration on top of the wrapped one.
-		// Construction itself touches the filesystem, so an injected failure there is a
-		// legitimate outcome and ends the iteration rather than failing the test.
-		probability := float64(failProb) / 255.0
-		failing := failer.NewOS(fsys, failer.NewProbabilityFailer(failSeed, probability))
+		iteration := func(t *testing.T) {
+			// Failure injection is a decorator around the filesystem now, not a field on the
+			// mock, so the handlers are constructed per iteration on top of the wrapped one.
+			// Construction itself touches the filesystem, so an injected failure there is a
+			// legitimate outcome and ends the iteration rather than failing the test.
+			probability := float64(failProb) / 255.0
+			failing := failer.NewOS(fsys, failer.NewProbabilityFailer(failSeed, probability))
 
-		exportFS, err := NewExporterHandler(failing, "/sharedir", config.VolumeModeFilesystem, logger)
-		if err != nil {
-			return
+			exportFS, err := NewExporterHandler(failing, "/sharedir", config.VolumeModeFilesystem, logger)
+			if err != nil {
+				return
+			}
+
+			exportBlock, err := NewExporterHandler(failing, "/block", config.VolumeModeBlock, logger)
+			if err != nil {
+				return
+			}
+
+			ctrl := gomock.NewController(t)
+			k8sClient := mock.NewMockUserAuthorizer(ctrl)
+			k8sClient.
+				EXPECT().
+				AuthenticateUserByToken(gomock.Any(), gomock.Any()).
+				Return(true, "user", []string{"group"}, nil).
+				AnyTimes()
+
+			k8sClient.
+				EXPECT().
+				AuthorizeUser(gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any()).
+				Return(true, "", nil).
+				AnyTimes()
+
+			updater := mock.NewMockDataManagerAccessTimestampUpdater(ctrl)
+			updater.EXPECT().UpdateAccessTimestamp(gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any()).Return(nil).AnyTimes()
+			setter := mock.NewMockDataManagerServerStateSetter(ctrl)
+			setter.EXPECT().SetServerState(gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any()).Return(nil).AnyTimes()
+			ttlControl, err := ttl_control.NewTTLControl(common.OperationExport, "1m", opt.DataManagerNamespace, opt.DataManagerTargetName, updater, setter, logger)
+			if err != nil {
+				t.Fatal(err)
+			}
+			ctx, cancel := context.WithCancel(context.Background())
+			var wg sync.WaitGroup
+			ttlControl.Start(ctx, &wg)
+			defer func() {
+				time.Sleep(3 * time.Minute)
+				synctest.Wait()
+				cancel()
+				wg.Wait()
+			}()
+
+			auth := func(handler http.Handler) http.Handler {
+				return authorization.Authorize(
+					handler,
+					k8sClient,
+					common.OperationExport,
+					opt.DataManagerNamespace,
+				)
+			}
+
+			{
+				// handle fs request
+				mux := http.NewServeMux()
+				handler := auth(ttlControl.Wrap(exportFS))
+				MuxAddFSHandler(mux, opt, handler, logger)
+
+				req := createRequest(t, authType, basicCreds, bearerToken, wrongAuth, rawURL, methodIdx, body)
+				rr := httptest.NewRecorder()
+				mux.ServeHTTP(rr, req)
+			}
+
+			{
+				// handle block request
+				mux := http.NewServeMux()
+				handler := auth(ttlControl.Wrap(exportBlock))
+				MuxAddBlockHandler(mux, opt, handler, logger)
+
+				req := createRequest(t, authType, basicCreds, bearerToken, wrongAuth, rawURL, methodIdx, body)
+				rr := httptest.NewRecorder()
+				mux.ServeHTTP(rr, req)
+			}
 		}
-
-		exportBlock, err := NewExporterHandler(failing, "/block", config.VolumeModeBlock, logger)
-		if err != nil {
-			return
-		}
-
-		ctrl := gomock.NewController(t)
-		k8sClient := mock.NewMockUserAuthorizer(ctrl)
-		k8sClient.
-			EXPECT().
-			AuthenticateUserByToken(gomock.Any(), gomock.Any()).
-			Return(true, "user", []string{"group"}, nil).
-			AnyTimes()
-
-		k8sClient.
-			EXPECT().
-			AuthorizeUser(gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any()).
-			Return(true, "", nil).
-			AnyTimes()
-
-		auth := func(handler http.Handler) http.Handler {
-			return authorization.Authorize(
-				handler,
-				k8sClient,
-				common.OperationExport,
-				opt.DataManagerNamespace,
-			)
-		}
-
-		{
-			// handle fs request
-			mux := http.NewServeMux()
-			handler := auth(exportFS)
-			MuxAddFSHandler(mux, opt, handler, logger)
-
-			req := createRequest(t, authType, basicCreds, bearerToken, wrongAuth, rawURL, methodIdx, body)
-			rr := httptest.NewRecorder()
-			mux.ServeHTTP(rr, req)
-		}
-
-		{
-			// handle block request
-			mux := http.NewServeMux()
-			handler := auth(exportBlock)
-			MuxAddBlockHandler(mux, opt, handler, logger)
-
-			req := createRequest(t, authType, basicCreds, bearerToken, wrongAuth, rawURL, methodIdx, body)
-			rr := httptest.NewRecorder()
-			mux.ServeHTTP(rr, req)
-		}
+		synctest.Test(t, iteration)
 	})
 }
