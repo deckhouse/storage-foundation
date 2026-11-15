@@ -41,6 +41,8 @@ import (
 )
 
 const (
+	noProvisioner = "kubernetes.io/no-provisioner"
+
 	storageClassVolumeSnapshotAnnotationName = "storage.deckhouse.io/volumesnapshotclass"
 
 	// storageClassManagedByLabelName is the label a storage module puts on every StorageClass it makes from
@@ -188,6 +190,10 @@ func VolumeSnapshotMutate(ctx context.Context, ar *model.AdmissionReview, obj me
 	if err := defaultSnapshotClass(snapshot, sc); err != nil {
 		return &kwhmutating.MutatorResult{}, err
 	}
+
+	if err := requireSnapshotClass(ctx, cl, snapshot, sc); err != nil {
+		return &kwhmutating.MutatorResult{}, err
+	}
 	return &kwhmutating.MutatorResult{MutatedObject: snapshot}, nil
 }
 
@@ -266,4 +272,74 @@ func defaultSnapshotClass(snapshot *snapv1.VolumeSnapshot, sc *storagev1.Storage
 		"snapshotVolumeSnapshotClassName", *requested, "storageClassAnnotation", annotated)
 	return fmt.Errorf("VolumeSnapshotMutate: StorageClass %s is managed by %s and takes snapshots with VolumeSnapshotClass %s, "+
 		"so the VolumeSnapshot must not request %s", sc.Name, managedBy, annotated, *requested)
+}
+
+func sourceDriver(ctx context.Context, cl client.Reader, snapshot *snapv1.VolumeSnapshot, sc *storagev1.StorageClass) (string, bool, error) {
+	pvc := &corev1.PersistentVolumeClaim{}
+	key := types.NamespacedName{Name: *snapshot.Spec.Source.PersistentVolumeClaimName, Namespace: snapshot.Namespace}
+	if err := cl.Get(ctx, key, pvc); err != nil {
+		return "", false, err
+	}
+
+	if pvc.Spec.VolumeName == "" {
+		return sc.Provisioner, sc.Provisioner != noProvisioner, nil
+	}
+
+	pv := &corev1.PersistentVolume{}
+	if err := cl.Get(ctx, types.NamespacedName{Name: pvc.Spec.VolumeName}, pv); err != nil {
+		return "", false, err
+	}
+	if pv.Spec.CSI == nil {
+		return "", false, nil
+	}
+	return pv.Spec.CSI.Driver, true, nil
+}
+
+func requireSnapshotClass(ctx context.Context, cl client.Reader, snapshot *snapv1.VolumeSnapshot, sc *storagev1.StorageClass) error {
+	log := Log().Named("volume-snapshot-mutator")
+
+	driver, check, err := sourceDriver(ctx, cl, snapshot, sc)
+	if err != nil {
+		log.Error("failed to resolve the CSI driver of the source PVC", logger.Err(err))
+		return err
+	}
+	if !check {
+		log.Info("VolumeSnapshotMutate: the source volume has no CSI source, not checking the VolumeSnapshotClass",
+			"snapshot", snapshot.Name, "namespace", snapshot.Namespace)
+		return nil
+	}
+
+	pvcName := *snapshot.Spec.Source.PersistentVolumeClaimName
+
+	classes := &snapshotv1.VolumeSnapshotClassList{}
+	if err := cl.List(ctx, classes); err != nil {
+		log.Error("failed to list the VolumeSnapshotClasses", logger.Err(err))
+		return err
+	}
+
+	if name := snapshot.Spec.VolumeSnapshotClassName; name != nil && *name != "" {
+		for i := range classes.Items {
+			class := &classes.Items[i]
+			if class.Name != *name {
+				continue
+			}
+			if class.Driver != driver {
+				return fmt.Errorf("VolumeSnapshotMutate: VolumeSnapshotClass %s belongs to the CSI driver %s, but PVC %s/%s of StorageClass %s "+
+					"is served by the CSI driver %s, so the VolumeSnapshot must use a VolumeSnapshotClass of that driver",
+					*name, class.Driver, snapshot.Namespace, pvcName, sc.Name, driver)
+			}
+			return nil
+		}
+		return fmt.Errorf("VolumeSnapshotMutate: VolumeSnapshotClass %s does not exist, so a VolumeSnapshot of PVC %s/%s "+
+			"served by the CSI driver %s cannot be taken", *name, snapshot.Namespace, pvcName, driver)
+	}
+
+	for i := range classes.Items {
+		if classes.Items[i].Driver == driver {
+			return nil
+		}
+	}
+	return fmt.Errorf("VolumeSnapshotMutate: there is no VolumeSnapshotClass for the CSI driver %s of PVC %s/%s (StorageClass %s), "+
+		"so snapshots of this volume are not available: the driver does not support snapshots or its module is not enabled",
+		driver, snapshot.Namespace, pvcName, sc.Name)
 }

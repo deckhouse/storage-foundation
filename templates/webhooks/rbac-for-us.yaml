@@ -27,6 +27,12 @@ rules:
     resources:
       - persistentvolumeclaims
   - apiGroups:
+      - ""
+    verbs:
+      - get
+    resources:
+      - persistentvolumes
+  - apiGroups:
       - snapshot.storage.k8s.io
     verbs:
       - get

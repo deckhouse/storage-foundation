@@ -27,11 +27,14 @@ import (
 	"testing"
 
 	"github.com/google/cel-go/cel"
+	snapshotv1 "github.com/kubernetes-csi/external-snapshotter/client/v6/apis/volumesnapshot/v1"
 	"github.com/slok/kubewebhook/v2/pkg/model"
 	kwhmutating "github.com/slok/kubewebhook/v2/pkg/webhook/mutating"
 	corev1 "k8s.io/api/core/v1"
 	storagev1 "k8s.io/api/storage/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
+	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
@@ -568,5 +571,154 @@ func TestSourceStorageClass(t *testing.T) {
 				t.Fatalf("StorageClass = %q, want %q", sc.Name, tt.wantSC)
 			}
 		})
+	}
+}
+
+func TestRequireSnapshotClass(t *testing.T) {
+	t.Parallel()
+
+	const driver = "csi.example.io"
+
+	scheme := runtime.NewScheme()
+	if err := clientgoscheme.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	if err := snapshotv1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+
+	class := func(name, drv string) *snapshotv1.VolumeSnapshotClass {
+		return &snapshotv1.VolumeSnapshotClass{ObjectMeta: metav1.ObjectMeta{Name: name}, Driver: drv}
+	}
+	claim := func(volumeName string) *corev1.PersistentVolumeClaim {
+		return &corev1.PersistentVolumeClaim{
+			ObjectMeta: metav1.ObjectMeta{Name: "pvc", Namespace: "ns"},
+			Spec:       corev1.PersistentVolumeClaimSpec{StorageClassName: ptr("sc"), VolumeName: volumeName},
+		}
+	}
+	volume := func(csi *corev1.CSIPersistentVolumeSource) *corev1.PersistentVolume {
+		return &corev1.PersistentVolume{
+			ObjectMeta: metav1.ObjectMeta{Name: "pv"},
+			Spec:       corev1.PersistentVolumeSpec{PersistentVolumeSource: corev1.PersistentVolumeSource{CSI: csi}},
+		}
+	}
+	provisioned := &storagev1.StorageClass{ObjectMeta: metav1.ObjectMeta{Name: "sc"}, Provisioner: driver}
+
+	tests := []struct {
+		name      string
+		objects   []client.Object
+		sc        *storagev1.StorageClass
+		className *string
+		wantErr   string
+	}{
+		{
+			name:    "success: no class named and the driver has one",
+			objects: []client.Object{claim(""), class("a", driver)},
+			sc:      provisioned,
+		},
+		{
+			name:    "error: no class named and the driver has none",
+			objects: []client.Object{claim("")},
+			sc:      provisioned,
+			wantErr: "there is no VolumeSnapshotClass for the CSI driver csi.example.io",
+		},
+		{
+			name:    "error: no class named and the classes belong to another driver",
+			objects: []client.Object{claim(""), class("a", "other.io")},
+			sc:      provisioned,
+			wantErr: "there is no VolumeSnapshotClass for the CSI driver csi.example.io",
+		},
+		{
+			name:      "success: the named class belongs to the driver",
+			objects:   []client.Object{claim(""), class("a", driver), class("b", "other.io")},
+			sc:        provisioned,
+			className: ptr("a"),
+		},
+		{
+			name:      "error: the named class does not exist",
+			objects:   []client.Object{claim(""), class("a", driver)},
+			sc:        provisioned,
+			className: ptr("gone"),
+			wantErr:   "VolumeSnapshotClass gone does not exist",
+		},
+		{
+			name:      "error: the named class belongs to another driver",
+			objects:   []client.Object{claim(""), class("a", driver), class("b", "other.io")},
+			sc:        provisioned,
+			className: ptr("b"),
+			wantErr:   "VolumeSnapshotClass b belongs to the CSI driver other.io",
+		},
+		{
+			name:      "error: the class from the StorageClass annotation is not created",
+			objects:   []client.Object{claim("")},
+			sc:        &storagev1.StorageClass{ObjectMeta: metav1.ObjectMeta{Name: "sc"}, Provisioner: driver},
+			className: ptr("annotated"),
+			wantErr:   "VolumeSnapshotClass annotated does not exist",
+		},
+		{
+			name:    "success: the driver of the bound volume wins over the provisioner",
+			objects: []client.Object{claim("pv"), volume(&corev1.CSIPersistentVolumeSource{Driver: driver}), class("a", driver)},
+			sc:      &storagev1.StorageClass{ObjectMeta: metav1.ObjectMeta{Name: "sc"}, Provisioner: "kubernetes.io/no-provisioner"},
+		},
+		{
+			name:    "error: the driver of the bound volume has no class although the provisioner has",
+			objects: []client.Object{claim("pv"), volume(&corev1.CSIPersistentVolumeSource{Driver: "vol.io"}), class("a", driver)},
+			sc:      provisioned,
+			wantErr: "there is no VolumeSnapshotClass for the CSI driver vol.io",
+		},
+		{
+			name:    "success: a claim not bound yet on a StorageClass without a provisioner",
+			objects: []client.Object{claim("")},
+			sc:      &storagev1.StorageClass{ObjectMeta: metav1.ObjectMeta{Name: "sc"}, Provisioner: "kubernetes.io/no-provisioner"},
+		},
+		{
+			name:    "success: the bound volume has no CSI source",
+			objects: []client.Object{claim("pv"), volume(nil)},
+			sc:      provisioned,
+		},
+		{
+			name:    "error: the bound volume does not exist",
+			objects: []client.Object{claim("pv"), class("a", driver)},
+			sc:      provisioned,
+			wantErr: "not found",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(tt.objects...).Build()
+			snapshot := &snapv1.VolumeSnapshot{ObjectMeta: metav1.ObjectMeta{Name: "snap", Namespace: "ns"}}
+			snapshot.Spec.Source.PersistentVolumeClaimName = ptr("pvc")
+			snapshot.Spec.VolumeSnapshotClassName = tt.className
+
+			err := requireSnapshotClass(context.Background(), cl, snapshot, tt.sc)
+			if tt.wantErr == "" {
+				if err != nil {
+					t.Fatalf("requireSnapshotClass: %v", err)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+				t.Fatalf("error = %v, want one containing %q", err, tt.wantErr)
+			}
+		})
+	}
+}
+
+func TestVolumeSnapshotMutateContentSourceNeedsNoClass(t *testing.T) {
+	t.Parallel()
+
+	snapshot := &snapv1.VolumeSnapshot{ObjectMeta: metav1.ObjectMeta{Name: "snap", Namespace: "ns"}}
+	snapshot.Spec.Source.VolumeSnapshotContentName = ptr("content")
+
+	ar := &model.AdmissionReview{Operation: model.OperationCreate}
+	res, err := VolumeSnapshotMutate(context.Background(), ar, snapshot)
+	if err != nil {
+		t.Fatalf("VolumeSnapshotMutate: %v", err)
+	}
+	if res.MutatedObject == nil {
+		t.Fatal("expected the snapshot to be admitted")
 	}
 }
