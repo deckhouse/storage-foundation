@@ -84,6 +84,13 @@ type IngressCfg struct {
 	ProxyBodySize string
 }
 
+func PublicHost(template, subdomain string) (string, error) {
+	if !strings.Contains(template, "%s") {
+		return "", fmt.Errorf("public domain template %q does not contain %%s", template)
+	}
+	return strings.Replace(template, "%s", subdomain, 1), nil
+}
+
 // Ensures Ingress resource is created or updated
 // Returns:
 // - public URL of the Ingress resource
@@ -101,8 +108,14 @@ func EnsureIngressResource(ctx context.Context, cl client.Client, rd client.Read
 		return "", fmt.Errorf("environment variable ingressClassName not defined")
 	}
 
-	publicDomain = strings.TrimPrefix(publicDomain, "%s.")
-	host := fmt.Sprintf("%s.%s", KubeAPISubdomain, publicDomain)
+	host, err := PublicHost(publicDomain, KubeAPISubdomain)
+	if err != nil {
+		return "", err
+	}
+	consoleHost, err := PublicHost(publicDomain, ConsoleSubdomain)
+	if err != nil {
+		return "", err
+	}
 	publicURL := fmt.Sprintf("https://%s%s/", host, cfg.Path)
 	pathType := networkingv1.PathTypeImplementationSpecific
 
@@ -116,7 +129,7 @@ func EnsureIngressResource(ctx context.Context, cl client.Client, rd client.Read
 		return "", fmt.Errorf("failed to create or update ingress secret: %w", err)
 	}
 
-	newIngress := makeIngress(cfg, host, cfg.Path, &pathType, ingressClassName, publicDomain)
+	newIngress := makeIngress(cfg, host, cfg.Path, &pathType, ingressClassName, consoleHost)
 	oldIngress, err := GetIngress(ctx, cl, cfg.IngressName)
 	if err != nil {
 		return "", err
@@ -200,7 +213,7 @@ func DeleteIngressResource(ctx context.Context, cl client.Client, name types.Nam
 	return true, nil
 }
 
-func makeIngress(cfg IngressCfg, host, path string, pathType *networkingv1.PathType, ingressClassName string, publicDomain string) *networkingv1.Ingress {
+func makeIngress(cfg IngressCfg, host, path string, pathType *networkingv1.PathType, ingressClassName string, consoleHost string) *networkingv1.Ingress {
 	annotations := map[string]string{
 		AnnotationBackendProtocol: "HTTPS",
 	}
@@ -210,7 +223,7 @@ func makeIngress(cfg IngressCfg, host, path string, pathType *networkingv1.PathT
 	// that does not exist. Each list stays opt-in — an empty annotation value makes nginx send an
 	// empty header rather than fall back to its default, which is strictly worse than not annotating.
 	if cfg.CorsAllowMethods != "" {
-		corsOrigin := fmt.Sprintf("https://%s.%s", ConsoleSubdomain, publicDomain)
+		corsOrigin := "https://" + consoleHost
 		annotations[AnnotationEnableCORS] = "true"
 		annotations[AnnotationCORSAllowMethods] = cfg.CorsAllowMethods
 		annotations[AnnotationCORSAllowOrigin] = corsOrigin

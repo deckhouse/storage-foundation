@@ -27,7 +27,7 @@ import (
 )
 
 const (
-	testPublicDomain = "example.com"
+	testConsoleHost  = "console.example.com"
 	testHost         = "api.example.com"
 	testPath         = "/user-ns/pvc/my-pvc"
 	testIngressClass = "nginx"
@@ -46,7 +46,7 @@ func testIngressCfg() IngressCfg {
 func makeTestIngress(t *testing.T, cfg IngressCfg) *networkingv1.Ingress {
 	t.Helper()
 	pathType := networkingv1.PathTypeImplementationSpecific
-	return makeIngress(cfg, testHost, cfg.Path, &pathType, testIngressClass, testPublicDomain)
+	return makeIngress(cfg, testHost, cfg.Path, &pathType, testIngressClass, testConsoleHost)
 }
 
 // splitHeaderList parses a cors-allow-headers / cors-expose-headers annotation value into individual
@@ -239,4 +239,32 @@ func TestCORSStandardAllowHeaders(t *testing.T) {
 	}
 
 	t.Logf("checked %d standard allow-headers", len(required))
+}
+
+func TestPublicHost(t *testing.T) {
+	tests := []struct {
+		name      string
+		template  string
+		subdomain string
+		want      string
+		wantErr   bool
+	}{
+		{name: "dot separator", template: "%s.example.com", subdomain: "api", want: "api.example.com"},
+		{name: "dash separator", template: "%s-example.com", subdomain: "api", want: "api-example.com"},
+		{name: "dash separator with cluster suffix", template: "%s-cluster.example.com", subdomain: "console", want: "console-cluster.example.com"},
+		{name: "prefix before placeholder", template: "kube-%s.example.com", subdomain: "api", want: "kube-api.example.com"},
+		{name: "other percent signs are kept", template: "%s.ex%%ample.com", subdomain: "api", want: "api.ex%%ample.com"},
+		{name: "no placeholder", template: "example.com", subdomain: "api", wantErr: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := PublicHost(tt.template, tt.subdomain)
+			if tt.wantErr {
+				assert.Error(t, err)
+				return
+			}
+			assert.NoError(t, err)
+			assert.Equal(t, tt.want, got)
+		})
+	}
 }
