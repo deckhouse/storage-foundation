@@ -24,6 +24,8 @@ import (
 	"strings"
 	"testing"
 
+	metricsstorage "github.com/deckhouse/deckhouse/pkg/metrics-storage"
+	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/testutil"
 	corev1 "k8s.io/api/core/v1"
 	storagev1 "k8s.io/api/storage/v1"
@@ -50,7 +52,7 @@ const (
 
 var errRead = errors.New("read failed")
 
-func TestVCRCollector_Collect(t *testing.T) {
+func TestVCRObjectsMetric_update(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
@@ -198,17 +200,18 @@ func TestVCRCollector_Collect(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 
-			r := newReader(t, interceptor.Funcs{}, tt.objects...)
-			c := newVCRCollector(r, r)
+			update, collector := registerTestVCRObjects(t, newReader(t, interceptor.Funcs{}, tt.objects...))
 
-			if err := testutil.CollectAndCompare(c, strings.NewReader(tt.want)); err != nil {
+			update(t.Context())
+
+			if err := testutil.CollectAndCompare(collector, strings.NewReader(tt.want)); err != nil {
 				t.Errorf("CollectAndCompare() error = %v", err)
 			}
 		})
 	}
 }
 
-func TestVCRCollector_Collect_readErrors(t *testing.T) {
+func TestVCRObjectsMetric_update_readErrors(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
@@ -240,31 +243,62 @@ func TestVCRCollector_Collect_readErrors(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 
-			r := newReader(t, tt.funcs,
+			update, collector := registerTestVCRObjects(t, newReader(t, tt.funcs,
 				withTarget(newVCR("a", v1alpha1.VolumeCaptureModeSnapshot), "data"),
 				newPVC("data", "fast", "pv-1"),
 				newPV("pv-1", testPVDriver),
 				newStorageClass("fast"),
-			)
-			c := newVCRCollector(r, r)
+			))
 
-			if err := testutil.CollectAndCompare(c, strings.NewReader(tt.want)); err != nil {
+			update(t.Context())
+
+			if err := testutil.CollectAndCompare(collector, strings.NewReader(tt.want)); err != nil {
 				t.Errorf("CollectAndCompare() error = %v", err)
 			}
 		})
 	}
 }
 
-func TestVCRCollector_Collect_apiReader(t *testing.T) {
+func TestVCRObjectsMetric_update_twice(t *testing.T) {
 	t.Parallel()
 
+	pending := header + series(v1alpha1.VolumeCaptureModeSnapshot, "unknown", "unknown", "pending", 1)
+
 	tests := []struct {
-		name string
-		want string
+		name   string
+		first  client.Reader
+		second client.Reader
+		want   string
 	}{
 		{
-			name: "success: StorageClasses are listed through apiReader, not the cache",
-			want: header + series(v1alpha1.VolumeCaptureModeSnapshot, testPVDriver, "fast", "pending", 1),
+			name:   "success: a request that stays keeps its series",
+			first:  newReader(t, interceptor.Funcs{}, newVCR("a", v1alpha1.VolumeCaptureModeSnapshot)),
+			second: newReader(t, interceptor.Funcs{}, newVCR("a", v1alpha1.VolumeCaptureModeSnapshot)),
+			want:   pending,
+		},
+		{
+			name: "success: the series of a deleted request disappears",
+			first: newReader(t, interceptor.Funcs{},
+				newVCR("a", v1alpha1.VolumeCaptureModeSnapshot),
+				newVCR("b", v1alpha1.VolumeCaptureModeDetach),
+			),
+			second: newReader(t, interceptor.Funcs{}, newVCR("a", v1alpha1.VolumeCaptureModeSnapshot)),
+			want:   pending,
+		},
+		{
+			name:  "success: a request that completed leaves its pending series",
+			first: newReader(t, interceptor.Funcs{}, newVCR("a", v1alpha1.VolumeCaptureModeSnapshot)),
+			second: newReader(t, interceptor.Funcs{},
+				newVCR("a", v1alpha1.VolumeCaptureModeSnapshot, ready(metav1.ConditionTrue, v1alpha1.ConditionReasonCompleted)),
+			),
+			want: header + series(v1alpha1.VolumeCaptureModeSnapshot, "unknown", "unknown", "completed", 1),
+		},
+		{
+			name:  "error: a failed read after a successful update drops the series",
+			first: newReader(t, interceptor.Funcs{}, newVCR("a", v1alpha1.VolumeCaptureModeSnapshot)),
+			second: newReader(t, failList(new(v1alpha1.VolumeCaptureRequestList)),
+				newVCR("a", v1alpha1.VolumeCaptureModeSnapshot),
+			),
 		},
 	}
 
@@ -272,25 +306,83 @@ func TestVCRCollector_Collect_apiReader(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 
-			reader := newReader(t, failList(new(storagev1.StorageClassList)),
-				withTarget(newVCR("a", v1alpha1.VolumeCaptureModeSnapshot), "data"),
-				newPVC("data", "fast", "pv-1"),
-				newPV("pv-1", testPVDriver),
-			)
-			apiReader := newReader(t, interceptor.Funcs{}, newStorageClass("fast"))
-			c := newVCRCollector(reader, apiReader)
+			reader := &readerSwitch{Reader: tt.first}
+			update, collector := registerTestVCRObjects(t, reader)
 
-			if err := testutil.CollectAndCompare(c, strings.NewReader(tt.want)); err != nil {
+			update(t.Context())
+			reader.Reader = tt.second
+			update(t.Context())
+
+			if err := testutil.CollectAndCompare(collector, strings.NewReader(tt.want)); err != nil {
 				t.Errorf("CollectAndCompare() error = %v", err)
 			}
 		})
 	}
 }
 
+func TestRegisterVCRObjects(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		counter string
+		wantErr bool
+	}{
+		{
+			name:    "success: a counter of another name leaves the name free",
+			counter: "storage_foundation_other_total",
+		},
+		{
+			name:    "error: a counter of the same name takes the name",
+			counter: "storage_foundation_vcr_objects",
+			wantErr: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			st := metricsstorage.NewMetricStorage(metricsstorage.WithNewRegistry())
+			if _, err := st.RegisterCounter(tt.counter, nil); err != nil {
+				t.Fatalf("RegisterCounter(%q) error = %v", tt.counter, err)
+			}
+
+			update, err := registerVCRObjects(st, newReader(t, interceptor.Funcs{}))
+
+			if (err != nil) != tt.wantErr {
+				t.Fatalf("registerVCRObjects() error = %v; wantErr %t", err, tt.wantErr)
+			}
+			if (update == nil) != tt.wantErr {
+				t.Errorf("registerVCRObjects() update is nil = %t; want %t", update == nil, tt.wantErr)
+			}
+		})
+	}
+}
+
+// readerSwitch reads through the reader in it, so that a test can change the cluster between two updates.
+type readerSwitch struct {
+	client.Reader
+}
+
 // series returns the exposition line of one series of the metric, labels in the order Prometheus prints them.
 func series(mode, driver, storageClass, state string, count int) string {
 	return fmt.Sprintf("storage_foundation_vcr_objects{driver=%q,mode=%q,state=%q,storage_class=%q} %d\n",
 		driver, mode, state, storageClass, count)
+}
+
+// registerTestVCRObjects registers the metric in a new storage and returns its update function and the
+// collector of that storage.
+func registerTestVCRObjects(t *testing.T, reader client.Reader) (updateFunc, prometheus.Collector) {
+	t.Helper()
+
+	st := metricsstorage.NewMetricStorage(metricsstorage.WithNewRegistry())
+	update, err := registerVCRObjects(st, reader)
+	if err != nil {
+		t.Fatalf("registerVCRObjects() error = %v", err)
+	}
+
+	return update, st.Collector()
 }
 
 // newReader returns a fake client holding objects. Its calls go through funcs.

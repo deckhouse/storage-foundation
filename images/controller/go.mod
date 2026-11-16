@@ -1,6 +1,7 @@
 module github.com/deckhouse/storage-foundation/images/controller
 
 go 1.27.4
+
 require (
 	github.com/deckhouse/sds-common-lib v0.15.0
 	github.com/deckhouse/state-snapshotter/api v0.0.0-20261022094718-f1260fa12809
@@ -8,6 +9,7 @@ require (
 	github.com/deckhouse/storage-foundation/api v0.0.0-00010101000000-000000000000
 	github.com/deckhouse/storage-foundation/common v0.0.0-00010101000000-000000000000
 	github.com/deckhouse/deckhouse v1.67.7-0.20251212134859-497a0dab9fc0
+	github.com/deckhouse/deckhouse/pkg/metrics-storage v0.3.0
 	github.com/go-logr/logr v1.4.4
 	github.com/kubernetes-csi/external-snapshotter/client/v8 v8.2.0
 	github.com/onsi/ginkgo/v2 v2.23.4
@@ -40,7 +42,6 @@ require (
 	github.com/coreos/go-systemd/v22 v22.5.0 // indirect
 	github.com/davecgh/go-spew v1.1.2-0.20180830191138-d8f796af33cc // indirect
 	github.com/deckhouse/deckhouse/pkg/log v0.2.1 // indirect
-	github.com/deckhouse/deckhouse/pkg/metrics-storage v0.3.0 // indirect
 	github.com/emicklei/go-restful/v3 v3.12.2 // indirect
 	github.com/evanphx/json-patch/v5 v5.9.11 // indirect
 	github.com/felixge/httpsnoop v1.0.4 // indirect

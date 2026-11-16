@@ -29,9 +29,9 @@ import (
 )
 
 // storageClassProvisioners returns the provisioner of every StorageClass in the cluster by its name.
-func storageClassProvisioners(ctx context.Context, apiReader client.Reader) (map[string]string, error) {
+func storageClassProvisioners(ctx context.Context, reader client.Reader) (map[string]string, error) {
 	list := new(storagev1.StorageClassList)
-	if err := apiReader.List(ctx, list); err != nil {
+	if err := reader.List(ctx, list); err != nil {
 		return nil, err
 	}
 

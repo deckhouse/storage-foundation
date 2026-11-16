@@ -20,22 +20,36 @@ package metrics
 import (
 	"fmt"
 
+	metricsstorage "github.com/deckhouse/deckhouse/pkg/metrics-storage"
 	"github.com/prometheus/client_golang/prometheus"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/manager"
 )
 
-// Register registers the controller's collectors in reg; they publish only after elected is closed.
-// apiReader reads StorageClasses straight from the API server.
-func Register(reg prometheus.Registerer, reader, apiReader client.Reader, elected <-chan struct{}) error {
-	collectors := []prometheus.Collector{
-		newVCRCollector(reader, apiReader),
+// Register registers the controller's metrics in reg and returns the runnable that updates them.
+// Until the manager runs it on the elected replica, the metrics have no series.
+func Register(reg prometheus.Registerer, reader client.Reader) (manager.Runnable, error) {
+	st := metricsstorage.NewMetricStorage(metricsstorage.WithNewRegistry())
+
+	// Each function registers a set of metrics in st and returns the function that updates them.
+	registerFuncs := []func(*metricsstorage.MetricStorage, client.Reader) (updateFunc, error){
+		registerVCRObjects,
 	}
 
-	for _, c := range collectors {
-		if err := reg.Register(newLeaderCollector(c, elected)); err != nil {
-			return fmt.Errorf("register metrics: %w", err)
+	updateFuncs := make([]updateFunc, 0, len(registerFuncs))
+	for _, register := range registerFuncs {
+		update, err := register(st, reader)
+		if err != nil {
+			return nil, fmt.Errorf("register metrics: %w", err)
 		}
+
+		updateFuncs = append(updateFuncs, update)
 	}
 
-	return nil
+	// Attached after the metrics are registered, so that a name clash fails here and not every scrape.
+	if err := reg.Register(st.Collector()); err != nil {
+		return nil, fmt.Errorf("register metrics: %w", err)
+	}
+
+	return newUpdater(updateFuncs), nil
 }

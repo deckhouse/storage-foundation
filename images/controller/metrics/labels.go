@@ -16,6 +16,14 @@ limitations under the License.
 
 package metrics
 
+// Label names. The same constants name the labels at registration and key them at every write.
+const (
+	labelMode         = "mode"
+	labelDriver       = "driver"
+	labelStorageClass = "storage_class"
+	labelState        = "state"
+)
+
 // labelUnknown replaces a label value that is not one of the known ones.
 const labelUnknown = "unknown"
 
