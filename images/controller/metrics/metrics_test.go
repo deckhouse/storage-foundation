@@ -42,7 +42,7 @@ func TestRegister(t *testing.T) {
 		want  int
 	}{
 		{
-			name: "success: a replica that does not run the updater publishes nothing",
+			name: "success: a replica that neither runs the updater nor counts an event publishes nothing",
 			want: 0,
 		},
 		{
@@ -71,9 +71,12 @@ func TestRegister(t *testing.T) {
 				reader := fake.NewClientBuilder().WithScheme(scheme).WithObjects(vcr).Build()
 				reg := prometheus.NewPedanticRegistry()
 
-				updater, err := metrics.Register(reg, reader)
+				updater, recorder, err := metrics.Register(reg, reader)
 				if err != nil {
 					t.Fatalf("Register() error = %v", err)
+				}
+				if recorder == nil {
+					t.Fatalf("Register() recorder = nil; want a recorder")
 				}
 				if leaderOnly, ok := updater.(manager.LeaderElectionRunnable); !ok || !leaderOnly.NeedLeaderElection() {
 					t.Errorf("Register() runnable runs on every replica; want it only on the elected one")
@@ -107,11 +110,11 @@ func TestRegister_twice(t *testing.T) {
 	t.Parallel()
 
 	reg := prometheus.NewPedanticRegistry()
-	if _, err := metrics.Register(reg, nil); err != nil {
+	if _, _, err := metrics.Register(reg, nil); err != nil {
 		t.Fatalf("Register() first call error = %v", err)
 	}
 
-	_, err := metrics.Register(reg, nil)
+	_, _, err := metrics.Register(reg, nil)
 	if _, ok := errors.AsType[prometheus.AlreadyRegisteredError](err); !ok {
 		t.Errorf("Register() second call error = %v; want it to wrap %T", err, prometheus.AlreadyRegisteredError{})
 	}
@@ -138,6 +141,13 @@ func TestRegister_nameTaken(t *testing.T) {
 				Help: "Taken.",
 			}),
 		},
+		{
+			name: "error: a counter of the name of the created requests counter fails at registration",
+			taken: prometheus.NewCounter(prometheus.CounterOpts{
+				Name: "storage_foundation_vcr_created_total",
+				Help: "Taken.",
+			}),
+		},
 	}
 
 	for _, tt := range tests {
@@ -150,7 +160,7 @@ func TestRegister_nameTaken(t *testing.T) {
 			}
 
 			// Registration reads nothing, so no reader is needed.
-			if _, err := metrics.Register(reg, nil); err == nil {
+			if _, _, err := metrics.Register(reg, nil); err == nil {
 				t.Errorf("Register() error = nil; want an error for the taken name")
 			}
 		})

@@ -18,6 +18,7 @@ package controllers
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 
@@ -33,6 +34,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	storagev1alpha1 "github.com/deckhouse/storage-foundation/api/v1alpha1"
+	"github.com/deckhouse/storage-foundation/images/controller/metrics"
 	"github.com/deckhouse/storage-foundation/images/controller/pkg/config"
 )
 
@@ -79,6 +81,7 @@ type VolumeCaptureRequestController struct {
 	APIReader client.Reader // Required: for reading StorageClass directly from API server
 	Scheme    *runtime.Scheme
 	Config    *config.Options
+	Metrics   *metrics.Recorder // Required: counts the created requests
 }
 
 func (r *VolumeCaptureRequestController) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
@@ -583,8 +586,15 @@ func (r *VolumeCaptureRequestController) finalizeVCR(
 }
 
 func (r *VolumeCaptureRequestController) SetupWithManager(mgr ctrl.Manager) error {
+	// A nil recorder would crash the leader on the first created request.
+	if r.Metrics == nil {
+		return errors.New("metrics recorder must not be nil")
+	}
+
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&storagev1alpha1.VolumeCaptureRequest{}).
+		// Counts the created requests for the metrics and enqueues nothing.
+		Watches(new(storagev1alpha1.VolumeCaptureRequest), r.Metrics.VCREvents()).
 		Complete(r)
 }
 

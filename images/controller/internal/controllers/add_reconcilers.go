@@ -21,13 +21,14 @@ import (
 
 	ctrl "sigs.k8s.io/controller-runtime"
 
+	"github.com/deckhouse/storage-foundation/images/controller/metrics"
 	"github.com/deckhouse/storage-foundation/images/controller/pkg/config"
 )
 
 // AddVolumeCaptureRequestControllerToManager adds VolumeCaptureRequestController and its garbage-collection
 // controller to the manager. The GC controller (cron-triggered, leader-only via the manager) replaces the
 // former per-controller TTL scanner: it deletes terminal VolumeCaptureRequests after their TTL.
-func AddVolumeCaptureRequestControllerToManager(mgr ctrl.Manager, cfg *config.Options) error {
+func AddVolumeCaptureRequestControllerToManager(mgr ctrl.Manager, cfg *config.Options, rec *metrics.Recorder) error {
 	apiReader := mgr.GetAPIReader()
 	if apiReader == nil {
 		return fmt.Errorf("APIReader must not be nil: controllers require APIReader to read StorageClass")
@@ -38,6 +39,7 @@ func AddVolumeCaptureRequestControllerToManager(mgr ctrl.Manager, cfg *config.Op
 		APIReader: apiReader,
 		Scheme:    mgr.GetScheme(),
 		Config:    cfg,
+		Metrics:   rec,
 	}
 
 	if err := reconciler.SetupWithManager(mgr); err != nil {

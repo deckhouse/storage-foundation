@@ -26,9 +26,10 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/manager"
 )
 
-// Register registers the controller's metrics in reg and returns the runnable that updates them.
-// Until the manager runs it on the elected replica, the metrics have no series.
-func Register(reg prometheus.Registerer, reader client.Reader) (manager.Runnable, error) {
+// Register registers the controller's metrics in reg and returns the runnable that updates the gauges
+// and the recorder that writes the metrics of events. A metric has no series until the manager runs the
+// runnable on the elected replica or the recorder writes an event.
+func Register(reg prometheus.Registerer, reader client.Reader) (manager.Runnable, *Recorder, error) {
 	st := metricsstorage.NewMetricStorage(metricsstorage.WithNewRegistry())
 
 	// Each function registers a set of metrics in st and returns the function that updates them.
@@ -40,16 +41,21 @@ func Register(reg prometheus.Registerer, reader client.Reader) (manager.Runnable
 	for _, register := range registerFuncs {
 		update, err := register(st, reader)
 		if err != nil {
-			return nil, fmt.Errorf("register metrics: %w", err)
+			return nil, nil, fmt.Errorf("register metrics: %w", err)
 		}
 
 		updateFuncs = append(updateFuncs, update)
 	}
 
-	// Attached after the metrics are registered, so that a name clash fails here and not every scrape.
-	if err := reg.Register(st.Collector()); err != nil {
-		return nil, fmt.Errorf("register metrics: %w", err)
+	recorder, err := newRecorder(st, reader)
+	if err != nil {
+		return nil, nil, fmt.Errorf("register metrics: %w", err)
 	}
 
-	return newUpdater(updateFuncs), nil
+	// Attached after the metrics are registered, so that a name clash fails here and not every scrape.
+	if err := reg.Register(st.Collector()); err != nil {
+		return nil, nil, fmt.Errorf("register metrics: %w", err)
+	}
+
+	return newUpdater(updateFuncs), recorder, nil
 }

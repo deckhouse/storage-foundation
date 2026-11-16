@@ -134,8 +134,20 @@ func main() {
 	}
 	log.Info("successfully created kubernetes manager")
 
+	// Register metrics before the controllers, which get the recorder.
+	metricsUpdater, metricsRecorder, err := metrics.Register(ctrlmetrics.Registry, mgr.GetClient())
+	if err != nil {
+		log.Error("unable to register metrics", logger.Err(err))
+		os.Exit(1)
+	}
+	if err = mgr.Add(metricsUpdater); err != nil {
+		log.Error("unable to add the metrics updater to manager", logger.Err(err))
+		os.Exit(1)
+	}
+	log.Info("metrics registered")
+
 	// Add VolumeCaptureRequest controller
-	if err = controllers.AddVolumeCaptureRequestControllerToManager(mgr, cfgParams); err != nil {
+	if err = controllers.AddVolumeCaptureRequestControllerToManager(mgr, cfgParams, metricsRecorder); err != nil {
 		log.Error("unable to create controller", logger.Err(err), slog.String("controller", "VolumeCaptureRequest"))
 		os.Exit(1)
 	}
@@ -164,18 +176,6 @@ func main() {
 		os.Exit(1)
 	}
 	log.Info("aggregated API server added to manager")
-
-	// Register metrics
-	metricsUpdater, err := metrics.Register(ctrlmetrics.Registry, mgr.GetClient())
-	if err != nil {
-		log.Error("unable to register metrics", logger.Err(err))
-		os.Exit(1)
-	}
-	if err = mgr.Add(metricsUpdater); err != nil {
-		log.Error("unable to add the metrics updater to manager", logger.Err(err))
-		os.Exit(1)
-	}
-	log.Info("metrics registered")
 
 	if err = mgr.AddHealthzCheck("healthz", healthz.Ping); err != nil {
 		log.Error("unable to mgr.AddHealthzCheck", logger.Err(err))
