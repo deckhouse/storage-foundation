@@ -216,8 +216,11 @@ data transfer resources. Each item ends with the way the `d8 data` commands set 
   cannot decide, the command fails; see
   [d8 cannot auto-detect the publish mode](#d8-cannot-auto-detect-the-publish-mode).
 
-DataExport and DataImport are created in the namespace of the source PVC or of the PVC to be created. In `d8 data`: the
-commands default to the `d8-storage-volume-data-manager` namespace, so always pass `-n` with the namespace of the PVC.
+DataExport and DataImport are created in the namespace of the source PVC or of the PVC to be created. In `d8 data`:
+without `-n`, the commands use the namespace of the current kubeconfig context, or `default` when the context sets none,
+as kubectl does; `d8 data import create` takes `metadata.namespace` of the PVC manifest before the context. This works in
+`d8` v0.34.8 and later. Before v0.34.8, `d8` defaults to the `d8-storage-volume-data-manager` namespace, so with
+those releases always pass `-n` with the namespace of the PVC.
 
 {{< alert level="warning" >}}
 PVCs can be exported only when no Pod has them mounted.

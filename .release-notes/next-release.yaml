@@ -23,6 +23,7 @@ fixes:
 docs:
   - "The usage page describes which grants stay when storage-foundation is disabled and how the `storageclasses` grant passes between storage-foundation and `multitenancy-manager`."
   - "The usage page shows how to select the classes of a storage module in a `ClusterResourceGrantPolicy` by the `storage.deckhouse.io/managed-by` label and describes the `storage.deckhouse.io/internal` label."
+  - "The usage page describes the namespace `d8 data` uses without `-n`: in `d8` v0.34.8 and later it is the namespace of the current kubeconfig context, as in kubectl, instead of `d8-storage-volume-data-manager`."
 
 
 

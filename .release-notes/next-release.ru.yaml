@@ -23,6 +23,7 @@ fixes:
 docs:
   - "На странице использования описано, какие гранты остаются после отключения storage-foundation и как грант `storageclasses` переходит между storage-foundation и `multitenancy-manager`."
   - "На странице использования показано, как выбрать классы модуля хранения в `ClusterResourceGrantPolicy` по метке `storage.deckhouse.io/managed-by`, и описана метка `storage.deckhouse.io/internal`."
+  - "На странице использования описано, какой неймспейс `d8 data` использует без `-n`: в `d8` начиная с v0.34.8 это неймспейс текущего контекста kubeconfig, как у kubectl, а не `d8-storage-volume-data-manager`."
 
 
 
