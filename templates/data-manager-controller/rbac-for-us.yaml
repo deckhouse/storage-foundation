@@ -139,6 +139,13 @@ rules:
       - list
       - patch
   - apiGroups:
+      - events.k8s.io
+    resources:
+      - events
+    verbs:
+      - create
+      - patch
+  - apiGroups:
       - storage.k8s.io
     resources:
       - storageclasses
@@ -303,12 +310,11 @@ roleRef:
 
 ---
 {{- /*
-  The data-manager-controller Deployment carries a kube-rbac-proxy in front of its metrics port,
-  scraped by a PodMonitor of its own. The proxy answers every scrape by asking the API server who
-  the caller is (TokenReview) and whether they hold get on the prometheus-metrics subresource
-  (SubjectAccessReview); both verbs live in d8:rbac-proxy. Without this binding the proxy fails
-  closed with 401 while the pod stays Ready, so the only symptom is up == 0 on that job and a
-  TargetDown that never clears.
+  data-manager-controller serves its metrics port to a PodMonitor of its own and answers every
+  scrape by asking the API server who the caller is (TokenReview) and whether they hold get on the
+  prometheus-metrics subresource (SubjectAccessReview); both verbs live in d8:rbac-proxy. Without
+  this binding the scrape fails closed with 401 while the pod stays Ready, so the only symptom is
+  up == 0 on that job and a TargetDown that never clears.
 */ -}}
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding

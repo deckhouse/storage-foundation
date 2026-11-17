@@ -226,3 +226,21 @@ func TestUpdateAccessTimestamp_ReportsConflictThatNeverClears(t *testing.T) {
 	assert.Greater(t, statusUpdates, 1, "one conflict must not end the attempt")
 	assert.True(t, getDI(t, c, "ns", "imp").Status.AccessTimestamp.IsZero(), "nothing was written, so nothing must be stored")
 }
+
+func TestSetServerState_ReportsAWriteThatTimedOut(t *testing.T) {
+	di := &dev1alpha1.DataImport{
+		ObjectMeta: metav1.ObjectMeta{Name: "imp", Namespace: "ns"},
+		Status:     dev1alpha1.DataExportImportStatus{ServerState: string(common.ServerStateReady)},
+	}
+
+	c := newRepoClientWithInterceptors(t, interceptor.Funcs{
+		SubResourceUpdate: func(_ context.Context, _ client.Client, _ string, _ client.Object, _ ...client.SubResourceUpdateOption) error {
+			return context.DeadlineExceeded
+		},
+	}, di)
+
+	err := c.SetServerState(context.Background(), common.OperationImport, "ns", "imp", common.ServerStateFinished)
+
+	require.ErrorIs(t, err, context.DeadlineExceeded, "Finished was not persisted, so the client must not be answered 200")
+	assert.Equal(t, string(common.ServerStateReady), getDI(t, c, "ns", "imp").Status.ServerState)
+}

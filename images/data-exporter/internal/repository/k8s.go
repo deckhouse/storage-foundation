@@ -31,6 +31,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/apimachinery/pkg/util/wait"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/clientcmd"
@@ -140,7 +141,7 @@ func NewK8sClient() (*Client, error) {
 func (c *Client) SetServerState(ctx context.Context, operation common.Operation, namespace, name string, state common.ServerState) error {
 	nn := types.NamespacedName{Namespace: namespace, Name: name}
 
-	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
+	return retryOnConflict(retry.DefaultRetry, func() error {
 		cwtGet, cancelGet := context.WithTimeout(ctx, 10*time.Second)
 		defer cancelGet()
 
@@ -274,7 +275,7 @@ func (c *Client) UpdateAccessTimestamp(ctx context.Context, operation common.Ope
 		Name:      dataManagerName,
 	}
 
-	return retry.RetryOnConflict(retry.DefaultBackoff, func() error {
+	return retryOnConflict(retry.DefaultBackoff, func() error {
 		dataManager, err := common.GetDataManager(ctx, c.Client, dataManagerNamespacedName, operation)
 		if err != nil {
 			return err
@@ -297,7 +298,7 @@ func (c *Client) UpdateDataManagerCA(ctx context.Context, operation common.Opera
 		Name:      dataManagerName,
 	}
 
-	return retry.RetryOnConflict(retry.DefaultBackoff, func() error {
+	return retryOnConflict(retry.DefaultBackoff, func() error {
 		resource, err := common.GetDataManager(ctx, c.Client, dataManagerNamespacedName, operation)
 		if err != nil {
 			return err
@@ -353,4 +354,16 @@ func (c *Client) CreateOrUpdateDataManagerCASecretIfNeeded(ctx context.Context, 
 	}
 
 	return nil
+}
+
+func retryOnConflict(backoff wait.Backoff, fn func() error) error {
+	var attemptErr error
+	err := retry.RetryOnConflict(backoff, func() error {
+		attemptErr = fn()
+		return attemptErr
+	})
+	if err == nil {
+		err = attemptErr
+	}
+	return err
 }

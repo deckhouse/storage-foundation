@@ -1,197 +1,28 @@
-{{/*
-  The controller Pod runs the reconcilers AND the module's aggregated API server (see apiservice.yaml) in
-  one process. The API server half adds a resident cost the reconcilers alone do not have: delegated
-  authentication and authorization keep TokenReview/SubjectAccessReview caches and an informer on
-  kube-system/extension-apiserver-authentication. The floor below therefore covers both halves, and the
-  VPA ceiling further down is sized against a reference controller with the same process composition.
-*/}}
-{{- define "controller_resources" }}
-cpu: 10m
-memory: 50Mi
-{{- end }}
-
-{{- if (include "helm_lib_api_version_exists" (list . "autoscaling.k8s.io/v1/VerticalPodAutoscaler")) }}
----
-apiVersion: autoscaling.k8s.io/v1
-kind: VerticalPodAutoscaler
-metadata:
-  name: controller
-  namespace: d8-{{ .Chart.Name }}
-  {{- include "helm_lib_module_labels" (list . (dict "app" "controller")) | nindent 2 }}
-spec:
-  targetRef:
-    apiVersion: "apps/v1"
-    kind: Deployment
-    name: controller
-  updatePolicy:
-    updateMode: "InPlaceOrRecreate"
-  resourcePolicy:
-    containerPolicies:
-    {{- include "helm_lib_vpa_kube_rbac_proxy_resources" . | nindent 4 }}
-    - containerName: "controller"
-      minAllowed:
-        {{- include "controller_resources" . | nindent 8 }}
-      maxAllowed:
-        cpu: 200m
-        # Twice the ceiling of a reference controller that runs reconcilers and an aggregated API server
-        # with delegated authn/authz in one process, so the added server half has headroom instead of
-        # being capped at a number measured without it. Lowering it back risks an OOMKill under the
-        # three subresources; raising it further is only justified by a measurement of actual peak RSS.
-        memory: 200Mi
-{{- end }}
----
-apiVersion: policy/v1
-kind: PodDisruptionBudget
-metadata:
-  name: controller
-  namespace: d8-{{ .Chart.Name }}
-  {{- include "helm_lib_module_labels" (list . (dict "app" "controller" )) | nindent 2 }}
-spec:
-  minAvailable: {{ include "helm_lib_is_ha_to_value" (list . 1 0) }}
-  selector:
-    matchLabels:
-      app: controller
----
-apiVersion: apps/v1
-kind: Deployment
-metadata:
-  name: controller
-  namespace: d8-{{ .Chart.Name }}
-  {{- include "helm_lib_module_labels" (list . (dict "app" "controller")) | nindent 2 }}
-spec:
-  revisionHistoryLimit: 2
-  {{- include "helm_lib_deployment_strategy_and_replicas_for_ha" . | nindent 2 }}  
-  selector:
-    matchLabels:
-      app: controller
-  template:
-    metadata:
-      annotations:
-        # Roll the Pod when the aggregated API server's CA changes, so the certificate it presents and the
-        # caBundle the APIServices advertise are never a rotation apart.
-        checksum/aggregation-api-ca: {{ .Values.storageFoundation.internal.aggregationApiCert.ca | sha256sum | quote }}
-      labels:
-        app: controller
-    spec:
-      {{- include "helm_lib_priority_class" (tuple . "cluster-medium") | nindent 6 }}
-      {{- include "helm_lib_node_selector" (tuple . "system") | nindent 6 }}
-      {{- include "helm_lib_tolerations" (tuple . "system") | nindent 6 }}
-      {{- include "helm_lib_module_pod_security_context_run_as_user_nobody" . | nindent 6 }}
-      {{- include "helm_lib_pod_anti_affinity_for_ha" (list . (dict "app" "controller")) | nindent 6 }}
-      imagePullSecrets:
-        - name: {{ .Chart.Name }}-module-registry
-      serviceAccountName: controller
-      containers:
-        - name: controller
-          {{- include "helm_lib_module_container_security_context_pss_restricted_flexible" (dict "ro" true "seccompProfile" true) | nindent 10 }}
-          image: {{ include "helm_lib_module_image" (list . "controller") }}
-          imagePullPolicy: IfNotPresent
-          ports:
-            - containerPort: 8443
-              name: https
-              protocol: TCP
-            - containerPort: 8081
-              name: health
-              protocol: TCP
-          volumeMounts:
-            - name: aggregation-api-certs
-              mountPath: /etc/aggregation-api-certs
-              readOnly: true
-          readinessProbe:
-            httpGet:
-              path: /readyz
-              port: 8081
-              scheme: HTTP
-            initialDelaySeconds: 5
-            failureThreshold: 2
-            periodSeconds: 1
-          livenessProbe:
-            httpGet:
-              path: /healthz
-              port: 8081
-              scheme: HTTP
-            periodSeconds: 1
-            failureThreshold: 3
-          resources:
-            requests:
-              {{- include "helm_lib_module_ephemeral_storage_only_logs" . | nindent 14 }}
-{{- if not (include "helm_lib_api_version_exists" (list . "autoscaling.k8s.io/v1/VerticalPodAutoscaler")) }}
-              {{- include "controller_resources" . | nindent 14 }}
-{{- end }}
-          env:
-            - name: LOG_LEVEL
-              value: {{ include "helm_lib_module_controller_log_level" (list . "storageFoundation") | quote }}
-            {{- /*
-              Loopback, not ":8080": the endpoint authenticates nobody, and a pod port
-              is reachable from every pod in the cluster. The kube-rbac-proxy below is
-              what publishes it, after an authorization check.
-            */}}
-            - name: METRICS_BIND_ADDRESS
-              value: "127.0.0.1:{{ .Values.storageFoundation.internal.controllerMetricsPort }}"
-            - name: CONTROLLER_NAMESPACE
-              valueFrom:
-                fieldRef:
-                  fieldPath: metadata.namespace
-            # Listen address and serving pair of the aggregated API server. Set explicitly (the binary
-            # defaults to the same values) so the port published above, the mount path of the certificate
-            # Secret and what the process opens are all visible in one place.
-            - name: AGGREGATION_API_ADDR
-              value: ":8443"
-            - name: AGGREGATION_API_TLS_CERT_FILE
-              value: "/etc/aggregation-api-certs/tls.crt"
-            - name: AGGREGATION_API_TLS_KEY_FILE
-              value: "/etc/aggregation-api-certs/tls.key"
-        - name: kube-rbac-proxy
-          {{- include "helm_lib_module_container_security_context_pss_restricted_flexible" dict | nindent 10 }}
-          image: {{ include "helm_lib_module_common_image" (list . "kubeRbacProxy") }}
-          imagePullPolicy: IfNotPresent
-          args:
-            - "--secure-listen-address=$(KUBE_RBAC_PROXY_LISTEN_ADDRESS):{{ .Values.storageFoundation.internal.controllerMetricsProxyPort }}"
-            - "--v=2"
-            - "--logtostderr=true"
-            - "--stale-cache-interval=1h30m"
-            - "--livez-path=/livez"
-          env:
-            - name: KUBE_RBAC_PROXY_LISTEN_ADDRESS
-              valueFrom:
-                fieldRef:
-                  fieldPath: status.podIP
-            - name: KUBE_RBAC_PROXY_CONFIG
-              value: |
-                excludePaths:
-                - /livez
-                upstreams:
-                - upstream: http://127.0.0.1:{{ .Values.storageFoundation.internal.controllerMetricsPort }}/metrics
-                  path: /metrics
-                  authorization:
-                    resourceAttributes:
-                      namespace: d8-{{ .Chart.Name }}
-                      apiGroup: apps
-                      apiVersion: v1
-                      resource: deployments
-                      subresource: prometheus-metrics
-                      name: controller
-          ports:
-            - name: https-metrics
-              containerPort: {{ .Values.storageFoundation.internal.controllerMetricsProxyPort }}
-              protocol: TCP
-          livenessProbe:
-            httpGet:
-              path: /livez
-              port: {{ .Values.storageFoundation.internal.controllerMetricsProxyPort }}
-              scheme: HTTPS
-          {{- /* No readinessProbe on purpose: readiness of the pod gates the endpoints of
-                 its Services, and a sidecar that only serves metrics must not be able to take
-                 the webhook or the APIService of this pod out of rotation. A proxy that wedges
-                 is restarted by the liveness probe, and a proxy that is not up yet is kept out
-                 of the scrape targets by the readiness filter in the PodMonitor/ServiceMonitor. */}}
-          resources:
-            requests:
-              {{- include "helm_lib_module_ephemeral_storage_only_logs" . | nindent 14 }}
-              {{- if not (include "helm_lib_api_version_exists" (list . "autoscaling.k8s.io/v1/VerticalPodAutoscaler")) }}
-              {{- include "helm_lib_container_kube_rbac_proxy_resources" . | nindent 14 }}
-              {{- end }}
-      volumes:
-        - name: aggregation-api-certs
-          secret:
-            secretName: controller-https-certs
+{{- $config := dict
+  "valuesKey" "storageFoundation"
+  "onMasterNode" false
+  "priorityClass" "cluster-medium"
+  "controllerMaxMemory" "200Mi"
+  "controllerMetricsPort" .Values.storageFoundation.internal.controllerMetricsPort
+  "controllerMetricsProxyPort" .Values.storageFoundation.internal.controllerMetricsProxyPort
+  "controllerMetricsInProcessAuthorization" true
+  "additionalPodAnnotations" (dict
+    "checksum/aggregation-api-ca" (.Values.storageFoundation.internal.aggregationApiCert.ca | sha256sum))
+  "additionalControllerPorts" (list
+    (dict "containerPort" 8443 "name" "https" "protocol" "TCP")
+    (dict "containerPort" 8081 "name" "health" "protocol" "TCP")
+    (dict "containerPort" 9443 "name" "webhooks" "protocol" "TCP"))
+  "additionalControllerEnvs" (list
+    (dict "name" "AGGREGATION_API_ADDR" "value" ":8443")
+    (dict "name" "AGGREGATION_API_TLS_CERT_FILE" "value" "/etc/aggregation-api-certs/tls.crt")
+    (dict "name" "AGGREGATION_API_TLS_KEY_FILE" "value" "/etc/aggregation-api-certs/tls.key")
+    (dict "name" "WEBHOOKS_BIND_ADDRESS" "value" ":9443")
+    (dict "name" "WEBHOOKS_CERT_DIR" "value" "/etc/webhook/certs"))
+  "additionalControllerVolumeMounts" (list
+    (dict "name" "aggregation-api-certs" "mountPath" "/etc/aggregation-api-certs" "readOnly" true)
+    (dict "name" "webhook-certs" "mountPath" "/etc/webhook/certs" "readOnly" true))
+  "additionalVolumes" (list
+    (dict "name" "aggregation-api-certs" "secret" (dict "secretName" "controller-https-certs"))
+    (dict "name" "webhook-certs" "secret" (dict "secretName" "webhooks-https-certs")))
+}}
+{{- include "helm_lib_module_controller_manifests" (list . $config) }}

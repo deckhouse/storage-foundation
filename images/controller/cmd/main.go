@@ -31,18 +31,23 @@ import (
 	apiruntime "k8s.io/apimachinery/pkg/runtime"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/cache"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
 	"sigs.k8s.io/controller-runtime/pkg/manager"
 	ctrlmetrics "sigs.k8s.io/controller-runtime/pkg/metrics"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 
 	"github.com/deckhouse/sds-common-lib/logger"
+	"github.com/deckhouse/sds-common-lib/monitoring/metricsauth"
+	"github.com/deckhouse/sds-common-lib/webhookserver"
 	v1alpha1 "github.com/deckhouse/storage-foundation/api/v1alpha1"
 	"github.com/deckhouse/storage-foundation/images/controller/internal/controllers"
 	"github.com/deckhouse/storage-foundation/images/controller/internal/domainapi"
 	"github.com/deckhouse/storage-foundation/images/controller/metrics"
 	"github.com/deckhouse/storage-foundation/images/controller/pkg/config"
 	"github.com/deckhouse/storage-foundation/images/controller/pkg/kubutils"
+	"github.com/deckhouse/storage-foundation/images/webhooks/handlers"
 )
 
 var (
@@ -119,12 +124,23 @@ func main() {
 	// The controller needs to watch all namespaces to process these resources.
 	managerOpts := manager.Options{
 		Scheme:                  scheme,
-		Metrics:                 metricsserver.Options{BindAddress: cfgParams.MetricsBindAddress},
+		Metrics:                 metricsauth.ApplyFromEnv(metricsserver.Options{BindAddress: cfgParams.MetricsBindAddress}),
 		HealthProbeBindAddress:  cfgParams.HealthProbeBindAddress,
 		LeaderElection:          true,
 		LeaderElectionNamespace: cfgParams.ControllerNamespace,
 		LeaderElectionID:        config.ControllerName,
 		Logger:                  baseLog.GetLogger(),
+		Cache: cache.Options{
+			DefaultTransform: cache.TransformStripManagedFields(),
+		},
+		Client: client.Options{
+			Cache: &client.CacheOptions{
+				DisableFor: []client.Object{
+					&snapshotv1.VolumeSnapshotContent{},
+					&deckhousev1alpha1.ObjectKeeper{},
+				},
+			},
+		},
 	}
 
 	mgr, err := manager.New(kConfig, managerOpts)
@@ -176,6 +192,24 @@ func main() {
 		os.Exit(1)
 	}
 	log.Info("aggregated API server added to manager")
+
+	webhookOpts, webhooksEnabled, err := webhookserver.OptionsFromEnv()
+	if err != nil {
+		log.Error("unable to read the webhook server configuration", logger.Err(err))
+		os.Exit(1)
+	}
+	if webhooksEnabled {
+		hs, err := handlers.Handlers(baseLog.Named("webhooks"))
+		if err != nil {
+			log.Error("unable to create the webhook handlers", logger.Err(err))
+			os.Exit(1)
+		}
+		if err = webhookserver.Add(mgr, webhookOpts, hs); err != nil {
+			log.Error("unable to add the webhook server", logger.Err(err))
+			os.Exit(1)
+		}
+		log.Info("serving the admission webhooks", "port", webhookOpts.Port, "certDir", webhookOpts.CertDir)
+	}
 
 	if err = mgr.AddHealthzCheck("healthz", healthz.Ping); err != nil {
 		log.Error("unable to mgr.AddHealthzCheck", logger.Err(err))

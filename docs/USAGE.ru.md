@@ -599,7 +599,7 @@ d8 k -n project get events --sort-by=.lastTimestamp
 Посмотрите логи контроллера:
 
 ```bash
-d8 k -n d8-storage-foundation logs -l app=data-manager-controller -c data-manager-controller --prefix --tail=200
+d8 k -n d8-storage-foundation logs -l app=data-manager-controller -c controller --prefix --tail=200
 ```
 
 ### Создание VolumeSnapshot отклоняется
@@ -712,7 +712,7 @@ d8 k -n project get resourcequota
 d8 k -n d8-storage-foundation get resourcequota
 d8 k -n d8-storage-foundation get pvc
 d8 k -n d8-storage-foundation get events --sort-by=.lastTimestamp
-d8 k -n d8-storage-foundation logs -l app=data-manager-controller -c data-manager-controller --prefix --tail=200
+d8 k -n d8-storage-foundation logs -l app=data-manager-controller -c controller --prefix --tail=200
 ```
 
 Проверьте общую квоту на хранение, число PVC и квоты по используемому StorageClass. Если ограничение превышено,

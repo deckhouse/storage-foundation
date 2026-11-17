@@ -23,9 +23,6 @@ import (
 	"os"
 
 	"github.com/deckhouse/sds-common-lib/logger"
-	"github.com/deckhouse/sds-common-lib/logger/kwhlogger"
-	snapv1 "github.com/deckhouse/storage-foundation/api/snapshot/v1"
-	dev1alpha1 "github.com/deckhouse/storage-foundation/api/v1alpha1"
 	"github.com/deckhouse/storage-foundation/images/webhooks/handlers"
 )
 
@@ -56,11 +53,7 @@ func initFlags() (config, error) {
 	return cfg, nil
 }
 
-const (
-	port                    = ":8443"
-	volumeSnapshotMutatorID = "volumeSnapshotMutation"
-	dataExportValidatorID   = "dataExportValidation"
-)
+const port = ":8443"
 
 func main() {
 	// LOG_LEVEL arrives as a number 0..4 from lib-helm, which is what the
@@ -72,33 +65,22 @@ func main() {
 		fmt.Fprintf(os.Stderr, "unable to create the logger: %s\n", err)
 		os.Exit(1)
 	}
-	kwhLog := kwhlogger.New(log)
-	// One logger per process: the handlers are plain functions with nowhere to pass
-	// one through, so they read it from their own package.
-	handlers.SetLogger(log)
-
 	cfg, err := initFlags()
 	if err != nil {
 		log.Error("unable to parse config", logger.Err(err))
 		os.Exit(1)
 	}
 
-	volumeSnapshotObj := new(snapv1.VolumeSnapshot)
-	volumeSnapshotMutatingWebHookHandler, err := handlers.GetMutatingWebhookHandler(handlers.VolumeSnapshotMutate, volumeSnapshotMutatorID, volumeSnapshotObj, kwhLog)
+	hs, err := handlers.Handlers(log)
 	if err != nil {
-		log.Error("error creating volumeSnapshotMutatingWebHookHandler", logger.Err(err))
-		os.Exit(1)
-	}
-
-	dataExportValidatingWebHookHandler, err := handlers.NewValidatingWebhookHandler(handlers.DataExportValidateFunc(), dataExportValidatorID, &dev1alpha1.DataExport{}, kwhLog)
-	if err != nil {
-		log.Error("error creating dataExportValidatingWebHookHandler", logger.Err(err))
+		log.Error("error creating the webhook handlers", logger.Err(err))
 		os.Exit(1)
 	}
 
 	mux := http.NewServeMux()
-	mux.Handle("/volume-snapshot-mutate", volumeSnapshotMutatingWebHookHandler)
-	mux.Handle("/dataexport-validate", dataExportValidatingWebHookHandler)
+	for path, h := range hs {
+		mux.Handle(path, h)
+	}
 	mux.HandleFunc("/healthz", httpHandlerHealthz)
 
 	log.Info("listening", "address", port)

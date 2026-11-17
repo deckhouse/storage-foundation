@@ -599,7 +599,7 @@ Reading the controller logs requires cluster administrator permissions.
 Read the controller logs:
 
 ```bash
-d8 k -n d8-storage-foundation logs -l app=data-manager-controller -c data-manager-controller --prefix --tail=200
+d8 k -n d8-storage-foundation logs -l app=data-manager-controller -c controller --prefix --tail=200
 ```
 
 ### VolumeSnapshot creation is rejected
@@ -710,7 +710,7 @@ the cause is not visible in events, the administrator checks the import controll
 d8 k -n d8-storage-foundation get resourcequota
 d8 k -n d8-storage-foundation get pvc
 d8 k -n d8-storage-foundation get events --sort-by=.lastTimestamp
-d8 k -n d8-storage-foundation logs -l app=data-manager-controller -c data-manager-controller --prefix --tail=200
+d8 k -n d8-storage-foundation logs -l app=data-manager-controller -c controller --prefix --tail=200
 ```
 
 Check the overall storage quota, the PVC count, and per-StorageClass limits. If exceeded, the administrator adjusts the

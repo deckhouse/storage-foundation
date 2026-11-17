@@ -29,6 +29,7 @@ import (
 	networkingv1 "k8s.io/api/networking/v1"
 	storagev1 "k8s.io/api/storage/v1"
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
+	"k8s.io/apimachinery/pkg/fields"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/selection"
@@ -50,10 +51,11 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
-	"github.com/deckhouse/sds-common-lib/conditions"
 	"github.com/deckhouse/sds-common-lib/logger"
 	"github.com/deckhouse/sds-common-lib/monitoring"
+	"github.com/deckhouse/sds-common-lib/monitoring/metricsauth"
 	dev1alpha1 "github.com/deckhouse/storage-foundation/api/v1alpha1"
+	"github.com/deckhouse/storage-foundation/common"
 	"github.com/deckhouse/storage-foundation/common/config"
 	dataexport "github.com/deckhouse/storage-foundation/images/data-manager-controller/internal/controllers/data-export"
 	dataimport "github.com/deckhouse/storage-foundation/images/data-manager-controller/internal/controllers/data-import"
@@ -167,9 +169,8 @@ func loadCubeConfig() (*rest.Config, error) {
 }
 
 // defaultMetricsBindAddress keeps the endpoint on loopback when the chart says
-// nothing: the kube-rbac-proxy of the same pod is what publishes it. The fleet-wide
-// fallback is the wildcard ":8080", which would both answer unauthenticated on the
-// pod IP and collide with the proxy, since the two carry the same port number.
+// nothing: the fleet-wide fallback is the wildcard ":8080", which would answer
+// unauthenticated on the pod IP.
 const defaultMetricsBindAddress = "127.0.0.1:8080"
 
 func createManager(scheme *runtime.Scheme, cfgParams *config.Options, k8sConfig *rest.Config) (manager.Manager, error) {
@@ -182,20 +183,23 @@ func createManager(scheme *runtime.Scheme, cfgParams *config.Options, k8sConfig 
 		return nil, err
 	}
 	podSelector := labels.NewSelector().Add(*req)
+	importPVCSelector := labels.SelectorFromSet(labels.Set{dev1alpha1.LabelApplicationKey: dev1alpha1.LabelDataImportValue})
+	exportPVSelector := labels.SelectorFromSet(labels.Set{dev1alpha1.LabelPVDataExporter: "true"})
 
 	mgrOpts := manager.Options{
 		Scheme: scheme,
 		// controller-runtime binds :8080 whenever this is empty, so this manager has
 		// always served its reconcile and workqueue metrics with nothing declaring the
 		// port. The chart points it at loopback and puts a kube-rbac-proxy in front.
-		Metrics:                       metricsserver.Options{BindAddress: monitoring.BindAddressFromEnvOr(defaultMetricsBindAddress)},
+		Metrics:                       metricsauth.ApplyFromEnv(metricsserver.Options{BindAddress: monitoring.BindAddressFromEnvOr(defaultMetricsBindAddress)}),
 		HealthProbeBindAddress:        cfgParams.HealthProbeBindAddress,
 		LeaderElection:                cfgParams.LeaderElection,
 		LeaderElectionID:              cfgParams.LeaderElectionID,
 		LeaderElectionNamespace:       cfgParams.ControllerNamespace,
 		LeaderElectionReleaseOnCancel: true,
 		Cache: cache.Options{
-			SyncPeriod: &syncPeriod,
+			SyncPeriod:       &syncPeriod,
+			DefaultTransform: cache.TransformStripManagedFields(),
 			ByObject: map[client.Object]cache.ByObject{
 				&corev1.Pod{}: {
 					Label: podSelector,
@@ -217,6 +221,33 @@ func createManager(scheme *runtime.Scheme, cfgParams *config.Options, k8sConfig 
 					Namespaces: map[string]cache.Config{
 						cfgParams.ControllerNamespace: {},
 					},
+				},
+				&corev1.Service{}: {
+					Namespaces: map[string]cache.Config{
+						cfgParams.ControllerNamespace: {},
+					},
+				},
+				&corev1.ConfigMap{}: {
+					Namespaces: map[string]cache.Config{
+						cfgParams.ControllerNamespace: {},
+					},
+					Field: fields.OneTermEqualSelector("metadata.name", common.CongigMapName),
+				},
+				&corev1.PersistentVolumeClaim{}: {
+					Label: importPVCSelector,
+				},
+				&corev1.PersistentVolume{}: {
+					Label: exportPVSelector,
+				},
+			},
+		},
+		Client: client.Options{
+			Cache: &client.CacheOptions{
+				DisableFor: []client.Object{
+					&corev1.PersistentVolumeClaim{},
+					&corev1.PersistentVolume{},
+					&snapv1.VolumeSnapshotContent{},
+					&virtv1alpha2.VirtualDisk{},
 				},
 			},
 		},
@@ -293,7 +324,7 @@ func createController(manager manager.Manager, cfgParams *config.Options) error 
 			Config:     cfgParams,
 			Dynamic:    dynamicClient,
 			RESTMapper: manager.GetRESTMapper(),
-			Recorder:   conditions.FromLegacyRecorder(manager.GetEventRecorderFor("dataexport-controller")),
+			Recorder:   manager.GetEventRecorder("dataexport-controller"),
 		})
 	if err != nil {
 		log.Log.Error(err, "Failed to create DataExport controller")
@@ -349,7 +380,7 @@ func createController(manager manager.Manager, cfgParams *config.Options) error 
 			Reader:   manager.GetAPIReader(),
 			Config:   cfgParams,
 			Dynamic:  dynamicClient,
-			Recorder: conditions.FromLegacyRecorder(manager.GetEventRecorderFor("dataimport-controller")),
+			Recorder: manager.GetEventRecorder("dataimport-controller"),
 		})
 	if err != nil {
 		return err

@@ -30,6 +30,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/util/retry"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
@@ -111,7 +112,7 @@ func AddVolumeSnapshotDomainControllerToManager(mgr ctrl.Manager, cfg *config.Op
 
 	return ctrl.NewControllerManagedBy(mgr).
 		Named("volumesnapshot-domain").
-		For(&snapshotv1.VolumeSnapshot{}).
+		For(&snapshotv1.VolumeSnapshot{}, builder.OnlyMetadata).
 		Complete(reconciler)
 }
 
