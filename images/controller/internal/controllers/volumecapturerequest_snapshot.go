@@ -174,6 +174,12 @@ func (r *VolumeCaptureRequestController) processSnapshotTarget(
 		}
 		return snapshotTargetResult{}, ctrl.Result{}, fmt.Errorf("failed to get PV: %w", err)
 	}
+	if !pvClaimedBy(pv, pvc.Namespace, pvc.Name, pvc.UID) {
+		return snapshotTargetResult{terminal: &snapshotTargetError{
+			target: target, reason: storagev1alpha1.ConditionReasonInvalidSource,
+			message: fmt.Sprintf("PV %s is not bound to PVC %s/%s", pv.Name, pvc.Namespace, pvc.Name),
+		}}, ctrl.Result{}, nil
+	}
 	if pv.Spec.CSI == nil || pv.Spec.CSI.VolumeHandle == "" {
 		return snapshotTargetResult{terminal: &snapshotTargetError{
 			target: target, reason: storagev1alpha1.ConditionReasonInternalError,

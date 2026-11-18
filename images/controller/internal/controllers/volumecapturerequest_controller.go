@@ -28,6 +28,7 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/util/retry"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -217,7 +218,7 @@ func (r *VolumeCaptureRequestController) processSnapshotMode(ctx context.Context
 
 // processDetachMode handles Detach mode: detaches PV from PVC.
 // After Detach the PV gets the annotation storage-foundation.deckhouse.io/detached: "true"
-// Provisioner ignores such PV for normal binding (quarantine PV).
+// and a claimRef to a PVC that does not exist, so no other claim can bind it.
 func (r *VolumeCaptureRequestController) processDetachMode(ctx context.Context, vcr *storagev1alpha1.VolumeCaptureRequest) (ctrl.Result, error) {
 	l := log.FromContext(ctx).WithValues("vcr", fmt.Sprintf("%s/%s", vcr.Namespace, vcr.Name), "mode", "Detach")
 
@@ -228,6 +229,7 @@ func (r *VolumeCaptureRequestController) processDetachMode(ctx context.Context, 
 	}
 	// spec.target carries no namespace; the captured PVC always lives in the VCR namespace.
 	target.Namespace = vcr.Namespace
+	retainerName := NamePrefixRetainerPV + string(vcr.UID)
 
 	// 2. Check RBAC: try to get PVC
 	// NOTE: If PVC is already deleted (from previous reconcile), we need to get PV from annotation or VCR status
@@ -271,6 +273,7 @@ func (r *VolumeCaptureRequestController) processDetachMode(ctx context.Context, 
 		}
 	}
 
+	claimUID := types.UID("")
 	if !pvcNotFound {
 		// 3. Check if PVC is bound
 		if pvc.Spec.VolumeName == "" {
@@ -285,58 +288,36 @@ func (r *VolumeCaptureRequestController) processDetachMode(ctx context.Context, 
 			}
 			return ctrl.Result{}, fmt.Errorf("failed to get PV: %w", err)
 		}
+		claimUID = pvc.UID
+	}
 
+	detached := detachedByRetainer(pv, retainerName)
+	if !detached && !pvClaimedBy(pv, target.Namespace, target.Name, claimUID) {
+		return r.markFailed(ctx, vcr, storagev1alpha1.ConditionReasonInvalidSource, fmt.Sprintf("PV %s is not bound to PVC %s/%s", pv.Name, target.Namespace, target.Name))
+	}
+
+	if !pvcNotFound && pvNameFromAnnotation != pv.Name {
 		// Store PV name in annotation for future reconciles (when PVC is deleted)
 		// Use Patch instead of Update to minimize conflicts and reduce churn
-		if vcr.Annotations == nil || vcr.Annotations["storage-foundation.deckhouse.io/detach-pv-name"] != pv.Name {
-			current := &storagev1alpha1.VolumeCaptureRequest{}
-			if err := r.Get(ctx, client.ObjectKeyFromObject(vcr), current); err != nil {
-				return ctrl.Result{}, fmt.Errorf("failed to get VCR for annotation patch: %w", err)
-			}
-			base := current.DeepCopy()
-			if current.Annotations == nil {
-				current.Annotations = make(map[string]string)
-			}
-			current.Annotations["storage-foundation.deckhouse.io/detach-pv-name"] = pv.Name
-			if err := r.Patch(ctx, current, client.MergeFrom(base)); err != nil {
-				return ctrl.Result{}, fmt.Errorf("failed to patch VCR annotation: %w", err)
-			}
+		current := &storagev1alpha1.VolumeCaptureRequest{}
+		if err := r.Get(ctx, client.ObjectKeyFromObject(vcr), current); err != nil {
+			return ctrl.Result{}, fmt.Errorf("failed to get VCR for annotation patch: %w", err)
+		}
+		base := current.DeepCopy()
+		if current.Annotations == nil {
+			current.Annotations = make(map[string]string)
+		}
+		current.Annotations["storage-foundation.deckhouse.io/detach-pv-name"] = pv.Name
+		if err := r.Patch(ctx, current, client.MergeFrom(base)); err != nil {
+			return ctrl.Result{}, fmt.Errorf("failed to patch VCR annotation: %w", err)
 		}
 	}
 
-	// 5. Ensure PV is loaded (defensive check)
-	if pv == nil {
-		return ctrl.Result{}, fmt.Errorf("internal error: PV is nil (should not happen)")
-	}
-
-	// 6. Check if PV is already detached
-	// NOTE: If PV.Spec.PersistentVolumeReclaimPolicy != Retain, detaching may lead to
+	// 5. Delete the PVC (only if it still exists and the PV is not detached yet): Detach mode deletes the PVC
+	// NOTE: If PV.Spec.PersistentVolumeReclaimPolicy != Retain, deleting the PVC may lead to
 	// PV deletion by kube-controller-manager. This is a known limitation and should be
 	// documented for users. In production, PV should have ReclaimPolicy=Retain for Detach mode.
-	// Note: We check both ClaimRef and annotation to ensure PV was detached by our controller
-	if pv.Spec.ClaimRef == nil {
-		// Check if PV has our detached annotation to confirm it was detached by VCR
-		alreadyDetachedByVCR := false
-		if pv.Annotations != nil {
-			if val, ok := pv.Annotations["storage-foundation.deckhouse.io/detached"]; ok && val == "true" {
-				alreadyDetachedByVCR = true
-			}
-		}
-		if !alreadyDetachedByVCR {
-			// PV was detached by someone else, not by VCR - this is unexpected
-			l.Info("PV already detached but not by VCR", "pv", pv.Name)
-		}
-		// Already detached, update status
-		setPersistentVolumeDataRef(vcr, target, pv.Name, string(pv.UID))
-		if err := r.finalizeVCR(ctx, vcr, metav1.ConditionTrue, storagev1alpha1.ConditionReasonCompleted, fmt.Sprintf("PV %s already detached", pv.Name)); err != nil {
-			return ctrl.Result{}, err
-		}
-		return ctrl.Result{}, nil
-	}
-
-	// 7. Delete the PVC (only if it still exists): Detach mode deletes the PVC
-	// PV will be retained due to ReclaimPolicy=Retain
-	if !pvcNotFound {
+	if !pvcNotFound && !detached {
 		// Check if PVC is already deleted
 		pvcToDelete := &corev1.PersistentVolumeClaim{}
 		if err := r.Get(ctx, client.ObjectKey{Namespace: pvc.Namespace, Name: pvc.Name}, pvcToDelete); err != nil {
@@ -358,16 +339,15 @@ func (r *VolumeCaptureRequestController) processDetachMode(ctx context.Context, 
 			} else {
 				l.Info("Deleted PVC", "pvc", fmt.Sprintf("%s/%s", pvc.Namespace, pvc.Name))
 				// Wait for PVC deletion to complete before proceeding
-				// This ensures PV ClaimRef can be safely removed
+				// This ensures PV ClaimRef can be safely replaced
 				return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
 			}
 		}
 	}
 
-	// 8. Ensure ObjectKeeper exists FIRST - before detaching PV
+	// 6. Ensure ObjectKeeper exists FIRST - before detaching PV
 	// INVARIANT: ObjectKeeper must exist before creating artifacts (PV)
 	// This ensures proper ownership chain: ObjectKeeper → PV
-	retainerName := NamePrefixRetainerPV + string(vcr.UID)
 	objectKeeper, result, err := r.ensureObjectKeeper(ctx, retainerName, vcr)
 	if err != nil {
 		return ctrl.Result{}, err
@@ -376,18 +356,18 @@ func (r *VolumeCaptureRequestController) processDetachMode(ctx context.Context, 
 		return result, nil
 	}
 
-	// 9. Detach PV from PVC and set ownerRef in a single Patch operation
-	// After Detach the PV gets the annotation storage-foundation.deckhouse.io/detached: "true"
-	// NOTE: PV should have ReclaimPolicy=Retain to prevent accidental deletion
+	// 7. Detach PV from PVC and set ownerRef in a single Patch operation
 	// Re-read PV to get latest state before patching
 	updatedPV := &corev1.PersistentVolume{}
 	if err := r.Get(ctx, client.ObjectKey{Name: pv.Name}, updatedPV); err != nil {
 		return ctrl.Result{}, fmt.Errorf("failed to re-read PV before detach: %w", err)
 	}
+	if !detachedByRetainer(updatedPV, retainerName) && !pvClaimedBy(updatedPV, target.Namespace, target.Name, "") {
+		return r.markFailed(ctx, vcr, storagev1alpha1.ConditionReasonInvalidSource, fmt.Sprintf("PV %s is not bound to PVC %s/%s", updatedPV.Name, target.Namespace, target.Name))
+	}
 	base := updatedPV.DeepCopy()
 
-	// Detach PV: remove ClaimRef and set annotation
-	updatedPV.Spec.ClaimRef = nil
+	updatedPV.Spec.ClaimRef = detachedClaimRef(vcr.Namespace, retainerName)
 	if updatedPV.Annotations == nil {
 		updatedPV.Annotations = make(map[string]string)
 	}
@@ -418,12 +398,12 @@ func (r *VolumeCaptureRequestController) processDetachMode(ctx context.Context, 
 	}
 
 	// Single Patch operation for both detach and ownerRef
-	if err := r.Patch(ctx, updatedPV, client.MergeFrom(base)); err != nil {
+	if err := r.Patch(ctx, updatedPV, client.MergeFromWithOptions(base, client.MergeFromWithOptimisticLock{})); err != nil {
 		return ctrl.Result{}, fmt.Errorf("failed to detach PV and set ownerRef: %w", err)
 	}
 	l.Info("Detached PV from PVC and set ownerRef", "pv", updatedPV.Name)
 
-	// 10. Update VCR status
+	// 8. Update VCR status
 	setPersistentVolumeDataRef(vcr, target, updatedPV.Name, string(updatedPV.UID))
 	if err := r.finalizeVCR(ctx, vcr, metav1.ConditionTrue, storagev1alpha1.ConditionReasonCompleted, fmt.Sprintf("PV %s detached", updatedPV.Name)); err != nil {
 		return ctrl.Result{}, err
@@ -431,6 +411,32 @@ func (r *VolumeCaptureRequestController) processDetachMode(ctx context.Context, 
 
 	l.Info("VolumeCaptureRequest completed", "mode", "Detach", "pv", updatedPV.Name)
 	return ctrl.Result{}, nil
+}
+
+func detachedByRetainer(pv *corev1.PersistentVolume, retainerName string) bool {
+	for _, ref := range pv.OwnerReferences {
+		if ref.Kind == KindObjectKeeper && ref.Name == retainerName {
+			return true
+		}
+	}
+	return false
+}
+
+func pvClaimedBy(pv *corev1.PersistentVolume, namespace, name string, uid types.UID) bool {
+	ref := pv.Spec.ClaimRef
+	if ref == nil || ref.Namespace != namespace || ref.Name != name {
+		return false
+	}
+	return uid == "" || ref.UID == uid
+}
+
+func detachedClaimRef(namespace, name string) *corev1.ObjectReference {
+	return &corev1.ObjectReference{
+		Kind:       "PersistentVolumeClaim",
+		APIVersion: "v1",
+		Namespace:  namespace,
+		Name:       name,
+	}
 }
 
 // Helper functions

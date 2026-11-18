@@ -36,6 +36,7 @@ import (
 	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	ssstoragev1alpha1 "github.com/deckhouse/state-snapshotter/api/storage/v1alpha1"
@@ -112,12 +113,17 @@ var _ = Describe("VolumeCaptureRequest Controller", func() {
 		}
 	}
 
-	newCSIPV := func(name, driver, volumeHandle string) *corev1.PersistentVolume {
+	newCSIPV := func(name, driver, volumeHandle, claimNamespace, claimName string) *corev1.PersistentVolume {
+		var claimRef *corev1.ObjectReference
+		if claimName != "" {
+			claimRef = &corev1.ObjectReference{Namespace: claimNamespace, Name: claimName}
+		}
 		return &corev1.PersistentVolume{
 			ObjectMeta: metav1.ObjectMeta{
 				Name: name,
 			},
 			Spec: corev1.PersistentVolumeSpec{
+				ClaimRef: claimRef,
 				PersistentVolumeSource: corev1.PersistentVolumeSource{
 					CSI: &corev1.CSIPersistentVolumeSource{
 						Driver:       driver,
@@ -346,7 +352,7 @@ var _ = Describe("VolumeCaptureRequest Controller", func() {
 				vscClass := newVolumeSnapshotClass("test-vsc-class", "test-driver")
 				Expect(client.Create(ctx, vscClass)).To(Succeed())
 
-				pv := newCSIPV("test-pv", "test-driver", "test-volume-handle")
+				pv := newCSIPV("test-pv", "test-driver", "test-volume-handle", "default", "test-pvc")
 				Expect(client.Create(ctx, pv)).To(Succeed())
 
 				pvc := newBoundPVC("test-pvc", "default", "test-sc", "test-pv")
@@ -476,7 +482,7 @@ var _ = Describe("VolumeCaptureRequest Controller", func() {
 				Expect(client.Create(ctx, storageClass)).To(Succeed())
 				vscClass := newVolumeSnapshotClass("test-vsc-class", "test-driver")
 				Expect(client.Create(ctx, vscClass)).To(Succeed())
-				Expect(client.Create(ctx, newCSIPV("test-pv", "test-driver", "test-volume-handle"))).To(Succeed())
+				Expect(client.Create(ctx, newCSIPV("test-pv", "test-driver", "test-volume-handle", "default", "test-pvc"))).To(Succeed())
 				Expect(client.Create(ctx, newBoundPVC("test-pvc", "default", "test-sc", "test-pv"))).To(Succeed())
 
 				targetUID := "uid-test-pvc"
@@ -660,6 +666,7 @@ var _ = Describe("VolumeCaptureRequest Controller", func() {
 								Name: "test-pv-no-csi",
 							},
 							Spec: corev1.PersistentVolumeSpec{
+								ClaimRef: &corev1.ObjectReference{Namespace: "default", Name: "test-pvc-no-csi"},
 								PersistentVolumeSource: corev1.PersistentVolumeSource{
 									HostPath: &corev1.HostPathVolumeSource{
 										Path: "/tmp",
@@ -686,7 +693,7 @@ var _ = Describe("VolumeCaptureRequest Controller", func() {
 						}
 						Expect(client.Create(ctx, sc)).To(Succeed())
 
-						pv := newCSIPV("test-pv-no-annotation", "test-driver", "test-volume-handle")
+						pv := newCSIPV("test-pv-no-annotation", "test-driver", "test-volume-handle", "default", "test-pvc-no-annotation")
 						Expect(client.Create(ctx, pv)).To(Succeed())
 
 						pvc := newBoundPVC("test-pvc-no-annotation", "default", "test-sc-no-annotation", "test-pv-no-annotation")
@@ -701,7 +708,7 @@ var _ = Describe("VolumeCaptureRequest Controller", func() {
 						sc := newStorageClassWithVSC("test-sc-bad-vsc", "test-driver", "non-existent-vsc")
 						Expect(client.Create(ctx, sc)).To(Succeed())
 
-						pv := newCSIPV("test-pv-bad-vsc", "test-driver", "test-volume-handle")
+						pv := newCSIPV("test-pv-bad-vsc", "test-driver", "test-volume-handle", "default", "test-pvc-bad-vsc")
 						Expect(client.Create(ctx, pv)).To(Succeed())
 
 						pvc := newBoundPVC("test-pvc-bad-vsc", "default", "test-sc-bad-vsc", "test-pv-bad-vsc")
@@ -719,7 +726,7 @@ var _ = Describe("VolumeCaptureRequest Controller", func() {
 						vscClass := newVolumeSnapshotClass("test-vsc-class-mismatch", "other-driver")
 						Expect(client.Create(ctx, vscClass)).To(Succeed())
 
-						pv := newCSIPV("test-pv-mismatch", "test-driver", "test-volume-handle")
+						pv := newCSIPV("test-pv-mismatch", "test-driver", "test-volume-handle", "default", "test-pvc-mismatch")
 						Expect(client.Create(ctx, pv)).To(Succeed())
 
 						pvc := newBoundPVC("test-pvc-mismatch", "default", "test-sc-mismatch", "test-pv-mismatch")
@@ -737,13 +744,9 @@ var _ = Describe("VolumeCaptureRequest Controller", func() {
 		Describe("Happy path", func() {
 			It("should detach PV and set correct ownership", func() {
 				// Given
-				pv := newCSIPV("test-pv-detach", "test-driver", "test-volume-handle")
+				pv := newCSIPV("test-pv-detach", "test-driver", "test-volume-handle", "default", "test-pvc-detach")
 				pv.UID = types.UID("pv-uid-detach")
 				pv.Spec.PersistentVolumeReclaimPolicy = corev1.PersistentVolumeReclaimRetain
-				pv.Spec.ClaimRef = &corev1.ObjectReference{
-					Namespace: "default",
-					Name:      "test-pvc-detach",
-				}
 				Expect(client.Create(ctx, pv)).To(Succeed())
 
 				pvc := newBoundPVC("test-pvc-detach", "default", "", "test-pv-detach")
@@ -764,7 +767,12 @@ var _ = Describe("VolumeCaptureRequest Controller", func() {
 				// PV is detached
 				updatedPV := &corev1.PersistentVolume{}
 				Expect(client.Get(ctx, types.NamespacedName{Name: "test-pv-detach"}, updatedPV)).To(Succeed())
-				Expect(updatedPV.Spec.ClaimRef).To(BeNil())
+				Expect(updatedPV.Spec.ClaimRef).To(Equal(&corev1.ObjectReference{
+					Kind:       "PersistentVolumeClaim",
+					APIVersion: "v1",
+					Namespace:  "default",
+					Name:       NamePrefixRetainerPV + string(vcr.UID),
+				}))
 				Expect(updatedPV.Annotations).To(HaveKey("storage-foundation.deckhouse.io/detached"))
 				Expect(updatedPV.Annotations["storage-foundation.deckhouse.io/detached"]).To(Equal("true"))
 
@@ -801,7 +809,7 @@ var _ = Describe("VolumeCaptureRequest Controller", func() {
 		Describe("Idempotency", func() {
 			It("should not recreate resources on repeated reconcile", func() {
 				// Given: PVC already deleted, PV already detached, ObjectKeeper exists
-				pv := newCSIPV("test-pv-idempotent", "test-driver", "test-volume-handle")
+				pv := newCSIPV("test-pv-idempotent", "test-driver", "test-volume-handle", "", "")
 				pv.Spec.ClaimRef = nil
 				if pv.Annotations == nil {
 					pv.Annotations = make(map[string]string)
@@ -865,7 +873,308 @@ var _ = Describe("VolumeCaptureRequest Controller", func() {
 				existingPV := &corev1.PersistentVolume{}
 				Expect(client.Get(ctx, types.NamespacedName{Name: "test-pv-idempotent"}, existingPV)).To(Succeed())
 				Expect(existingPV.UID).To(Equal(originalPVUID), "PV should not be recreated")
+				Expect(existingPV.Spec.ClaimRef).ToNot(BeNil())
+				Expect(existingPV.Spec.ClaimRef.Namespace).To(Equal("default"))
+				Expect(existingPV.Spec.ClaimRef.Name).To(Equal(retainerName))
+				Expect(existingPV.Spec.ClaimRef.UID).To(BeEmpty())
+
+				updatedVCR := &storagev1alpha1.VolumeCaptureRequest{}
+				Expect(client.Get(ctx, types.NamespacedName{Name: vcr.Name, Namespace: vcr.Namespace}, updatedVCR)).To(Succeed())
+				readyCondition := getReadyCondition(updatedVCR.Status.Conditions)
+				Expect(readyCondition).ToNot(BeNil())
+				Expect(readyCondition.Status).To(Equal(metav1.ConditionTrue))
 			})
+		})
+
+		Describe("PV ownership", func() {
+			createDetachObjectKeeper := func(vcr *storagev1alpha1.VolumeCaptureRequest, uid types.UID) {
+				Expect(client.Create(ctx, &deckhousev1alpha1.ObjectKeeper{
+					ObjectMeta: metav1.ObjectMeta{Name: NamePrefixRetainerPV + string(vcr.UID), UID: uid},
+					Spec: deckhousev1alpha1.ObjectKeeperSpec{
+						Mode: "FollowObject",
+						FollowObjectRef: &deckhousev1alpha1.FollowObjectRef{
+							APIVersion: APIGroupStorageDeckhouse,
+							Kind:       KindVolumeCaptureRequest,
+							Namespace:  vcr.Namespace,
+							Name:       vcr.Name,
+							UID:        string(vcr.UID),
+						},
+					},
+				})).To(Succeed())
+			}
+
+			foreignPV := func(name string, claimRef *corev1.ObjectReference) *corev1.PersistentVolume {
+				pv := newCSIPV(name, "test-driver", "handle-"+name, "", "")
+				pv.Spec.ClaimRef = claimRef
+				Expect(client.Create(ctx, pv)).To(Succeed())
+				stored := &corev1.PersistentVolume{}
+				Expect(client.Get(ctx, types.NamespacedName{Name: name}, stored)).To(Succeed())
+				return stored
+			}
+
+			expectRejected := func(vcr *storagev1alpha1.VolumeCaptureRequest, pvBefore *corev1.PersistentVolume) {
+				Expect(reconcileUntilTerminal(vcr, 10)).To(Succeed())
+
+				updatedVCR := &storagev1alpha1.VolumeCaptureRequest{}
+				Expect(client.Get(ctx, types.NamespacedName{Name: vcr.Name, Namespace: vcr.Namespace}, updatedVCR)).To(Succeed())
+				readyCondition := getReadyCondition(updatedVCR.Status.Conditions)
+				Expect(readyCondition).ToNot(BeNil())
+				Expect(readyCondition.Status).To(Equal(metav1.ConditionFalse))
+				Expect(readyCondition.Reason).To(Equal(storagev1alpha1.ConditionReasonInvalidSource))
+				Expect(updatedVCR.Status.Data).To(BeNil())
+
+				pvAfter := &corev1.PersistentVolume{}
+				Expect(client.Get(ctx, types.NamespacedName{Name: pvBefore.Name}, pvAfter)).To(Succeed())
+				Expect(pvAfter.Spec.ClaimRef).To(Equal(pvBefore.Spec.ClaimRef))
+				Expect(pvAfter.OwnerReferences).To(BeEmpty())
+				Expect(pvAfter.Annotations).ToNot(HaveKey("storage-foundation.deckhouse.io/detached"))
+
+				objectKeeper := &deckhousev1alpha1.ObjectKeeper{}
+				err := client.Get(ctx, types.NamespacedName{Name: NamePrefixRetainerPV + string(vcr.UID)}, objectKeeper)
+				Expect(apierrors.IsNotFound(err)).To(BeTrue(), "ObjectKeeper must not be created for a foreign PV")
+			}
+
+			It("should refuse a PV named in the annotation that is bound to a PVC of another namespace", func() {
+				pv := foreignPV("victim-pv", &corev1.ObjectReference{Namespace: "victim", Name: "data", UID: "victim-pvc-uid"})
+
+				vcr := newVCR("vcr-foreign-annotation", "attacker", ModeDetach, pvcTarget("attacker", "data", ""))
+				vcr.Annotations = map[string]string{"storage-foundation.deckhouse.io/detach-pv-name": "victim-pv"}
+				Expect(client.Create(ctx, vcr)).To(Succeed())
+
+				expectRejected(vcr, pv)
+			})
+
+			It("should refuse a PV named in the annotation that is bound to another PVC of the same namespace", func() {
+				pv := foreignPV("neighbour-pv", &corev1.ObjectReference{Namespace: "attacker", Name: "other", UID: "other-pvc-uid"})
+
+				vcr := newVCR("vcr-neighbour-annotation", "attacker", ModeDetach, pvcTarget("attacker", "missing", ""))
+				vcr.Annotations = map[string]string{"storage-foundation.deckhouse.io/detach-pv-name": "neighbour-pv"}
+				Expect(client.Create(ctx, vcr)).To(Succeed())
+
+				expectRejected(vcr, pv)
+			})
+
+			It("should refuse an unbound PV named in the annotation", func() {
+				pv := foreignPV("available-pv", nil)
+
+				vcr := newVCR("vcr-available-annotation", "attacker", ModeDetach, pvcTarget("attacker", "missing", ""))
+				vcr.Annotations = map[string]string{"storage-foundation.deckhouse.io/detach-pv-name": "available-pv"}
+				Expect(client.Create(ctx, vcr)).To(Succeed())
+
+				expectRejected(vcr, pv)
+			})
+
+			It("should refuse a PV detached by another VCR", func() {
+				pv := newCSIPV("other-vcr-pv", "test-driver", "handle-other-vcr-pv", "victim", NamePrefixRetainerPV+"vcr-uid-victim")
+				pv.OwnerReferences = []metav1.OwnerReference{{
+					APIVersion: APIGroupDeckhouse,
+					Kind:       KindObjectKeeper,
+					Name:       NamePrefixRetainerPV + "vcr-uid-victim",
+					UID:        "ok-uid-victim",
+					Controller: ptr.To(true),
+				}}
+				Expect(client.Create(ctx, pv)).To(Succeed())
+
+				vcr := newVCR("vcr-other-detached", "attacker", ModeDetach, pvcTarget("attacker", "missing", ""))
+				vcr.Annotations = map[string]string{"storage-foundation.deckhouse.io/detach-pv-name": "other-vcr-pv"}
+				Expect(client.Create(ctx, vcr)).To(Succeed())
+
+				Expect(reconcileUntilTerminal(vcr, 10)).To(Succeed())
+				updatedVCR := &storagev1alpha1.VolumeCaptureRequest{}
+				Expect(client.Get(ctx, types.NamespacedName{Name: vcr.Name, Namespace: vcr.Namespace}, updatedVCR)).To(Succeed())
+				Expect(getReadyCondition(updatedVCR.Status.Conditions).Reason).To(Equal(storagev1alpha1.ConditionReasonInvalidSource))
+
+				pvAfter := &corev1.PersistentVolume{}
+				Expect(client.Get(ctx, types.NamespacedName{Name: "other-vcr-pv"}, pvAfter)).To(Succeed())
+				Expect(pvAfter.Spec.ClaimRef.Namespace).To(Equal("victim"))
+				Expect(pvAfter.OwnerReferences).To(HaveLen(1))
+			})
+
+			It("should refuse a PVC that names a PV bound to a PVC of another namespace and keep the PVC", func() {
+				pv := foreignPV("victim-pv-volumename", &corev1.ObjectReference{Namespace: "victim", Name: "data", UID: "victim-pvc-uid"})
+				pvc := newBoundPVC("data", "attacker", "", "victim-pv-volumename")
+				pvc.Status.Phase = corev1.ClaimPending
+				Expect(client.Create(ctx, pvc)).To(Succeed())
+
+				vcr := newVCR("vcr-foreign-volumename", "attacker", ModeDetach, pvcTarget("attacker", "data", ""))
+				Expect(client.Create(ctx, vcr)).To(Succeed())
+
+				expectRejected(vcr, pv)
+				Expect(client.Get(ctx, types.NamespacedName{Name: "data", Namespace: "attacker"}, &corev1.PersistentVolumeClaim{})).To(Succeed())
+			})
+
+			It("should refuse a PVC whose PV is bound to an earlier PVC with the same name", func() {
+				pv := foreignPV("recreated-pv", &corev1.ObjectReference{Namespace: "default", Name: "data", UID: "old-pvc-uid"})
+				pvc := newBoundPVC("data", "default", "", "recreated-pv")
+				pvc.UID = "new-pvc-uid"
+				Expect(client.Create(ctx, pvc)).To(Succeed())
+
+				vcr := newVCR("vcr-recreated-pvc", "default", ModeDetach, pvcTarget("default", "data", "new-pvc-uid"))
+				Expect(client.Create(ctx, vcr)).To(Succeed())
+
+				expectRejected(vcr, pv)
+				Expect(client.Get(ctx, types.NamespacedName{Name: "data", Namespace: "default"}, &corev1.PersistentVolumeClaim{})).To(Succeed())
+			})
+
+			It("should refuse a PV that was rebound to another PVC before the detach patch", func() {
+				pv := foreignPV("rebound-pv", &corev1.ObjectReference{Namespace: "default", Name: "gone", UID: "gone-pvc-uid"})
+
+				pvGets := 0
+				ctrl.Client = rebindPVOnLaterGets(client, "rebound-pv", &corev1.ObjectReference{Namespace: "victim", Name: "data", UID: "victim-pvc-uid"}, &pvGets)
+
+				vcr := newVCR("vcr-rebound", "default", ModeDetach, pvcTarget("default", "gone", ""))
+				vcr.Annotations = map[string]string{"storage-foundation.deckhouse.io/detach-pv-name": "rebound-pv"}
+				Expect(client.Create(ctx, vcr)).To(Succeed())
+				createDetachObjectKeeper(vcr, "ok-uid-rebound")
+
+				Expect(reconcileUntilTerminal(vcr, 10)).To(Succeed())
+				Expect(pvGets).To(Equal(2))
+
+				updatedVCR := &storagev1alpha1.VolumeCaptureRequest{}
+				Expect(client.Get(ctx, types.NamespacedName{Name: vcr.Name, Namespace: vcr.Namespace}, updatedVCR)).To(Succeed())
+				readyCondition := getReadyCondition(updatedVCR.Status.Conditions)
+				Expect(readyCondition).ToNot(BeNil())
+				Expect(readyCondition.Reason).To(Equal(storagev1alpha1.ConditionReasonInvalidSource))
+
+				pvAfter := &corev1.PersistentVolume{}
+				Expect(client.Get(ctx, types.NamespacedName{Name: "rebound-pv"}, pvAfter)).To(Succeed())
+				Expect(pvAfter.Spec.ClaimRef).To(Equal(pv.Spec.ClaimRef))
+				Expect(pvAfter.OwnerReferences).To(BeEmpty())
+			})
+
+			It("should keep a new PVC with the target name once the PV is detached by this VCR", func() {
+				vcr := newVCR("vcr-detached-new-pvc", "default", ModeDetach, pvcTarget("default", "data", ""))
+				Expect(client.Create(ctx, vcr)).To(Succeed())
+				retainerName := NamePrefixRetainerPV + string(vcr.UID)
+				createDetachObjectKeeper(vcr, "ok-uid-detached")
+
+				pv := newCSIPV("detached-pv", "test-driver", "handle-detached", "default", retainerName)
+				pv.OwnerReferences = []metav1.OwnerReference{{
+					APIVersion: APIGroupDeckhouse,
+					Kind:       KindObjectKeeper,
+					Name:       retainerName,
+					UID:        "ok-uid-detached",
+					Controller: ptr.To(true),
+				}}
+				Expect(client.Create(ctx, pv)).To(Succeed())
+				pvc := newBoundPVC("data", "default", "", "detached-pv")
+				pvc.Status.Phase = corev1.ClaimPending
+				Expect(client.Create(ctx, pvc)).To(Succeed())
+
+				Expect(reconcileUntilTerminal(vcr, 10)).To(Succeed())
+
+				updatedVCR := &storagev1alpha1.VolumeCaptureRequest{}
+				Expect(client.Get(ctx, types.NamespacedName{Name: vcr.Name, Namespace: vcr.Namespace}, updatedVCR)).To(Succeed())
+				Expect(getReadyCondition(updatedVCR.Status.Conditions).Status).To(Equal(metav1.ConditionTrue))
+				Expect(client.Get(ctx, types.NamespacedName{Name: "data", Namespace: "default"}, &corev1.PersistentVolumeClaim{})).To(Succeed())
+
+				pvAfter := &corev1.PersistentVolume{}
+				Expect(client.Get(ctx, types.NamespacedName{Name: "detached-pv"}, pvAfter)).To(Succeed())
+				Expect(pvAfter.OwnerReferences).To(HaveLen(1))
+				Expect(pvAfter.Spec.ClaimRef.Name).To(Equal(retainerName))
+			})
+
+			It("should patch the PV with its resourceVersion", func() {
+				Expect(client.Create(ctx, newCSIPV("locked-pv", "test-driver", "handle-locked", "default", "locked"))).To(Succeed())
+				Expect(client.Create(ctx, newBoundPVC("locked", "default", "", "locked-pv"))).To(Succeed())
+
+				var pvPatches []string
+				ctrl.Client = recordPVPatches(client, &pvPatches)
+
+				vcr := newVCR("vcr-locked", "default", ModeDetach, pvcTarget("default", "locked", ""))
+				Expect(client.Create(ctx, vcr)).To(Succeed())
+				Expect(reconcileUntilTerminal(vcr, 10)).To(Succeed())
+
+				Expect(pvPatches).ToNot(BeEmpty())
+				for _, patch := range pvPatches {
+					Expect(patch).To(ContainSubstring(`"resourceVersion"`))
+				}
+			})
+
+			It("should detach the PV of its PVC when the annotation names another PV", func() {
+				pv := newCSIPV("own-pv", "test-driver", "handle-own", "default", "own")
+				Expect(client.Create(ctx, pv)).To(Succeed())
+				Expect(client.Create(ctx, newBoundPVC("own", "default", "", "own-pv"))).To(Succeed())
+				victim := foreignPV("victim-pv-ignored", &corev1.ObjectReference{Namespace: "victim", Name: "data", UID: "victim-pvc-uid"})
+
+				vcr := newVCR("vcr-own-pvc", "default", ModeDetach, pvcTarget("default", "own", ""))
+				vcr.Annotations = map[string]string{"storage-foundation.deckhouse.io/detach-pv-name": "victim-pv-ignored"}
+				Expect(client.Create(ctx, vcr)).To(Succeed())
+
+				Expect(reconcileUntilTerminal(vcr, 10)).To(Succeed())
+
+				updatedVCR := &storagev1alpha1.VolumeCaptureRequest{}
+				Expect(client.Get(ctx, types.NamespacedName{Name: vcr.Name, Namespace: vcr.Namespace}, updatedVCR)).To(Succeed())
+				Expect(getReadyCondition(updatedVCR.Status.Conditions).Status).To(Equal(metav1.ConditionTrue))
+				Expect(updatedVCR.Status.Data.ArtifactRef.Name).To(Equal("own-pv"))
+
+				ownAfter := &corev1.PersistentVolume{}
+				Expect(client.Get(ctx, types.NamespacedName{Name: "own-pv"}, ownAfter)).To(Succeed())
+				Expect(ownAfter.Spec.ClaimRef.Name).To(Equal(NamePrefixRetainerPV + string(vcr.UID)))
+
+				victimAfter := &corev1.PersistentVolume{}
+				Expect(client.Get(ctx, types.NamespacedName{Name: "victim-pv-ignored"}, victimAfter)).To(Succeed())
+				Expect(victimAfter.Spec.ClaimRef).To(Equal(victim.Spec.ClaimRef))
+				Expect(victimAfter.OwnerReferences).To(BeEmpty())
+			})
+		})
+	})
+
+	Describe("LEVEL 2: Snapshot mode PV ownership", func() {
+		expectNoSnapshot := func(vcr *storagev1alpha1.VolumeCaptureRequest) {
+			Expect(reconcileUntilTerminal(vcr, 10)).To(Succeed())
+
+			updatedVCR := &storagev1alpha1.VolumeCaptureRequest{}
+			Expect(client.Get(ctx, types.NamespacedName{Name: vcr.Name, Namespace: vcr.Namespace}, updatedVCR)).To(Succeed())
+			readyCondition := getReadyCondition(updatedVCR.Status.Conditions)
+			Expect(readyCondition).ToNot(BeNil())
+			Expect(readyCondition.Status).To(Equal(metav1.ConditionFalse))
+			Expect(readyCondition.Reason).To(Equal(storagev1alpha1.ConditionReasonInvalidSource))
+			Expect(updatedVCR.Status.Data).To(BeNil())
+
+			vscs := &snapshotv1.VolumeSnapshotContentList{}
+			Expect(client.List(ctx, vscs)).To(Succeed())
+			Expect(vscs.Items).To(BeEmpty())
+		}
+
+		It("should refuse a PVC that names a PV bound to a PVC of another namespace", func() {
+			pv := newCSIPV("victim-pv-snap", "test-driver", "handle-victim", "", "")
+			pv.Spec.ClaimRef = &corev1.ObjectReference{Namespace: "victim", Name: "data", UID: "victim-pvc-uid"}
+			Expect(client.Create(ctx, pv)).To(Succeed())
+			pvc := newBoundPVC("data", "attacker", "test-sc", "victim-pv-snap")
+			pvc.Status.Phase = corev1.ClaimPending
+			Expect(client.Create(ctx, pvc)).To(Succeed())
+
+			vcr := newVCR("vcr-snap-foreign", "attacker", ModeSnapshot, pvcTarget("attacker", "data", "data-uid"))
+			Expect(client.Create(ctx, vcr)).To(Succeed())
+
+			expectNoSnapshot(vcr)
+		})
+
+		It("should refuse a PVC whose PV is bound to an earlier PVC with the same name", func() {
+			pv := newCSIPV("recreated-pv-snap", "test-driver", "handle-recreated", "", "")
+			pv.Spec.ClaimRef = &corev1.ObjectReference{Namespace: "default", Name: "data", UID: "old-pvc-uid"}
+			Expect(client.Create(ctx, pv)).To(Succeed())
+			pvc := newBoundPVC("data", "default", "test-sc", "recreated-pv-snap")
+			pvc.UID = "new-pvc-uid"
+			Expect(client.Create(ctx, pvc)).To(Succeed())
+
+			vcr := newVCR("vcr-snap-recreated", "default", ModeSnapshot, pvcTarget("default", "data", "new-pvc-uid"))
+			Expect(client.Create(ctx, vcr)).To(Succeed())
+
+			expectNoSnapshot(vcr)
+		})
+
+		It("should refuse a PVC that names an unbound PV", func() {
+			Expect(client.Create(ctx, newCSIPV("available-pv-snap", "test-driver", "handle-available", "", ""))).To(Succeed())
+			pvc := newBoundPVC("grab-available", "attacker", "test-sc", "available-pv-snap")
+			pvc.Status.Phase = corev1.ClaimPending
+			Expect(client.Create(ctx, pvc)).To(Succeed())
+
+			vcr := newVCR("vcr-snap-available", "attacker", ModeSnapshot, pvcTarget("attacker", "grab-available", "grab-available-uid"))
+			Expect(client.Create(ctx, vcr)).To(Succeed())
+
+			expectNoSnapshot(vcr)
 		})
 	})
 
@@ -878,7 +1187,7 @@ var _ = Describe("VolumeCaptureRequest Controller", func() {
 			vscClass := newVolumeSnapshotClass("test-vsc-class", "test-driver")
 			Expect(client.Create(ctx, vscClass)).To(Succeed())
 
-			pv := newCSIPV("test-pv", "test-driver", "test-volume-handle")
+			pv := newCSIPV("test-pv", "test-driver", "test-volume-handle", "default", "test-pvc")
 			Expect(client.Create(ctx, pv)).To(Succeed())
 
 			pvc := newBoundPVC("test-pvc", "default", "test-sc", "test-pv")
@@ -949,7 +1258,7 @@ var _ = Describe("VolumeCaptureRequest Controller", func() {
 			Expect(client.Create(ctx, storageClass)).To(Succeed())
 			vscClass := newVolumeSnapshotClass("test-vsc-class", "test-driver")
 			Expect(client.Create(ctx, vscClass)).To(Succeed())
-			Expect(client.Create(ctx, newCSIPV("test-pv-pending", "test-driver", "handle-pending"))).To(Succeed())
+			Expect(client.Create(ctx, newCSIPV("test-pv-pending", "test-driver", "handle-pending", "default", "pvc-pending"))).To(Succeed())
 			Expect(client.Create(ctx, newBoundPVC("pvc-pending", "default", "test-sc", "test-pv-pending"))).To(Succeed())
 
 			vcr := newVCR("test-vcr-pending", "default", ModeSnapshot, pvcTarget("default", "pvc-pending", "uid-pvc-pending"))
@@ -977,7 +1286,7 @@ var _ = Describe("VolumeCaptureRequest Controller", func() {
 			Expect(client.Create(ctx, storageClass)).To(Succeed())
 			vscClass := newVolumeSnapshotClass("test-vsc-class", "test-driver")
 			Expect(client.Create(ctx, vscClass)).To(Succeed())
-			Expect(client.Create(ctx, newCSIPV("test-pv-guard", "test-driver", "handle-guard"))).To(Succeed())
+			Expect(client.Create(ctx, newCSIPV("test-pv-guard", "test-driver", "handle-guard", "default", "pvc-guard"))).To(Succeed())
 			Expect(client.Create(ctx, newBoundPVC("pvc-guard", "default", "test-sc", "test-pv-guard"))).To(Succeed())
 
 			targetUID := "uid-pvc-guard"
@@ -1014,7 +1323,7 @@ var _ = Describe("VolumeCaptureRequest Controller", func() {
 			Expect(client.Create(ctx, storageClass)).To(Succeed())
 			vscClass := newVolumeSnapshotClass("test-vsc-class", "test-driver")
 			Expect(client.Create(ctx, vscClass)).To(Succeed())
-			Expect(client.Create(ctx, newCSIPV("test-pv-idem", "test-driver", "handle-idem"))).To(Succeed())
+			Expect(client.Create(ctx, newCSIPV("test-pv-idem", "test-driver", "handle-idem", "default", "pvc-idem"))).To(Succeed())
 			Expect(client.Create(ctx, newBoundPVC("pvc-idem", "default", "test-sc", "test-pv-idem"))).To(Succeed())
 
 			vcr := newVCR("test-vcr-idem-single", "default", ModeSnapshot, pvcTarget("default", "pvc-idem", "uid-pvc-idem"))
@@ -1039,6 +1348,38 @@ var _ = Describe("VolumeCaptureRequest Controller", func() {
 })
 
 // Helper function to get condition by type
+func rebindPVOnLaterGets(c client.Client, pvName string, claimRef *corev1.ObjectReference, gets *int) client.Client {
+	return interceptor.NewClient(c.(client.WithWatch), interceptor.Funcs{
+		Get: func(ctx context.Context, c client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+			if err := c.Get(ctx, key, obj, opts...); err != nil {
+				return err
+			}
+			if pv, ok := obj.(*corev1.PersistentVolume); ok && key.Name == pvName {
+				*gets++
+				if *gets > 1 {
+					pv.Spec.ClaimRef = claimRef.DeepCopy()
+				}
+			}
+			return nil
+		},
+	})
+}
+
+func recordPVPatches(c client.Client, patches *[]string) client.Client {
+	return interceptor.NewClient(c.(client.WithWatch), interceptor.Funcs{
+		Patch: func(ctx context.Context, c client.WithWatch, obj client.Object, patch client.Patch, opts ...client.PatchOption) error {
+			if _, ok := obj.(*corev1.PersistentVolume); ok {
+				data, err := patch.Data(obj)
+				if err != nil {
+					return err
+				}
+				*patches = append(*patches, string(data))
+			}
+			return c.Patch(ctx, obj, patch, opts...)
+		},
+	})
+}
+
 func getReadyCondition(conditions []metav1.Condition) *metav1.Condition {
 	for i := range conditions {
 		if conditions[i].Type == storagev1alpha1.ConditionTypeReady {
