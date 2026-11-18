@@ -19,11 +19,16 @@ fixes:
   - "В DKP 1.78 и новее при включённом `multitenancy-manager` `PersistentVolumeClaim`, в котором класс указан в аннотации `volume.beta.kubernetes.io/storage-class`, проверяется по этому классу: Kubernetes создаёт том в классе из аннотации и не смотрит на `spec.storageClassName`, поэтому пользователь проекта мог получить том в классе, недоступном проекту. Если класс недоступен проекту, claim (заявка на том) отклоняется. В более ранних версиях DKP аннотация не проверяется."
   - "Компонент `data-source-validator` работает как Deployment вместо StatefulSet, поэтому обновление модуля заменяет его под, даже если старый завис, например в `ImagePullBackOff`; старый StatefulSet при обновлении удаляется. Его PodDisruptionBudget больше не блокирует drain (освобождение) узла в режиме HA."
   - "`DataExport` и `DataImport`, опубликованные с `--publish`, больше не остаются в `PublishFailed`, если в `publicDomainTemplate` кластера после `%s` нет точки, например `%s-example.com`: хост публикующего Ingress, поиск его TLS-сертификата и CORS-origin строятся подстановкой поддоменов `api` и `console` вместо `%s` в шаблоне, а не отрезанием префикса `%s.` и дописыванием поддомена через точку. Шаблоны вроде `%s.example.com` и `kube-%s.example.com` дают те же хосты, что и раньше и что в остальном Deckhouse."
+  - "В DKP 1.79 и новее грант `storageclasses` находит класс кластера по умолчанию и по устаревшей аннотации `storageclass.beta.kubernetes.io/is-default-class`, которую Kubernetes по-прежнему учитывает, поэтому грант и Kubernetes считают классом по умолчанию один и тот же `StorageClass`."
+
+upgrade_notes:
+  - "В DKP 1.79 и новее `multitenancy-manager` иначе выбирает класс `PersistentVolumeClaim` без `spec.storageClassName`. В проекте, у которого `ClusterResourceGrantPolicy` задаёт `default`, отличный от класса кластера по умолчанию, такой PVC, в том числе созданный `DataImport`, теперь получает класс проекта по умолчанию, даже если проекту доступен класс кластера по умолчанию; раньше оставался класс кластера по умолчанию. PVC с `storageClassName: \"\"` остаётся без класса и не получает класс проекта по умолчанию. Из нескольких классов кластера по умолчанию используется самый новый, как в Kubernetes."
 
 docs:
   - "На странице использования описано, какие гранты остаются после отключения storage-foundation и как грант `storageclasses` переходит между storage-foundation и `multitenancy-manager`."
   - "На странице использования показано, как выбрать классы модуля хранения в `ClusterResourceGrantPolicy` по метке `storage.deckhouse.io/managed-by`, и описана метка `storage.deckhouse.io/internal`."
   - "На странице использования описано, какой неймспейс `d8 data` использует без `-n`: в `d8` начиная с v0.34.8 это неймспейс текущего контекста kubeconfig, как у kubectl, а не `d8-storage-volume-data-manager`."
+  - "На странице использования описано, какой класс получает `PersistentVolumeClaim` без `spec.storageClassName` в проекте, как выбирается класс кластера по умолчанию и что PVC, оставшийся без класса, позже получает класс кластера по умолчанию без проверки."
 
 
 

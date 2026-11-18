@@ -15,6 +15,10 @@ spec:
   defaultAvailability: All
   defaultFrom:
     annotationKey: storageclass.kubernetes.io/is-default-class
+    {{- if eq (include "storage-foundation.grants_default_from_additional_keys" .) "true" }}
+    additionalAnnotationKeys:
+    - storageclass.beta.kubernetes.io/is-default-class
+    {{- end }}
   {{- if eq (include "storage-foundation.rbacv2_new_scheme" .) "true" }}
   excluded:
   - matchLabels:

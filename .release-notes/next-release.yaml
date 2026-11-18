@@ -19,11 +19,16 @@ fixes:
   - "On DKP 1.78 and later, with `multitenancy-manager` enabled, a `PersistentVolumeClaim` that names a class in the `volume.beta.kubernetes.io/storage-class` annotation is checked by that class: Kubernetes provisions the volume in the class of the annotation and ignores `spec.storageClassName`, so a project user could get a volume in a class the project may not use. If the class is not available to the project, the claim is rejected. On earlier DKP versions the annotation is not checked."
   - "The `data-source-validator` component runs as a Deployment instead of a StatefulSet, so a module update replaces its Pod even when the old one is stuck, for example in `ImagePullBackOff`; the old StatefulSet is removed on update. Its PodDisruptionBudget no longer blocks draining the node in HA mode."
   - "`DataExport` and `DataImport` published with `--publish` no longer stay `PublishFailed` when the `publicDomainTemplate` of the cluster has the placeholder not followed by a dot, for example `%s-example.com`: the host of the publishing Ingress, its TLS certificate lookup and the CORS origin are built by substituting the `api` and `console` subdomains for `%s` in the template, instead of cutting a `%s.` prefix and appending the subdomain with a dot. Templates such as `%s.example.com` and `kube-%s.example.com` give the same hosts as before and as the rest of Deckhouse."
+  - "On DKP 1.79 and later, the `storageclasses` grant also finds the default `StorageClass` of the cluster by the older `storageclass.beta.kubernetes.io/is-default-class` annotation, which Kubernetes still reads, so the grant and Kubernetes agree on the default class."
+
+upgrade_notes:
+  - "On DKP 1.79 and later, `multitenancy-manager` picks the class of a `PersistentVolumeClaim` without `spec.storageClassName` differently. In a project whose `ClusterResourceGrantPolicy` sets a `default` different from the default class of the cluster, such a claim, including the one a `DataImport` creates, now gets the default class of the project even if the project may use the default class of the cluster; before, it kept the default class of the cluster. A claim with `storageClassName: \"\"` keeps the empty class instead of getting the default class of the project. Of several default classes of the cluster, the newest is used, as in Kubernetes."
 
 docs:
   - "The usage page describes which grants stay when storage-foundation is disabled and how the `storageclasses` grant passes between storage-foundation and `multitenancy-manager`."
   - "The usage page shows how to select the classes of a storage module in a `ClusterResourceGrantPolicy` by the `storage.deckhouse.io/managed-by` label and describes the `storage.deckhouse.io/internal` label."
   - "The usage page describes the namespace `d8 data` uses without `-n`: in `d8` v0.34.8 and later it is the namespace of the current kubeconfig context, as in kubectl, instead of `d8-storage-volume-data-manager`."
+  - "The usage page describes which class a `PersistentVolumeClaim` without `spec.storageClassName` gets in a project, how the default class of the cluster is chosen, and that a claim left without a class gets the default class of the cluster later without the check."
 
 
 
