@@ -22,6 +22,7 @@ const (
 	labelDriver       = "driver"
 	labelStorageClass = "storage_class"
 	labelState        = "state"
+	labelResult       = "result"
 )
 
 // labelUnknown replaces a label value that is not one of the known ones.

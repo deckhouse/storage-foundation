@@ -29,12 +29,12 @@ const eventTimeout = 5 * time.Second
 // Recorder writes the metrics that change on an event, such as a created VolumeCaptureRequest.
 type Recorder struct {
 	reader client.Reader
-	vcr    vcrMetrics
+	vcr    vcrEventMetrics
 }
 
 // newRecorder registers the metrics of the recorder in st and returns the recorder that writes them.
 func newRecorder(st *metricsstorage.MetricStorage, reader client.Reader) (*Recorder, error) {
-	vcr, err := registerVCRMetrics(st)
+	vcr, err := registerVCREventMetrics(st)
 	if err != nil {
 		return nil, err
 	}

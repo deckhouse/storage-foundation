@@ -26,6 +26,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/testutil"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/client-go/rest"
@@ -48,6 +49,71 @@ const subscribeTimeout = 10 * time.Second
 
 func TestVolumeCaptureRequestController_SetupWithManager_countsCreated(t *testing.T) {
 	t.Parallel()
+
+	informer, reg := setupWithFakeInformer(t)
+
+	informer.Add(&storagev1alpha1.VolumeCaptureRequest{
+		Name:      "a",
+		Namespace: "ns",
+		Spec:      storagev1alpha1.VolumeCaptureRequestSpec{Mode: storagev1alpha1.VolumeCaptureModeSnapshot},
+	})
+
+	want := "# HELP storage_foundation_vcr_created_total " +
+		"VolumeCaptureRequests created in the cluster by mode, CSI driver and StorageClass.\n" +
+		"# TYPE storage_foundation_vcr_created_total counter\n" +
+		`storage_foundation_vcr_created_total{driver="unknown",mode="Snapshot",storage_class="unknown"} 1` + "\n"
+	if err := testutil.GatherAndCompare(reg, strings.NewReader(want), "storage_foundation_vcr_created_total"); err != nil {
+		t.Errorf("GatherAndCompare() error = %v", err)
+	}
+}
+
+func TestVolumeCaptureRequestController_SetupWithManager_observesDuration(t *testing.T) {
+	t.Parallel()
+
+	informer, reg := setupWithFakeInformer(t)
+
+	pending := &storagev1alpha1.VolumeCaptureRequest{
+		Name:              "a",
+		Namespace:         "ns",
+		CreationTimestamp: metav1.NewTime(time.Date(2026, time.November, 17, 10, 0, 0, 0, time.UTC)),
+		Spec:              storagev1alpha1.VolumeCaptureRequestSpec{Mode: storagev1alpha1.VolumeCaptureModeSnapshot},
+	}
+	completed := pending.DeepCopy()
+	completed.Status.Conditions = []metav1.Condition{{
+		Type:   storagev1alpha1.ConditionTypeReady,
+		Status: metav1.ConditionTrue,
+		Reason: storagev1alpha1.ConditionReasonCompleted,
+	}}
+	completed.Status.CompletionTimestamp = new(metav1.NewTime(pending.CreationTimestamp.Add(7 * time.Second)))
+	informer.Update(pending, completed)
+
+	got, err := testutil.GatherAndCount(reg, "storage_foundation_vcr_duration_seconds")
+	if err != nil {
+		t.Fatalf("GatherAndCount() error = %v", err)
+	}
+	if got != 1 {
+		t.Errorf("GatherAndCount() = %d series of storage_foundation_vcr_duration_seconds; want 1", got)
+	}
+}
+
+func TestVolumeCaptureRequestController_SetupWithManager_nilMetrics(t *testing.T) {
+	t.Parallel()
+
+	// The scheme knows the requests, so that only the missing recorder can fail the setup.
+	scheme := newTestScheme(t)
+	mgr := newTestManager(t, scheme, &informertest.FakeInformers{Scheme: scheme})
+	r := new(VolumeCaptureRequestController)
+
+	if err := r.SetupWithManager(mgr); err == nil {
+		t.Errorf("SetupWithManager() with nil Metrics error = nil; want an error")
+	}
+}
+
+// setupWithFakeInformer sets up the controller with metrics on a manager whose informer of the requests is fake,
+// starts the manager and waits until For and Watches subscribe to that informer. It returns the informer and the
+// registry of the metrics.
+func setupWithFakeInformer(t *testing.T) (*subscribedInformer, *prometheus.Registry) {
+	t.Helper()
 
 	scheme := newTestScheme(t)
 	informer := &subscribedInformer{
@@ -72,7 +138,7 @@ func TestVolumeCaptureRequestController_SetupWithManager_countsCreated(t *testin
 	}
 	startManager(t, mgr)
 
-	// For and Watches each subscribe a handler; the event is sent only after both are in place.
+	// For and Watches each subscribe a handler; an event is sent only after both are in place.
 	for i := range 2 {
 		select {
 		case <-informer.subscribed:
@@ -80,32 +146,8 @@ func TestVolumeCaptureRequestController_SetupWithManager_countsCreated(t *testin
 			t.Fatalf("the controller subscribed %d handlers to the VolumeCaptureRequest informer; want 2", i)
 		}
 	}
-	informer.Add(&storagev1alpha1.VolumeCaptureRequest{
-		Name:      "a",
-		Namespace: "ns",
-		Spec:      storagev1alpha1.VolumeCaptureRequestSpec{Mode: storagev1alpha1.VolumeCaptureModeSnapshot},
-	})
 
-	want := "# HELP storage_foundation_vcr_created_total " +
-		"VolumeCaptureRequests created in the cluster by mode, CSI driver and StorageClass.\n" +
-		"# TYPE storage_foundation_vcr_created_total counter\n" +
-		`storage_foundation_vcr_created_total{driver="unknown",mode="Snapshot",storage_class="unknown"} 1` + "\n"
-	if err := testutil.GatherAndCompare(reg, strings.NewReader(want), "storage_foundation_vcr_created_total"); err != nil {
-		t.Errorf("GatherAndCompare() error = %v", err)
-	}
-}
-
-func TestVolumeCaptureRequestController_SetupWithManager_nilMetrics(t *testing.T) {
-	t.Parallel()
-
-	// The scheme knows the requests, so that only the missing recorder can fail the setup.
-	scheme := newTestScheme(t)
-	mgr := newTestManager(t, scheme, &informertest.FakeInformers{Scheme: scheme})
-	r := new(VolumeCaptureRequestController)
-
-	if err := r.SetupWithManager(mgr); err == nil {
-		t.Errorf("SetupWithManager() with nil Metrics error = nil; want an error")
-	}
+	return informer, reg
 }
 
 // subscribedInformer is a fake informer that reports every handler subscribed to it.

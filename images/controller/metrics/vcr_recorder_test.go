@@ -28,6 +28,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/testutil"
 	storagev1 "k8s.io/api/storage/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 	"sigs.k8s.io/controller-runtime/pkg/event"
@@ -39,6 +40,11 @@ import (
 const createdHeader = "# HELP storage_foundation_vcr_created_total " +
 	"VolumeCaptureRequests created in the cluster by mode, CSI driver and StorageClass.\n" +
 	"# TYPE storage_foundation_vcr_created_total counter\n"
+
+// durationHeader is what the exposition output of the histogram starts with. It is followed by the series.
+const durationHeader = "# HELP storage_foundation_vcr_duration_seconds " +
+	"Time from the creation of a VolumeCaptureRequest to its final status by mode, CSI driver, StorageClass and result.\n" +
+	"# TYPE storage_foundation_vcr_duration_seconds histogram\n"
 
 func TestRecorder_VCREvents(t *testing.T) {
 	t.Parallel()
@@ -84,14 +90,7 @@ func TestRecorder_VCREvents_timeout(t *testing.T) {
 	t.Parallel()
 
 	synctest.Test(t, func(t *testing.T) {
-		// The StorageClass list blocks until its ctx is done, as a cache read does while the informer does not sync.
-		funcs := interceptor.Funcs{
-			List: func(ctx context.Context, _ client.WithWatch, _ client.ObjectList, _ ...client.ListOption) error {
-				<-ctx.Done()
-				return ctx.Err()
-			},
-		}
-		r, collector := newTestRecorder(t, newVolumeReader(t, funcs))
+		r, collector := newTestRecorder(t, newVolumeReader(t, blockedListFuncs()))
 		vcr := withTarget(newVCR("a", v1alpha1.VolumeCaptureModeSnapshot), "data")
 
 		start := time.Now()
@@ -101,6 +100,96 @@ func TestRecorder_VCREvents_timeout(t *testing.T) {
 			t.Errorf("VCREvents().Create() returned after %v; want %v", got, eventTimeout)
 		}
 		want := createdHeader + createdSeries(v1alpha1.VolumeCaptureModeSnapshot, testPVDriver, "unknown", 1)
+		if err := testutil.CollectAndCompare(collector, strings.NewReader(want)); err != nil {
+			t.Errorf("CollectAndCompare() error = %v", err)
+		}
+	})
+}
+
+func TestRecorder_VCREvents_update(t *testing.T) {
+	t.Parallel()
+
+	completed := ready(metav1.ConditionTrue, v1alpha1.ConditionReasonCompleted)
+	failed := ready(metav1.ConditionFalse, v1alpha1.ConditionReasonNotFound)
+	inProgress := ready(metav1.ConditionFalse, v1alpha1.ConditionReasonTargetsPending)
+
+	tests := []struct {
+		name   string
+		oldObj client.Object
+		newObj client.Object
+		want   string
+	}{
+		{
+			name:   "success: a request that completes is observed with result completed",
+			oldObj: createdVCR(inProgress),
+			newObj: finishedVCR(completed, 7*time.Second),
+			want:   durationHeader + durationSeries(v1alpha1.VolumeCaptureModeSnapshot, testPVDriver, "fast", "completed", 7),
+		},
+		{
+			name:   "success: a request that fails is observed with result failed",
+			oldObj: createdVCR(),
+			newObj: finishedVCR(failed, 3*time.Second),
+			want:   durationHeader + durationSeries(v1alpha1.VolumeCaptureModeSnapshot, testPVDriver, "fast", "failed", 3),
+		},
+		{
+			name:   "success: a completion time before the creation time is observed as zero",
+			oldObj: createdVCR(),
+			newObj: finishedVCR(failed, -time.Second),
+			want:   durationHeader + durationSeries(v1alpha1.VolumeCaptureModeSnapshot, testPVDriver, "fast", "failed", 0),
+		},
+		{
+			name:   "success: an update of a request that is already final is not observed",
+			oldObj: finishedVCR(completed, 7*time.Second),
+			newObj: finishedVCR(completed, 7*time.Second),
+		},
+		{
+			name:   "success: an update of a request that stays pending is not observed",
+			oldObj: createdVCR(),
+			newObj: createdVCR(inProgress),
+		},
+		{
+			name:   "success: an update whose old object is not a request is not observed",
+			oldObj: newPVC("data", "fast", "pv-1"),
+			newObj: finishedVCR(completed, 7*time.Second),
+		},
+		{
+			name:   "success: an update whose new object is not a request is not observed",
+			oldObj: createdVCR(),
+			newObj: newPVC("data", "fast", "pv-1"),
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			r, collector := newTestRecorder(t, newVolumeReader(t, interceptor.Funcs{}))
+
+			r.VCREvents().Update(t.Context(), event.UpdateEvent{ObjectOld: tt.oldObj, ObjectNew: tt.newObj}, nil)
+
+			err := testutil.CollectAndCompare(collector, strings.NewReader(tt.want), "storage_foundation_vcr_duration_seconds")
+			if err != nil {
+				t.Errorf("CollectAndCompare() error = %v", err)
+			}
+		})
+	}
+}
+
+func TestRecorder_VCREvents_updateTimeout(t *testing.T) {
+	t.Parallel()
+
+	synctest.Test(t, func(t *testing.T) {
+		r, collector := newTestRecorder(t, newVolumeReader(t, blockedListFuncs()))
+		completed := ready(metav1.ConditionTrue, v1alpha1.ConditionReasonCompleted)
+		e := event.UpdateEvent{ObjectOld: createdVCR(), ObjectNew: finishedVCR(completed, 7*time.Second)}
+
+		start := time.Now()
+		r.VCREvents().Update(t.Context(), e, nil)
+
+		if got := time.Since(start); got != eventTimeout {
+			t.Errorf("VCREvents().Update() returned after %v; want %v", got, eventTimeout)
+		}
+		want := durationHeader + durationSeries(v1alpha1.VolumeCaptureModeSnapshot, testPVDriver, "unknown", "completed", 7)
 		if err := testutil.CollectAndCompare(collector, strings.NewReader(want)); err != nil {
 			t.Errorf("CollectAndCompare() error = %v", err)
 		}
@@ -148,7 +237,8 @@ func TestRecorder_countVCRCreated(t *testing.T) {
 			r, collector := newTestRecorder(t, newVolumeReader(t, tt.funcs))
 
 			for _, vcr := range tt.vcrs {
-				r.countVCRCreated(t.Context(), vcr)
+				driver, scName := r.resolveVCRDriverAndStorageClass(t.Context(), vcr)
+				r.countVCRCreated(vcr, driver, scName)
 			}
 
 			if err := testutil.CollectAndCompare(collector, strings.NewReader(tt.want)); err != nil {
@@ -202,6 +292,54 @@ func TestNewRecorder(t *testing.T) {
 func createdSeries(mode, driver, storageClass string, count int) string {
 	return fmt.Sprintf("storage_foundation_vcr_created_total{driver=%q,mode=%q,storage_class=%q} %d\n",
 		driver, mode, storageClass, count)
+}
+
+// durationSeries returns the exposition lines of one series of the histogram that holds the single observation
+// seconds, labels in the order Prometheus prints them.
+func durationSeries(mode, driver, storageClass, result string, seconds float64) string {
+	const name = "storage_foundation_vcr_duration_seconds"
+	labels := fmt.Sprintf("driver=%q,mode=%q,result=%q,storage_class=%q", driver, mode, result, storageClass)
+
+	var b strings.Builder
+	for _, bound := range durationBuckets() {
+		count := 0
+		if seconds <= bound {
+			count = 1
+		}
+		fmt.Fprintf(&b, name+`_bucket{%s,le="%g"} %d`+"\n", labels, bound, count)
+	}
+	fmt.Fprintf(&b, name+`_bucket{%s,le="+Inf"} 1`+"\n", labels)
+	fmt.Fprintf(&b, name+`_sum{%s} %g`+"\n", labels, seconds)
+	fmt.Fprintf(&b, name+`_count{%s} 1`+"\n", labels)
+
+	return b.String()
+}
+
+// createdVCR returns a Snapshot request of the PVC data made by newPVC, created at a fixed time, with conditions.
+func createdVCR(conditions ...metav1.Condition) *v1alpha1.VolumeCaptureRequest {
+	vcr := withTarget(newVCR("a", v1alpha1.VolumeCaptureModeSnapshot, conditions...), "data")
+	vcr.CreationTimestamp = metav1.NewTime(time.Date(2026, time.November, 17, 10, 0, 0, 0, time.UTC))
+
+	return vcr
+}
+
+// finishedVCR returns the request of createdVCR with the final condition cond, completed after d.
+func finishedVCR(cond metav1.Condition, d time.Duration) *v1alpha1.VolumeCaptureRequest {
+	vcr := createdVCR(cond)
+	vcr.Status.CompletionTimestamp = new(metav1.NewTime(vcr.CreationTimestamp.Add(d)))
+
+	return vcr
+}
+
+// blockedListFuncs returns funcs whose List blocks until its ctx is done, as a cache read does while the informer
+// does not sync.
+func blockedListFuncs() interceptor.Funcs {
+	return interceptor.Funcs{
+		List: func(ctx context.Context, _ client.WithWatch, _ client.ObjectList, _ ...client.ListOption) error {
+			<-ctx.Done()
+			return ctx.Err()
+		},
+	}
 }
 
 // newTestRecorder registers the recorder in a new storage and returns it and the collector of that storage.

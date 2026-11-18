@@ -82,7 +82,7 @@ type VolumeCaptureRequestController struct {
 	APIReader client.Reader // Required: for reading StorageClass directly from API server
 	Scheme    *runtime.Scheme
 	Config    *config.Options
-	Metrics   *metrics.Recorder // Required: counts the created requests
+	Metrics   *metrics.Recorder // Required: writes the metrics of request events
 }
 
 func (r *VolumeCaptureRequestController) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
@@ -599,7 +599,7 @@ func (r *VolumeCaptureRequestController) SetupWithManager(mgr ctrl.Manager) erro
 
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&storagev1alpha1.VolumeCaptureRequest{}).
-		// Counts the created requests for the metrics and enqueues nothing.
+		// Writes the metrics of request events and enqueues nothing.
 		Watches(new(storagev1alpha1.VolumeCaptureRequest), r.Metrics.VCREvents()).
 		Complete(r)
 }

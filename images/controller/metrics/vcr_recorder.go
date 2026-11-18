@@ -32,26 +32,39 @@ import (
 	"github.com/deckhouse/storage-foundation/api/v1alpha1"
 )
 
-// vcrMetrics holds the metrics of VolumeCaptureRequests that the recorder writes.
-type vcrMetrics struct {
-	created *collectors.ConstCounterCollector
+// vcrEventMetrics holds the metrics of VolumeCaptureRequest events that the recorder writes.
+type vcrEventMetrics struct {
+	created  *collectors.ConstCounterCollector
+	duration *collectors.ConstHistogramCollector
 }
 
-// registerVCRMetrics registers the metrics of VolumeCaptureRequests in st.
-func registerVCRMetrics(st *metricsstorage.MetricStorage) (vcrMetrics, error) {
+// registerVCREventMetrics registers the metrics of VolumeCaptureRequest events in st.
+func registerVCREventMetrics(st *metricsstorage.MetricStorage) (vcrEventMetrics, error) {
 	created, err := st.RegisterCounter(
 		"storage_foundation_vcr_created_total",
 		[]string{labelMode, labelDriver, labelStorageClass},
 		options.WithHelp("VolumeCaptureRequests created in the cluster by mode, CSI driver and StorageClass."),
 	)
 	if err != nil {
-		return vcrMetrics{}, fmt.Errorf("register storage_foundation_vcr_created_total: %w", err)
+		return vcrEventMetrics{}, fmt.Errorf("register storage_foundation_vcr_created_total: %w", err)
 	}
 
-	return vcrMetrics{created: created}, nil
+	duration, err := st.RegisterHistogram(
+		"storage_foundation_vcr_duration_seconds",
+		[]string{labelMode, labelDriver, labelStorageClass, labelResult},
+		durationBuckets(),
+		options.WithHelp("Time from the creation of a VolumeCaptureRequest to its final status "+
+			"by mode, CSI driver, StorageClass and result."),
+	)
+	if err != nil {
+		return vcrEventMetrics{}, fmt.Errorf("register storage_foundation_vcr_duration_seconds: %w", err)
+	}
+
+	return vcrEventMetrics{created: created, duration: duration}, nil
 }
 
-// VCREvents returns the event handler that counts the created VolumeCaptureRequests. It enqueues nothing.
+// VCREvents returns the event handler that writes the metrics of created and finished VolumeCaptureRequests.
+// It enqueues nothing.
 func (r *Recorder) VCREvents() handler.Funcs {
 	return handler.Funcs{
 		CreateFunc: func(ctx context.Context, e event.CreateEvent, _ workqueue.TypedRateLimitingInterface[reconcile.Request]) {
@@ -64,23 +77,75 @@ func (r *Recorder) VCREvents() handler.Funcs {
 			ctx, cancel := context.WithTimeout(ctx, eventTimeout)
 			defer cancel()
 
-			r.countVCRCreated(ctx, vcr)
+			driver, scName := r.resolveVCRDriverAndStorageClass(ctx, vcr)
+			r.countVCRCreated(vcr, driver, scName)
+		},
+		UpdateFunc: func(ctx context.Context, e event.UpdateEvent, _ workqueue.TypedRateLimitingInterface[reconcile.Request]) {
+			oldVCR, ok := e.ObjectOld.(*v1alpha1.VolumeCaptureRequest)
+			if !ok {
+				return
+			}
+			vcr, ok := e.ObjectNew.(*v1alpha1.VolumeCaptureRequest)
+			if !ok {
+				return
+			}
+			// Only the update that brings the final status: a resync repeats a status that is already final.
+			if vcrState(oldVCR) != statePending || vcrState(vcr) == statePending {
+				return
+			}
+
+			ctx, cancel := context.WithTimeout(ctx, eventTimeout)
+			defer cancel()
+
+			driver, scName := r.resolveVCRDriverAndStorageClass(ctx, vcr)
+			r.observeVCRDuration(vcr, driver, scName)
 		},
 	}
 }
 
-// countVCRCreated counts vcr as a created request. It reads the StorageClasses, the source PVC and the PV.
-func (r *Recorder) countVCRCreated(ctx context.Context, vcr *v1alpha1.VolumeCaptureRequest) {
+// resolveVCRDriverAndStorageClass returns the driver and storage_class labels of vcr. It reads the StorageClasses,
+// the source PVC and the PV.
+func (r *Recorder) resolveVCRDriverAndStorageClass(
+	ctx context.Context,
+	vcr *v1alpha1.VolumeCaptureRequest,
+) (driver, scName string) {
 	provisioners, err := storageClassProvisioners(ctx, r.reader)
 	if err != nil {
-		// The event does not come again, so the request is counted with an unknown StorageClass.
+		// The event does not come again, so the request is labelled with an unknown StorageClass.
 		log.FromContext(ctx).Error(err, "list StorageClasses", "namespace", vcr.Namespace, "name", vcr.Name)
 	}
 
-	driver, scName := vcrVolumeLabels(ctx, r.reader, vcr, provisioners)
+	return vcrVolumeLabels(ctx, r.reader, vcr, provisioners)
+}
+
+// countVCRCreated counts vcr as a created request.
+func (r *Recorder) countVCRCreated(vcr *v1alpha1.VolumeCaptureRequest, driver, scName string) {
 	r.vcr.created.Add(1, map[string]string{
 		labelMode:         vcrMode(vcr),
 		labelDriver:       driver,
 		labelStorageClass: scName,
 	})
+}
+
+// observeVCRDuration records the time from the creation of the finished vcr to its final status.
+func (r *Recorder) observeVCRDuration(vcr *v1alpha1.VolumeCaptureRequest, driver, scName string) {
+	seconds := vcr.Status.CompletionTimestamp.Sub(vcr.CreationTimestamp.Time).Seconds()
+	// The API server stamps the creation and the controller the completion, each by its own clock and to the second,
+	// so a request that fails at once may come out negative.
+	if seconds < 0 {
+		seconds = 0
+	}
+
+	r.vcr.duration.Observe(seconds, map[string]string{
+		labelMode:         vcrMode(vcr),
+		labelDriver:       driver,
+		labelStorageClass: scName,
+		labelResult:       vcrState(vcr),
+	})
+}
+
+// durationBuckets returns the upper bounds in seconds of the duration histogram buckets, from a request that fails
+// at once to a snapshot of a slow driver.
+func durationBuckets() []float64 {
+	return []float64{1, 2.5, 5, 10, 15, 20, 30, 45, 60, 120, 180, 240, 300, 600, 1800, 3600, 7200, 14400, 43200}
 }
