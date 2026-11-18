@@ -24,16 +24,19 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
+	kubeerrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	dynamicfake "k8s.io/client-go/dynamic/fake"
+	clienttesting "k8s.io/client-go/testing"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	dev1alpha1 "github.com/deckhouse/storage-foundation/api/v1alpha1"
@@ -110,7 +113,7 @@ func TestVerifySnapshotContentNamespace(t *testing.T) {
 		{name: "fallback to data.sourceRef namespace matches", sourceNS: "test-ns", wantNamespace: "test-ns"},
 		{name: "fallback to data.sourceRef namespace mismatches -> rejected", sourceNS: "victim-ns", wantNamespace: "test-ns", wantErr: true},
 		{name: "snapshotRef takes precedence over data.sourceRef", snapshotRefNS: "test-ns", sourceNS: "victim-ns", wantNamespace: "test-ns"},
-		{name: "no anchor recorded -> accepted", wantNamespace: "test-ns"},
+		{name: "no anchor recorded -> rejected", wantNamespace: "test-ns", wantErr: true},
 	}
 
 	for _, tt := range tests {
@@ -234,6 +237,15 @@ func TestResolveSnapshotDataArtifact_Errors(t *testing.T) {
 			name:         "content in another namespace is rejected",
 			leaf:         newSnapshotLeaf("content-xns"),
 			content:      newSnapshotContent("content-xns", "victim-ns", artifactKindVolumeSnapshotContent, "vsc1", "Filesystem"),
+			targetGroup:  "snapshot.storage.k8s.io",
+			targetKind:   "VolumeSnapshot",
+			targetName:   "leaf1",
+			wantSentinel: ErrTargetNotFound,
+		},
+		{
+			name:         "content without a namespace anchor is rejected",
+			leaf:         newSnapshotLeaf("content-noanchor"),
+			content:      newSnapshotContent("content-noanchor", "", artifactKindVolumeSnapshotContent, "vsc1", "Filesystem"),
 			targetGroup:  "snapshot.storage.k8s.io",
 			targetKind:   "VolumeSnapshot",
 			targetName:   "leaf1",
@@ -474,6 +486,7 @@ func TestGetExportPVCFromSnapshot_FormerRWXSourceExports(t *testing.T) {
 	)
 	r := newResolverReconciler(leaf, content)
 	r.Client = fake.NewClientBuilder().WithScheme(setupTestScheme()).WithObjects(exportPVC).Build()
+	serveVolumeRestoreRequestStatus(r, sourceVerified(metav1.ConditionTrue, 2))
 
 	got, err := r.getExportPVCFromSnapshot(context.Background(), de, names)
 	require.NoError(t, err, "a former ReadWriteMany source must still export")
@@ -484,6 +497,146 @@ func TestGetExportPVCFromSnapshot_FormerRWXSourceExports(t *testing.T) {
 	require.NoError(t, err)
 	_, hits := findKeyPaths(vrr.Object, staleAccessModesKey, "vrr")
 	assert.Empty(t, hits, "the VolumeRestoreRequest must carry no accessModes key")
+}
+
+func sourceVerified(status metav1.ConditionStatus, observedGeneration int64) map[string]interface{} {
+	return map[string]interface{}{
+		"type":               dev1alpha1.ConditionTypeSourceVerified,
+		"status":             string(status),
+		"reason":             dev1alpha1.ConditionReasonModuleNamespace,
+		"observedGeneration": observedGeneration,
+	}
+}
+
+func readyFalse(reason, message string) map[string]interface{} {
+	return map[string]interface{}{
+		"type":    dev1alpha1.ConditionTypeReady,
+		"status":  string(metav1.ConditionFalse),
+		"reason":  reason,
+		"message": message,
+	}
+}
+
+// serveVolumeRestoreRequestStatus makes every read of a VolumeRestoreRequest return it with the given
+// conditions, standing in for the storage-foundation controller that writes them.
+func serveVolumeRestoreRequestStatus(r *DataexportReconciler, conditions ...map[string]interface{}) {
+	dyn := r.Dynamic.(*dynamicfake.FakeDynamicClient)
+	dyn.PrependReactor("get", "volumerestorerequests", func(action clienttesting.Action) (bool, runtime.Object, error) {
+		obj, err := dyn.Tracker().Get(volumeRestoreRequestGVR, action.GetNamespace(), action.(clienttesting.GetAction).GetName())
+		if err != nil {
+			return true, nil, err
+		}
+		u := obj.(*unstructured.Unstructured).DeepCopy()
+		u.SetGeneration(2)
+		list := make([]interface{}, 0, len(conditions))
+		for _, c := range conditions {
+			list = append(list, c)
+		}
+		_ = unstructured.SetNestedSlice(u.Object, list, "status", "conditions")
+		return true, u, nil
+	})
+}
+
+func TestGetExportPVCFromSnapshot_WaitsForSourceVerified(t *testing.T) {
+	tests := []struct {
+		name         string
+		conditions   []map[string]interface{}
+		wantPVC      bool
+		wantTerminal bool
+		wantMessage  string
+	}{
+		{name: "source verified", conditions: []map[string]interface{}{sourceVerified(metav1.ConditionTrue, 2)}, wantPVC: true},
+		{name: "source not verified yet", wantMessage: "has not verified its source yet"},
+		{name: "source verified for an older generation", conditions: []map[string]interface{}{sourceVerified(metav1.ConditionTrue, 1)}, wantMessage: "has not verified its source yet"},
+		{name: "source verification false", conditions: []map[string]interface{}{sourceVerified(metav1.ConditionFalse, 2)}, wantMessage: "has not verified its source yet"},
+		{
+			name:         "source refused",
+			conditions:   []map[string]interface{}{readyFalse(dev1alpha1.ConditionReasonForeignSource, "PersistentVolume pv1 does not belong to namespace test-ns")},
+			wantTerminal: true,
+			wantMessage:  "refused its source: PersistentVolume pv1 does not belong to namespace test-ns",
+		},
+		{
+			name:         "source refused with a stale verification left",
+			conditions:   []map[string]interface{}{sourceVerified(metav1.ConditionTrue, 2), readyFalse(dev1alpha1.ConditionReasonForeignSource, "refused")},
+			wantTerminal: true,
+			wantMessage:  "refused its source",
+		},
+		{
+			name:        "restore failed otherwise",
+			conditions:  []map[string]interface{}{readyFalse(dev1alpha1.ConditionReasonNotFound, "CSI VolumeSnapshotContent vsc1 not found")},
+			wantMessage: "failed (NotFound): CSI VolumeSnapshotContent vsc1 not found",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			de := newSnapshotDataExport("snapshot.storage.k8s.io", "VolumeSnapshot", "leaf1")
+			names := common.NewNamesFromShort(dev1alpha1.KindSnapshotShort, "leaf1", de.Namespace, de.Name)
+			filesystem := corev1.PersistentVolumeFilesystem
+			exportPVC := &corev1.PersistentVolumeClaim{
+				ObjectMeta: metav1.ObjectMeta{Name: names.ExportPVCName, Namespace: testControllerNamespace},
+				Spec:       corev1.PersistentVolumeClaimSpec{VolumeMode: &filesystem},
+				Status:     corev1.PersistentVolumeClaimStatus{Phase: corev1.ClaimBound},
+			}
+			r := newResolverReconciler(newSnapshotLeaf("content1"),
+				newSnapshotContent("content1", "test-ns", artifactKindPersistentVolume, "pv1", "Filesystem"))
+			r.Client = fake.NewClientBuilder().WithScheme(setupTestScheme()).WithObjects(exportPVC).Build()
+			serveVolumeRestoreRequestStatus(r, tt.conditions...)
+
+			ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
+			defer cancel()
+			got, err := r.getExportPVCFromSnapshot(ctx, de, names)
+
+			if tt.wantPVC {
+				require.NoError(t, err)
+				require.NotNil(t, got)
+				assert.Equal(t, names.ExportPVCName, got.Name)
+				return
+			}
+			require.Error(t, err)
+			assert.Nil(t, got, "the export PVC must not be handed on before the source is verified")
+			assert.Contains(t, err.Error(), tt.wantMessage)
+
+			mutateReadyByErr(de, err)
+			ready := meta.FindStatusCondition(de.Status.Conditions, string(common.ConditionReady))
+			require.NotNil(t, ready)
+			if tt.wantTerminal {
+				assert.ErrorIs(t, err, ErrTerminal)
+				assert.Equal(t, string(common.ReasonTargetNotFound), ready.Reason)
+				assert.Equal(t, common.PhaseFailed, computeDataExportPhase(de, err))
+				return
+			}
+			assert.NotErrorIs(t, err, ErrTerminal)
+			assert.ErrorIs(t, err, ErrTargetNotReady)
+			assert.Equal(t, string(common.ReasonTargetNotReady), ready.Reason)
+			assert.Equal(t, common.PhasePending, computeDataExportPhase(de, err))
+		})
+	}
+}
+
+func TestGetExportPVCFromSnapshot_VolumeRestoreRequestGone(t *testing.T) {
+	de := newSnapshotDataExport("snapshot.storage.k8s.io", "VolumeSnapshot", "leaf1")
+	names := common.NewNamesFromShort(dev1alpha1.KindSnapshotShort, "leaf1", de.Namespace, de.Name)
+	filesystem := corev1.PersistentVolumeFilesystem
+	exportPVC := &corev1.PersistentVolumeClaim{
+		ObjectMeta: metav1.ObjectMeta{Name: names.ExportPVCName, Namespace: testControllerNamespace},
+		Spec:       corev1.PersistentVolumeClaimSpec{VolumeMode: &filesystem},
+		Status:     corev1.PersistentVolumeClaimStatus{Phase: corev1.ClaimBound},
+	}
+	r := newResolverReconciler(newSnapshotLeaf("content1"),
+		newSnapshotContent("content1", "test-ns", artifactKindPersistentVolume, "pv1", "Filesystem"))
+	r.Client = fake.NewClientBuilder().WithScheme(setupTestScheme()).WithObjects(exportPVC).Build()
+	r.Dynamic.(*dynamicfake.FakeDynamicClient).PrependReactor("get", "volumerestorerequests",
+		func(action clienttesting.Action) (bool, runtime.Object, error) {
+			return true, nil, kubeerrors.NewNotFound(volumeRestoreRequestGVR.GroupResource(), action.(clienttesting.GetAction).GetName())
+		})
+
+	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
+	defer cancel()
+	got, err := r.getExportPVCFromSnapshot(ctx, de, names)
+	assert.Nil(t, got, "the export PVC must not be handed on without a VolumeRestoreRequest that verified its source")
+	assert.ErrorIs(t, err, ErrTargetNotReady)
+	assert.NotErrorIs(t, err, ErrTerminal)
 }
 
 // TestProvisionerPatchStillDefaultsAccessModes pins the assumption this module now relies on: the

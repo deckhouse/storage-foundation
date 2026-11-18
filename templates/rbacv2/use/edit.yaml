@@ -47,26 +47,6 @@ rules:
   - deletecollection
   - patch
   - update
-- apiGroups:
-  - storage-foundation.deckhouse.io
-  resources:
-  - volumecapturerequests
-  verbs:
-  - create
-  - delete
-  - deletecollection
-  - patch
-  - update
-- apiGroups:
-  - storage-foundation.deckhouse.io
-  resources:
-  - volumerestorerequests
-  verbs:
-  - create
-  - delete
-  - deletecollection
-  - patch
-  - update
 {{- else }}
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
@@ -81,8 +61,6 @@ rules:
   - apiGroups:
       - storage-foundation.deckhouse.io
     resources:
-      - volumecapturerequests
-      - volumerestorerequests
       - dataexports
       - dataimports
     verbs:

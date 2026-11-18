@@ -26,6 +26,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/wait"
@@ -214,15 +215,16 @@ func (r *DataexportReconciler) resolveSnapshotDataArtifact(ctx context.Context, 
 }
 
 // verifySnapshotContentNamespace enforces that the cluster-scoped SnapshotContent belongs to the given
-// namespace via its controller-written back-references. A present anchor that disagrees is a hard reject
-// (cross-namespace exfiltration attempt); when no anchor is recorded the check cannot run and the content
-// is accepted (the binding still had to come from a leaf in the caller's own namespace).
+// namespace via its controller-written back-references. An anchor that disagrees is a hard reject
+// (cross-namespace exfiltration attempt), and so is a content with no anchor recorded at all: the
+// binding pointer comes from a leaf the caller can write, and the VolumeRestoreRequest this export
+// creates in the module namespace is checked against the namespace this function vouches for.
 func verifySnapshotContentNamespace(content *unstructured.Unstructured, contentName, wantNamespace string) error {
 	anchorNS, _, _ := unstructured.NestedString(content.Object, "spec", "snapshotRef", "namespace")
 	if anchorNS == "" {
 		anchorNS, _, _ = unstructured.NestedString(content.Object, "status", "data", "sourceRef", "namespace")
 	}
-	if anchorNS != "" && anchorNS != wantNamespace {
+	if anchorNS != wantNamespace {
 		return fmt.Errorf("SnapshotContent %s belongs to namespace %q, not %q: target does not belong to this namespace: %w",
 			contentName, anchorNS, wantNamespace, ErrTargetNotFound)
 	}
@@ -243,7 +245,7 @@ func (r *DataexportReconciler) getExportPVCFromSnapshot(ctx context.Context, dat
 		return nil, err
 	}
 
-	return r.waitForExportPVC(ctx, generatedNames.ExportPVCName)
+	return r.waitForExportPVC(ctx, volumeRestoreRequestName(generatedNames), generatedNames.ExportPVCName)
 }
 
 // volumeRestoreRequestName is the deterministic per-DataExport VRR name (keyed to the export hash so it
@@ -339,15 +341,52 @@ func (r *DataexportReconciler) deleteVolumeRestoreRequest(ctx context.Context, _
 	return nil
 }
 
-// waitForExportPVC waits for the export PVC the VRR provisions to exist and bind. If it never binds
-// within the poll window it returns ErrTargetNotReady so the reconcile requeues (the VRR is already
-// created, so the next pass just re-polls). A PVC that exists with a VolumeMode but is not yet Bound is
-// still returned (the exporter pod tolerates a pending bind), so progress is not blocked indefinitely.
-func (r *DataexportReconciler) waitForExportPVC(ctx context.Context, exportPVCName string) (*corev1.PersistentVolumeClaim, error) {
+// volumeRestoreRequestVerified reports whether the storage-foundation controller has accepted the source
+// of the export's VolumeRestoreRequest (SourceVerified=True for its current generation). A request the
+// controller refused as ForeignSource is a terminal failure of the export.
+func (r *DataexportReconciler) volumeRestoreRequestVerified(ctx context.Context, name string) (bool, error) {
+	u, err := r.Dynamic.Resource(volumeRestoreRequestGVR).Namespace(r.Config.ControllerNamespace).Get(ctx, name, metav1.GetOptions{})
+	if err != nil {
+		if kubeerrors.IsNotFound(err) {
+			return false, nil
+		}
+		return false, fmt.Errorf("get VolumeRestoreRequest %s: %w", name, err)
+	}
+	vrr := &dev1alpha1.VolumeRestoreRequest{}
+	if err := runtime.DefaultUnstructuredConverter.FromUnstructured(u.UnstructuredContent(), vrr); err != nil {
+		return false, fmt.Errorf("convert VolumeRestoreRequest %s: %w", name, err)
+	}
+
+	if ready := meta.FindStatusCondition(vrr.Status.Conditions, dev1alpha1.ConditionTypeReady); ready != nil && ready.Status == metav1.ConditionFalse {
+		if ready.Reason == dev1alpha1.ConditionReasonForeignSource {
+			return false, fmt.Errorf("%w: %w: the snapshot data cannot be exported: VolumeRestoreRequest %s refused its source: %s",
+				ErrTerminal, ErrTargetNotFound, name, ready.Message)
+		}
+		return false, fmt.Errorf("VolumeRestoreRequest %s failed (%s): %s: %w", name, ready.Reason, ready.Message, ErrTargetNotReady)
+	}
+
+	verified := meta.FindStatusCondition(vrr.Status.Conditions, dev1alpha1.ConditionTypeSourceVerified)
+	return verified != nil && verified.Status == metav1.ConditionTrue && verified.ObservedGeneration == vrr.Generation, nil
+}
+
+// waitForExportPVC waits for the VRR to have its source verified and for the export PVC it provisions to
+// exist and bind. If it never binds within the poll window it returns ErrTargetNotReady so the reconcile
+// requeues (the VRR is already created, so the next pass just re-polls). A PVC that exists with a
+// VolumeMode but is not yet Bound is still returned once the source is verified (the exporter pod
+// tolerates a pending bind), so progress is not blocked indefinitely.
+func (r *DataexportReconciler) waitForExportPVC(ctx context.Context, vrrName, exportPVCName string) (*corev1.PersistentVolumeClaim, error) {
 	key := types.NamespacedName{Namespace: r.Config.ControllerNamespace, Name: exportPVCName}
 	exportPVC := &corev1.PersistentVolumeClaim{}
+	verified := false
 
 	pollErr := wait.PollUntilContextTimeout(ctx, snapshotExportPollInterval, snapshotExportPollTimeout, true, func(ctx context.Context) (bool, error) {
+		ok, err := r.volumeRestoreRequestVerified(ctx, vrrName)
+		if err != nil {
+			return false, err
+		}
+		if verified = ok; !verified {
+			return false, nil
+		}
 		if err := r.Client.Get(ctx, key, exportPVC); err != nil {
 			if kubeerrors.IsNotFound(err) {
 				return false, nil
@@ -361,6 +400,12 @@ func (r *DataexportReconciler) waitForExportPVC(ctx context.Context, exportPVCNa
 	})
 	if pollErr == nil {
 		return exportPVC, nil
+	}
+	if !verified {
+		if !wait.Interrupted(pollErr) {
+			return nil, pollErr
+		}
+		return nil, fmt.Errorf("VolumeRestoreRequest %s has not verified its source yet: %w", vrrName, ErrTargetNotReady)
 	}
 
 	// Timed out waiting for Bound: if the PVC at least exists and is shaped (VolumeMode set), hand it on

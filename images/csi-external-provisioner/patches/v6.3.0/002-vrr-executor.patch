@@ -1,5 +1,5 @@
 diff --git a/cmd/csi-provisioner/csi-provisioner.go b/cmd/csi-provisioner/csi-provisioner.go
-index 9529fd3..d806086 100644
+index 9529fd3..d7a647d 100644
 --- a/cmd/csi-provisioner/csi-provisioner.go
 +++ b/cmd/csi-provisioner/csi-provisioner.go
 @@ -30,6 +30,7 @@ import (
@@ -75,7 +75,7 @@ index 9529fd3..d806086 100644
  	// Setup options
  	provisionerOptions := []func(*controller.ProvisionController) error{
  		controller.LeaderElection(false), // Always disable leader election in provisioner lib. Leader election should be done here in the CSI provisioner level instead.
-@@ -647,6 +686,28 @@ func main() {
+@@ -647,6 +686,29 @@ func main() {
  		}
  	}
  
@@ -88,6 +88,7 @@ index 9529fd3..d806086 100644
 +		clientset,
 +		csi.NewControllerClient(grpcClient),
 +		snapClient,
++		dynamicClient,
 +		provisionerName,
 +		identity,
 +		*operationTimeout,
@@ -104,7 +105,7 @@ index 9529fd3..d806086 100644
  	// handle SIGTERM and SIGINT by cancelling the context.
  	var (
  		terminate       func()          // called when all controllers are finished
-@@ -681,12 +742,20 @@ func main() {
+@@ -681,12 +743,20 @@ func main() {
  		if topologyInformer != nil {
  			go topologyInformer.RunWorker(ctx)
  		}
@@ -289,10 +290,10 @@ index 6ef3c9f..617f978 100644
  golang.org/x/xerrors v0.0.0-20191204190536-9bdfabe68543/go.mod h1:I/5z698sn9Ka8TeJc9MKroUUfqBBauWjQqLJ2OPfmY0=
 diff --git a/pkg/controller/vrr_handler.go b/pkg/controller/vrr_handler.go
 new file mode 100644
-index 0000000..b874137
+index 0000000..fdc6e27
 --- /dev/null
 +++ b/pkg/controller/vrr_handler.go
-@@ -0,0 +1,1048 @@
+@@ -0,0 +1,1110 @@
 +/*
 +Copyright 2025 Flant JSC
 +
@@ -313,6 +314,7 @@ index 0000000..b874137
 +
 +import (
 +	"context"
++	"errors"
 +	"fmt"
 +	"maps"
 +	"strings"
@@ -329,8 +331,10 @@ index 0000000..b874137
 +	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 +	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 +	"k8s.io/apimachinery/pkg/runtime"
++	"k8s.io/apimachinery/pkg/runtime/schema"
 +	"k8s.io/apimachinery/pkg/types"
 +	"k8s.io/apimachinery/pkg/util/wait"
++	"k8s.io/client-go/dynamic"
 +	"k8s.io/client-go/kubernetes"
 +	storagelistersv1 "k8s.io/client-go/listers/storage/v1"
 +	"k8s.io/client-go/tools/cache"
@@ -348,6 +352,14 @@ index 0000000..b874137
 +// defaultVolumeCapacityBytes is the last-resort volume size used when neither the VRR nor the
 +// source reports one.
 +const defaultVolumeCapacityBytes int64 = 1024 * 1024 * 1024
++
++var vrrResource = schema.GroupVersionResource{
++	Group:    "storage-foundation.deckhouse.io",
++	Version:  "v1alpha1",
++	Resource: "volumerestorerequests",
++}
++
++var errVRRNotRestorable = errors.New("VolumeRestoreRequest is no longer restorable")
 +
 +// VRRExecutor is the low-level executor of VolumeRestoreRequest (VRR) restore operations.
 +//
@@ -368,6 +380,7 @@ index 0000000..b874137
 +	kubeClient             kubernetes.Interface
 +	csiClient              csi.ControllerClient
 +	snapshotClient         snapclientset.Interface
++	vrrClient              dynamic.Interface
 +	driverName             string
 +	identity               string
 +	timeout                time.Duration
@@ -391,6 +404,7 @@ index 0000000..b874137
 +	kubeClient kubernetes.Interface,
 +	csiClient csi.ControllerClient,
 +	snapshotClient snapclientset.Interface,
++	vrrClient dynamic.Interface,
 +	driverName string,
 +	identity string,
 +	timeout time.Duration,
@@ -407,6 +421,7 @@ index 0000000..b874137
 +		kubeClient:             kubeClient,
 +		csiClient:              csiClient,
 +		snapshotClient:         snapshotClient,
++		vrrClient:              vrrClient,
 +		driverName:             driverName,
 +		identity:               identity,
 +		timeout:                timeout,
@@ -663,6 +678,12 @@ index 0000000..b874137
 +		return fmt.Errorf("VolumeSnapshotContent %s is currently being deleted", vsc.Name)
 +	}
 +
++	if !vrrSourceVerified(vrr) {
++		klog.V(2).Infof("VRR %s/%s: VolumeSnapshotContent %s is not verified for namespace %s, waiting for the controller",
++			vrr.Namespace, vrr.Name, vsc.Name, vrr.Namespace)
++		return nil
++	}
++
 +	if vsc.Status == nil || vsc.Status.ReadyToUse == nil || !*vsc.Status.ReadyToUse {
 +		if vsc.Status != nil && vsc.Status.Error != nil && vsc.Status.Error.Message != nil {
 +			return fmt.Errorf("VolumeSnapshotContent %s has error: %s", vsc.Name, *vsc.Status.Error.Message)
@@ -719,6 +740,9 @@ index 0000000..b874137
 +
 +	pv, err := e.ensurePV(ctx, vrr, sc, csiParameters, secretRefs, pvName, volumeCaps, capacityBytes, contentSource, e.resolveFSType(vrr),
 +		fmt.Sprintf("Successfully created PV %s from snapshot", pvName), effectiveAccessModes(vrr))
++	if errors.Is(err, errVRRNotRestorable) {
++		return nil
++	}
 +	if err != nil {
 +		return err
 +	}
@@ -862,6 +886,12 @@ index 0000000..b874137
 +	if sourcePV.ObjectMeta.DeletionTimestamp != nil {
 +		return fmt.Errorf("PersistentVolume %s is currently being deleted", sourcePV.Name)
 +	}
++
++	if !vrrSourceVerified(vrr) {
++		klog.V(2).Infof("VRR %s/%s: PersistentVolume %s is not verified for namespace %s, waiting for the controller",
++			vrr.Namespace, vrr.Name, sourcePV.Name, vrr.Namespace)
++		return nil
++	}
 +	if sourcePV.Spec.CSI == nil {
 +		return fmt.Errorf("PersistentVolume %s does not have CSI source", sourcePV.Name)
 +	}
@@ -901,6 +931,9 @@ index 0000000..b874137
 +
 +	pv, err := e.ensurePV(ctx, vrr, sc, csiParameters, secretRefs, pvName, volumeCaps, capacityBytes, contentSource, e.getFSTypeFromPV(sourcePV),
 +		fmt.Sprintf("Successfully created PV %s from PersistentVolume %s", pvName, sourcePV.Name), sourcePV.Spec.AccessModes)
++	if errors.Is(err, errVRRNotRestorable) {
++		return nil
++	}
 +	if err != nil {
 +		return err
 +	}
@@ -943,6 +976,10 @@ index 0000000..b874137
 +		return existingPV, nil
 +	} else if !apierrors.IsNotFound(err) {
 +		return nil, fmt.Errorf("failed to check if PV %s exists: %w", pvName, err)
++	}
++
++	if err := e.checkRestorable(ctx, vrr); err != nil {
++		return nil, err
 +	}
 +
 +	provisionerCredentials, err := getCredentials(ctx, e.kubeClient, secretRefs.provisioner)
@@ -1335,6 +1372,32 @@ index 0000000..b874137
 +	return e.defaultFSType
 +}
 +
++func (e *VRRExecutor) checkRestorable(ctx context.Context, vrr *storagev1alpha1.VolumeRestoreRequest) error {
++	u, err := e.vrrClient.Resource(vrrResource).Namespace(vrr.Namespace).Get(ctx, vrr.Name, metav1.GetOptions{})
++	if err != nil {
++		if apierrors.IsNotFound(err) {
++			klog.V(2).Infof("VRR %s/%s is gone, not restoring", vrr.Namespace, vrr.Name)
++			return errVRRNotRestorable
++		}
++		return fmt.Errorf("failed to re-read VolumeRestoreRequest %s/%s: %w", vrr.Namespace, vrr.Name, err)
++	}
++	current := &storagev1alpha1.VolumeRestoreRequest{}
++	if err := runtime.DefaultUnstructuredConverter.FromUnstructured(u.UnstructuredContent(), current); err != nil {
++		return fmt.Errorf("failed to convert VolumeRestoreRequest %s/%s: %w", vrr.Namespace, vrr.Name, err)
++	}
++	if current.UID != vrr.UID || current.Generation != vrr.Generation ||
++		isTerminalVRR(current.Status.Conditions) || !vrrSourceVerified(current) {
++		klog.V(2).Infof("VRR %s/%s changed or is no longer verified, not restoring", vrr.Namespace, vrr.Name)
++		return errVRRNotRestorable
++	}
++	return nil
++}
++
++func vrrSourceVerified(vrr *storagev1alpha1.VolumeRestoreRequest) bool {
++	cond := meta.FindStatusCondition(vrr.Status.Conditions, storagev1alpha1.ConditionTypeSourceVerified)
++	return cond != nil && cond.Status == metav1.ConditionTrue && cond.ObservedGeneration == vrr.Generation
++}
++
 +// isTerminalVRR reports whether the VRR is in a terminal state (Ready=True or Ready=False).
 +// This is a read-only optimization; the executor never writes VRR status.
 +func isTerminalVRR(conditions []metav1.Condition) bool {
@@ -1343,10 +1406,10 @@ index 0000000..b874137
 +}
 diff --git a/pkg/controller/vrr_handler_test.go b/pkg/controller/vrr_handler_test.go
 new file mode 100644
-index 0000000..10cbca2
+index 0000000..eb76747
 --- /dev/null
 +++ b/pkg/controller/vrr_handler_test.go
-@@ -0,0 +1,1922 @@
+@@ -0,0 +1,2202 @@
 +/*
 +Copyright 2025 Flant JSC
 +
@@ -1382,9 +1445,12 @@ index 0000000..10cbca2
 +	apierrors "k8s.io/apimachinery/pkg/api/errors"
 +	"k8s.io/apimachinery/pkg/api/resource"
 +	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
++	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 +	"k8s.io/apimachinery/pkg/labels"
 +	"k8s.io/apimachinery/pkg/runtime"
++	"k8s.io/apimachinery/pkg/runtime/schema"
 +	"k8s.io/apimachinery/pkg/types"
++	dynamicfake "k8s.io/client-go/dynamic/fake"
 +	"k8s.io/client-go/kubernetes"
 +	fakeclientset "k8s.io/client-go/kubernetes/fake"
 +	storagelistersv1 "k8s.io/client-go/listers/storage/v1"
@@ -1454,7 +1520,7 @@ index 0000000..10cbca2
 +			e := newTestExecutor(mockCSIClient, mockSCLister, kubeClient, nil, nil)
 +
 +			vrr := createTestVRR("test-vrr", "test-ns", "VolumeSnapshotContent", "test-vsc")
-+			if err := e.reconcile(context.Background(), vrr); err != nil {
++			if err := reconcileVRR(t, e, vrr); err != nil {
 +				t.Fatalf("reconcile returned unexpected error: %v", err)
 +			}
 +
@@ -1477,7 +1543,7 @@ index 0000000..10cbca2
 +	eventRecorder := record.NewFakeRecorder(10)
 +	e := newTestExecutor(mockCSIClient, mockSCLister, kubeClient, nil, eventRecorder)
 +
-+	if err := e.reconcile(context.Background(), vrr); err != nil {
++	if err := reconcileVRR(t, e, vrr); err != nil {
 +		t.Fatalf("reconcile returned unexpected error: %v", err)
 +	}
 +
@@ -1503,7 +1569,7 @@ index 0000000..10cbca2
 +
 +	// Unsupported source is a permanent condition for the executor; it must not
 +	// return an error (no retry) and must leave terminal decision to the controller.
-+	if err := e.reconcile(context.Background(), vrr); err != nil {
++	if err := reconcileVRR(t, e, vrr); err != nil {
 +		t.Fatalf("reconcile should not return an error for unsupported source kind: %v", err)
 +	}
 +	if !waitForEvent(eventRecorder, "VRRInvalidSource") {
@@ -1533,7 +1599,7 @@ index 0000000..10cbca2
 +	kubeClient := fakeclientset.NewSimpleClientset()
 +	e := newTestExecutor(mockCSIClient, mockSCLister, kubeClient, nil, nil)
 +
-+	if err := e.reconcile(context.Background(), vrr); err != nil {
++	if err := reconcileVRR(t, e, vrr); err != nil {
 +		t.Fatalf("reconcile returned unexpected error: %v", err)
 +	}
 +	assertNoPVC(t, kubeClient)
@@ -1560,7 +1626,7 @@ index 0000000..10cbca2
 +	kubeClient := fakeclientset.NewSimpleClientset(existingPVC)
 +	e := newTestExecutor(mockCSIClient, mockSCLister, kubeClient, nil, nil)
 +
-+	if err := e.reconcile(context.Background(), vrr); err != nil {
++	if err := reconcileVRR(t, e, vrr); err != nil {
 +		t.Fatalf("reconcile returned unexpected error: %v", err)
 +	}
 +}
@@ -1589,7 +1655,7 @@ index 0000000..10cbca2
 +	eventRecorder := record.NewFakeRecorder(10)
 +	e := newTestExecutor(mockCSIClient, mockSCLister, kubeClient, nil, eventRecorder)
 +
-+	if err := e.reconcile(context.Background(), vrr); err != nil {
++	if err := reconcileVRR(t, e, vrr); err != nil {
 +		t.Fatalf("reconcile should not return an error on conflict (controller decides terminal): %v", err)
 +	}
 +	if !waitForEvent(eventRecorder, "VRRTargetPVCConflict") {
@@ -1623,7 +1689,7 @@ index 0000000..10cbca2
 +	}
 +
 +	e := newTestExecutor(mockCSIClient, mockSCLister, kubeClient, snapshotClient, nil)
-+	if err := e.reconcile(context.Background(), vrr); err != nil {
++	if err := reconcileVRR(t, e, vrr); err != nil {
 +		t.Fatalf("reconcile failed: %v", err)
 +	}
 +
@@ -1652,7 +1718,7 @@ index 0000000..10cbca2
 +	eventRecorder := record.NewFakeRecorder(10)
 +	e := newTestExecutor(mockCSIClient, mockSCLister, kubeClient, nil, eventRecorder)
 +
-+	if err := e.reconcile(context.Background(), vrr); err != nil {
++	if err := reconcileVRR(t, e, vrr); err != nil {
 +		t.Fatalf("reconcile should not return an error for empty VolumeMode (controller decides terminal): %v", err)
 +	}
 +	if !waitForEvent(eventRecorder, "VRRInvalidSpec") {
@@ -1695,7 +1761,7 @@ index 0000000..10cbca2
 +	}
 +
 +	e := newTestExecutor(mockCSIClient, mockSCLister, kubeClient, snapshotClient, nil)
-+	if err := e.reconcile(context.Background(), vrr); err != nil {
++	if err := reconcileVRR(t, e, vrr); err != nil {
 +		t.Fatalf("reconcile failed: %v", err)
 +	}
 +
@@ -1720,7 +1786,7 @@ index 0000000..10cbca2
 +	e, kubeClient := vscErrorExecutor(t, snapfake.NewSimpleClientset()) // empty: VSC missing
 +	vrr := createTestVRR("test-vrr", "test-ns", "VolumeSnapshotContent", "non-existent-vsc")
 +
-+	err := e.reconcile(context.Background(), vrr)
++	err := reconcileVRR(t, e, vrr)
 +	if err == nil || !strings.Contains(err.Error(), "not found") {
 +		t.Fatalf("Expected retryable 'not found' error, got: %v", err)
 +	}
@@ -1730,12 +1796,13 @@ index 0000000..10cbca2
 +func TestReconcile_FromVSC_NotReady(t *testing.T) {
 +	vsc := &crdv1.VolumeSnapshotContent{
 +		ObjectMeta: metav1.ObjectMeta{Name: "test-vsc"},
++		Spec:       crdv1.VolumeSnapshotContentSpec{VolumeSnapshotRef: v1.ObjectReference{Namespace: vrrTestTargetNamespace}},
 +		Status:     &crdv1.VolumeSnapshotContentStatus{ReadyToUse: boolPtr(false)},
 +	}
 +	e, kubeClient := vscErrorExecutor(t, snapfake.NewSimpleClientset(vsc))
 +	vrr := createTestVRR("test-vrr", "test-ns", "VolumeSnapshotContent", "test-vsc")
 +
-+	err := e.reconcile(context.Background(), vrr)
++	err := reconcileVRR(t, e, vrr)
 +	if err == nil || !strings.Contains(err.Error(), "not ReadyToUse") {
 +		t.Fatalf("Expected retryable 'not ReadyToUse' error, got: %v", err)
 +	}
@@ -1765,7 +1832,7 @@ index 0000000..10cbca2
 +	}
 +
 +	e := newTestExecutor(mockCSIClient, mockSCLister, kubeClient, snapshotClient, nil)
-+	if err := e.reconcile(context.Background(), vrr); err != nil {
++	if err := reconcileVRR(t, e, vrr); err != nil {
 +		t.Fatalf("reconcile failed: %v", err)
 +	}
 +	assertPVCBoundTo(t, kubeClient, pvName)
@@ -1820,7 +1887,7 @@ index 0000000..10cbca2
 +
 +			eventRecorder := record.NewFakeRecorder(10)
 +			e := newTestExecutor(mockCSIClient, mockSCLister, kubeClient, snapshotClient, eventRecorder)
-+			if err := e.reconcile(context.Background(), vrr); err != nil {
++			if err := reconcileVRR(t, e, vrr); err != nil {
 +				t.Fatalf("reconcile failed: %v", err)
 +			}
 +			assertPVCBoundTo(t, kubeClient, pvName)
@@ -1871,7 +1938,7 @@ index 0000000..10cbca2
 +	}
 +
 +	e := newTestExecutor(mockCSIClient, mockSCLister, kubeClient, nil, nil)
-+	if err := e.reconcile(context.Background(), vrr); err != nil {
++	if err := reconcileVRR(t, e, vrr); err != nil {
 +		t.Fatalf("reconcile failed: %v", err)
 +	}
 +
@@ -1894,6 +1961,7 @@ index 0000000..10cbca2
 +			PersistentVolumeSource: v1.PersistentVolumeSource{
 +				CSI: &v1.CSIPersistentVolumeSource{Driver: "other-driver", VolumeHandle: vrrTestVolumeHandle},
 +			},
++			ClaimRef: &v1.ObjectReference{Namespace: vrrTestTargetNamespace},
 +		},
 +	}
 +
@@ -1901,7 +1969,7 @@ index 0000000..10cbca2
 +	mockCSIClient := &mockControllerClient{}
 +
 +	e := newTestExecutor(mockCSIClient, mockSCLister, kubeClient, nil, nil)
-+	err := e.reconcile(context.Background(), vrr)
++	err := reconcileVRR(t, e, vrr)
 +	if err == nil || !strings.Contains(err.Error(), "different CSI driver") {
 +		t.Fatalf("Expected 'different CSI driver' error, got: %v", err)
 +	}
@@ -2275,7 +2343,7 @@ index 0000000..10cbca2
 +	eventRecorder := record.NewFakeRecorder(10)
 +	e := newTestExecutor(mockCSIClient, mockSCLister, kubeClient, nil, eventRecorder)
 +
-+	if err := e.reconcile(context.Background(), vrr); err != nil {
++	if err := reconcileVRR(t, e, vrr); err != nil {
 +		t.Fatalf("reconcile should not return an error for invalid accessModes: %v", err)
 +	}
 +	if !waitForEvent(eventRecorder, "VRRInvalidSpec") {
@@ -2390,7 +2458,7 @@ index 0000000..10cbca2
 +			eventRecorder := record.NewFakeRecorder(10)
 +			e := newTestExecutor(mockCSIClient, mockSCLister, kubeClient, snapshotClient, eventRecorder)
 +
-+			if err := e.reconcile(context.Background(), vrr); err != nil {
++			if err := reconcileVRR(t, e, vrr); err != nil {
 +				t.Fatalf("reconcile returned unexpected error: %v", err)
 +			}
 +
@@ -2510,7 +2578,7 @@ index 0000000..10cbca2
 +			}
 +
 +			e := newTestExecutor(mockCSIClient, mockSCLister, kubeClient, snapshotClient, nil)
-+			if err := e.reconcile(context.Background(), vrr); err != nil {
++			if err := reconcileVRR(t, e, vrr); err != nil {
 +				t.Fatalf("reconcile failed: %v", err)
 +			}
 +
@@ -2689,7 +2757,7 @@ index 0000000..10cbca2
 +
 +			eventRecorder := record.NewFakeRecorder(10)
 +			e := newTestExecutor(mockCSIClient, mockSCLister, kubeClient, snapshotClient, eventRecorder)
-+			if err := e.reconcile(context.Background(), vrr); err != nil {
++			if err := reconcileVRR(t, e, vrr); err != nil {
 +				t.Fatalf("reconcile failed: %v", err)
 +			}
 +
@@ -2809,7 +2877,7 @@ index 0000000..10cbca2
 +			}
 +
 +			e := newTestExecutor(mockCSIClient, mockSCLister, kubeClient, snapshotClient, nil)
-+			if err := e.reconcile(context.Background(), vrr); err != nil {
++			if err := reconcileVRR(t, e, vrr); err != nil {
 +				t.Fatalf("reconcile failed: %v", err)
 +			}
 +
@@ -2895,7 +2963,7 @@ index 0000000..10cbca2
 +			}
 +
 +			e := newTestExecutor(mockCSIClient, mockSCLister, kubeClient, nil, nil)
-+			if err := e.reconcile(context.Background(), vrr); err != nil {
++			if err := reconcileVRR(t, e, vrr); err != nil {
 +				t.Fatalf("reconcile failed: %v", err)
 +			}
 +
@@ -3001,10 +3069,13 @@ index 0000000..10cbca2
 +	if eventRecorder == nil {
 +		eventRecorder = record.NewFakeRecorder(10)
 +	}
++	vrrClient := dynamicfake.NewSimpleDynamicClientWithCustomListKinds(runtime.NewScheme(),
++		map[schema.GroupVersionResource]string{vrrResource: "VolumeRestoreRequestList"})
 +	return &VRRExecutor{
 +		kubeClient:             kubeClient,
 +		csiClient:              csiClient,
 +		snapshotClient:         snapshotClient,
++		vrrClient:              vrrClient,
 +		driverName:             vrrTestDriverName,
 +		identity:               vrrTestIdentity,
 +		timeout:                vrrTestTimeout,
@@ -3017,6 +3088,31 @@ index 0000000..10cbca2
 +		controllerCapabilities: rpc.ControllerCapabilitySet{},
 +		vrrIndexer:             cache.NewIndexer(cache.MetaNamespaceKeyFunc, cache.Indexers{}),
 +	}
++}
++
++func storeVRR(t *testing.T, e *VRRExecutor, vrr *storagev1alpha1.VolumeRestoreRequest) {
++	t.Helper()
++	content, err := runtime.DefaultUnstructuredConverter.ToUnstructured(vrr)
++	if err != nil {
++		t.Fatalf("failed to convert VRR: %v", err)
++	}
++	u := &unstructured.Unstructured{Object: content}
++	u.SetAPIVersion(vrrResource.GroupVersion().String())
++	u.SetKind("VolumeRestoreRequest")
++	client := e.vrrClient.Resource(vrrResource).Namespace(vrr.Namespace)
++	_, err = client.Create(context.Background(), u, metav1.CreateOptions{})
++	if apierrors.IsAlreadyExists(err) {
++		_, err = client.Update(context.Background(), u, metav1.UpdateOptions{})
++	}
++	if err != nil {
++		t.Fatalf("failed to store VRR: %v", err)
++	}
++}
++
++func reconcileVRR(t *testing.T, e *VRRExecutor, vrr *storagev1alpha1.VolumeRestoreRequest) error {
++	t.Helper()
++	storeVRR(t, e, vrr)
++	return e.reconcile(context.Background(), vrr)
 +}
 +
 +// vscErrorExecutor builds an executor for VSC error-path tests (our SC present, VSC source).
@@ -3040,7 +3136,10 @@ index 0000000..10cbca2
 +func readyVSC(name, handle string) *crdv1.VolumeSnapshotContent {
 +	return &crdv1.VolumeSnapshotContent{
 +		ObjectMeta: metav1.ObjectMeta{Name: name},
-+		Spec:       crdv1.VolumeSnapshotContentSpec{Driver: vrrTestDriverName},
++		Spec: crdv1.VolumeSnapshotContentSpec{
++			Driver:            vrrTestDriverName,
++			VolumeSnapshotRef: v1.ObjectReference{Namespace: vrrTestTargetNamespace, Name: name},
++		},
 +		Status: &crdv1.VolumeSnapshotContentStatus{
 +			ReadyToUse:     boolPtr(true),
 +			SnapshotHandle: stringPtr(handle),
@@ -3059,6 +3158,7 @@ index 0000000..10cbca2
 +			PersistentVolumeSource: v1.PersistentVolumeSource{
 +				CSI: &v1.CSIPersistentVolumeSource{Driver: vrrTestDriverName, VolumeHandle: handle, FSType: "ext4"},
 +			},
++			ClaimRef: &v1.ObjectReference{Namespace: vrrTestTargetNamespace, Name: name},
 +		},
 +	}
 +}
@@ -3159,6 +3259,13 @@ index 0000000..10cbca2
 +					VolumeMode:       &fsMode,
 +				},
 +			},
++		},
++		Status: storagev1alpha1.VolumeRestoreRequestStatus{
++			Conditions: []metav1.Condition{{
++				Type:   storagev1alpha1.ConditionTypeSourceVerified,
++				Status: metav1.ConditionTrue,
++				Reason: storagev1alpha1.ConditionReasonSourceInNamespace,
++			}},
 +		},
 +	}
 +}
@@ -3268,4 +3375,240 @@ index 0000000..10cbca2
 +		result = append(result, sc)
 +	}
 +	return result, nil
++}
++
++func TestReconcile_SourceNamespace(t *testing.T) {
++	const foreignNamespace = "other-ns"
++
++	verified := func(status metav1.ConditionStatus, generation int64) []metav1.Condition {
++		return []metav1.Condition{{
++			Type:               storagev1alpha1.ConditionTypeSourceVerified,
++			Status:             status,
++			Reason:             storagev1alpha1.ConditionReasonModuleNamespace,
++			ObservedGeneration: generation,
++		}}
++	}
++	vscIn := func(namespace string) *crdv1.VolumeSnapshotContent {
++		vsc := readyVSC("source", vrrTestSnapshotHandle)
++		vsc.Spec.VolumeSnapshotRef = v1.ObjectReference{Namespace: namespace}
++		return vsc
++	}
++	pvIn := func(namespace string) *v1.PersistentVolume {
++		pv := csiPV("source", vrrTestVolumeHandle)
++		pv.Spec.ClaimRef = nil
++		if namespace != "" {
++			pv.Spec.ClaimRef = &v1.ObjectReference{Namespace: namespace, Name: "claim"}
++		}
++		return pv
++	}
++
++	tests := []struct {
++		name        string
++		vsc         *crdv1.VolumeSnapshotContent
++		pv          *v1.PersistentVolume
++		conditions  []metav1.Condition
++		wantRestore bool
++	}{
++		{name: "snapshot of the request namespace not verified yet", vsc: vscIn(vrrTestTargetNamespace)},
++		{name: "snapshot of the request namespace verified by the controller", vsc: vscIn(vrrTestTargetNamespace), conditions: verified(metav1.ConditionTrue, 2), wantRestore: true},
++		{name: "snapshot of the request namespace verified for an older generation", vsc: vscIn(vrrTestTargetNamespace), conditions: verified(metav1.ConditionTrue, 1)},
++		{name: "snapshot of another namespace", vsc: vscIn(foreignNamespace)},
++		{name: "unbound snapshot", vsc: vscIn("")},
++		{name: "snapshot of another namespace verified by the controller", vsc: vscIn(foreignNamespace), conditions: verified(metav1.ConditionTrue, 2), wantRestore: true},
++		{name: "unbound snapshot verified by the controller", vsc: vscIn(""), conditions: verified(metav1.ConditionTrue, 2), wantRestore: true},
++		{name: "unbound snapshot verified for an older generation", vsc: vscIn(""), conditions: verified(metav1.ConditionTrue, 1)},
++		{name: "unbound snapshot not verified", vsc: vscIn(""), conditions: verified(metav1.ConditionFalse, 2)},
++		{name: "volume of the request namespace not verified yet", pv: pvIn(vrrTestTargetNamespace)},
++		{name: "volume of the request namespace verified by the controller", pv: pvIn(vrrTestTargetNamespace), conditions: verified(metav1.ConditionTrue, 2), wantRestore: true},
++		{name: "volume of another namespace", pv: pvIn(foreignNamespace)},
++		{name: "detached volume", pv: pvIn("")},
++		{name: "volume of another namespace verified by the controller", pv: pvIn(foreignNamespace), conditions: verified(metav1.ConditionTrue, 2), wantRestore: true},
++		{name: "detached volume verified for an older generation", pv: pvIn(""), conditions: verified(metav1.ConditionTrue, 1)},
++	}
++
++	for _, tt := range tests {
++		t.Run(tt.name, func(t *testing.T) {
++			ctrl := gomock.NewController(t)
++			mockSCLister := NewMockStorageClassLister(ctrl)
++			mockSCLister.storageClasses[vrrTestStorageClass] = ourStorageClass()
++
++			kind := "VolumeSnapshotContent"
++			kubeClient := fakeclientset.NewSimpleClientset()
++			snapshotClient := snapfake.NewSimpleClientset()
++			if tt.vsc != nil {
++				snapshotClient = snapfake.NewSimpleClientset(tt.vsc)
++			} else {
++				kind = "PersistentVolume"
++				kubeClient = fakeclientset.NewSimpleClientset(tt.pv)
++			}
++
++			vrr := createTestVRR("test-vrr", vrrTestTargetNamespace, kind, "source")
++			vrr.Generation = 2
++			vrr.Status.Conditions = tt.conditions
++
++			created := 0
++			csiClient := &mockControllerClient{
++				createVolumeFunc: func(context.Context, *csi.CreateVolumeRequest) (*csi.CreateVolumeResponse, error) {
++					created++
++					return &csi.CreateVolumeResponse{Volume: &csi.Volume{VolumeId: "new-volume-id", CapacityBytes: 1024 * 1024 * 1024}}, nil
++				},
++			}
++
++			e := newTestExecutor(csiClient, mockSCLister, kubeClient, snapshotClient, nil)
++			if err := reconcileVRR(t, e, vrr); err != nil {
++				t.Fatalf("reconcile failed: %v", err)
++			}
++
++			if !tt.wantRestore {
++				if created != 0 {
++					t.Fatalf("CreateVolume was called %d times for a source that is not verified", created)
++				}
++				assertNoPVC(t, kubeClient)
++				return
++			}
++			if created != 1 {
++				t.Fatalf("CreateVolume was called %d times, want 1", created)
++			}
++			assertPVCBoundTo(t, kubeClient, expectedPVName(t, vrr))
++		})
++	}
++}
++
++func TestReconcile_RechecksRequestBeforeCreateVolume(t *testing.T) {
++	tests := []struct {
++		name        string
++		stored      func(vrr *storagev1alpha1.VolumeRestoreRequest) *storagev1alpha1.VolumeRestoreRequest
++		wantRestore bool
++	}{
++		{name: "unchanged request", stored: func(vrr *storagev1alpha1.VolumeRestoreRequest) *storagev1alpha1.VolumeRestoreRequest { return vrr }, wantRestore: true},
++		{name: "request refused meanwhile", stored: func(vrr *storagev1alpha1.VolumeRestoreRequest) *storagev1alpha1.VolumeRestoreRequest {
++			vrr.Status.Conditions = []metav1.Condition{{Type: storagev1alpha1.ConditionTypeReady, Status: metav1.ConditionFalse, Reason: storagev1alpha1.ConditionReasonForeignSource}}
++			return vrr
++		}},
++		{name: "request refused meanwhile with the verification kept", stored: func(vrr *storagev1alpha1.VolumeRestoreRequest) *storagev1alpha1.VolumeRestoreRequest {
++			vrr.Status.Conditions = append(vrr.Status.Conditions, metav1.Condition{Type: storagev1alpha1.ConditionTypeReady, Status: metav1.ConditionFalse, Reason: storagev1alpha1.ConditionReasonForeignSource})
++			return vrr
++		}},
++		{name: "verification withdrawn meanwhile", stored: func(vrr *storagev1alpha1.VolumeRestoreRequest) *storagev1alpha1.VolumeRestoreRequest {
++			vrr.Status.Conditions = nil
++			return vrr
++		}},
++		{name: "request changed meanwhile", stored: func(vrr *storagev1alpha1.VolumeRestoreRequest) *storagev1alpha1.VolumeRestoreRequest {
++			vrr.Generation++
++			vrr.Status.Conditions[0].ObservedGeneration = vrr.Generation
++			return vrr
++		}},
++		{name: "request recreated meanwhile", stored: func(vrr *storagev1alpha1.VolumeRestoreRequest) *storagev1alpha1.VolumeRestoreRequest {
++			vrr.UID = "recreated"
++			return vrr
++		}},
++		{name: "request deleted meanwhile", stored: func(*storagev1alpha1.VolumeRestoreRequest) *storagev1alpha1.VolumeRestoreRequest { return nil }},
++	}
++
++	for _, kind := range []string{"VolumeSnapshotContent", "PersistentVolume"} {
++		for _, tt := range tests {
++			t.Run(kind+"/"+tt.name, func(t *testing.T) {
++				testRecheckBeforeCreateVolume(t, kind, tt.stored, tt.wantRestore)
++			})
++		}
++	}
++}
++
++func testRecheckBeforeCreateVolume(t *testing.T, kind string, storedFn func(*storagev1alpha1.VolumeRestoreRequest) *storagev1alpha1.VolumeRestoreRequest, wantRestore bool) {
++	ctrl := gomock.NewController(t)
++	mockSCLister := NewMockStorageClassLister(ctrl)
++	mockSCLister.storageClasses[vrrTestStorageClass] = ourStorageClass()
++
++	kubeClient := fakeclientset.NewSimpleClientset()
++	snapshotClient := snapfake.NewSimpleClientset()
++	if kind == "VolumeSnapshotContent" {
++		vsc := readyVSC("source", vrrTestSnapshotHandle)
++		vsc.Spec.VolumeSnapshotRef = v1.ObjectReference{Namespace: vrrTestTargetNamespace}
++		snapshotClient = snapfake.NewSimpleClientset(vsc)
++	} else {
++		pv := csiPV("source", vrrTestVolumeHandle)
++		pv.Spec.ClaimRef = &v1.ObjectReference{Namespace: vrrTestTargetNamespace, Name: "claim"}
++		kubeClient = fakeclientset.NewSimpleClientset(pv)
++	}
++
++	created := 0
++	csiClient := &mockControllerClient{
++		createVolumeFunc: func(context.Context, *csi.CreateVolumeRequest) (*csi.CreateVolumeResponse, error) {
++			created++
++			return &csi.CreateVolumeResponse{Volume: &csi.Volume{VolumeId: "new-volume-id", CapacityBytes: 1024 * 1024 * 1024}}, nil
++		},
++	}
++	e := newTestExecutor(csiClient, mockSCLister, kubeClient, snapshotClient, nil)
++
++	vrr := createTestVRR("test-vrr", vrrTestTargetNamespace, kind, "source")
++	if stored := storedFn(vrr.DeepCopy()); stored != nil {
++		storeVRR(t, e, stored)
++	}
++	if err := e.reconcile(context.Background(), vrr); err != nil {
++		t.Fatalf("reconcile failed: %v", err)
++	}
++
++	if !wantRestore {
++		if created != 0 {
++			t.Fatalf("CreateVolume was called %d times for a request that is no longer restorable", created)
++		}
++		if _, err := kubeClient.CoreV1().PersistentVolumes().Get(context.Background(), expectedPVName(t, vrr), metav1.GetOptions{}); !apierrors.IsNotFound(err) {
++			t.Fatalf("expected no restored PV, got err=%v", err)
++		}
++		assertNoPVC(t, kubeClient)
++		return
++	}
++	if created != 1 {
++		t.Fatalf("CreateVolume was called %d times, want 1", created)
++	}
++	assertPVCBoundTo(t, kubeClient, expectedPVName(t, vrr))
++}
++
++func TestReconcile_RecheckErrorIsRetried(t *testing.T) {
++	ctrl := gomock.NewController(t)
++	mockSCLister := NewMockStorageClassLister(ctrl)
++	mockSCLister.storageClasses[vrrTestStorageClass] = ourStorageClass()
++
++	vsc := readyVSC("source", vrrTestSnapshotHandle)
++	vsc.Spec.VolumeSnapshotRef = v1.ObjectReference{Namespace: vrrTestTargetNamespace}
++	csiClient := &mockControllerClient{
++		createVolumeFunc: func(context.Context, *csi.CreateVolumeRequest) (*csi.CreateVolumeResponse, error) {
++			t.Error("CreateVolume must not be called when the request cannot be re-read")
++			return nil, nil
++		},
++	}
++	e := newTestExecutor(csiClient, mockSCLister, nil, snapfake.NewSimpleClientset(vsc), nil)
++	e.vrrClient.(*dynamicfake.FakeDynamicClient).PrependReactor("get", "volumerestorerequests",
++		func(clienttesting.Action) (bool, runtime.Object, error) {
++			return true, nil, errors.New("apiserver unavailable")
++		})
++
++	vrr := createTestVRR("test-vrr", vrrTestTargetNamespace, "VolumeSnapshotContent", "source")
++	if err := e.reconcile(context.Background(), vrr); err == nil {
++		t.Fatal("expected a retryable error when the request cannot be re-read")
++	}
++}
++
++func TestReconcile_UnverifiedRequestWaitsWithoutRetry(t *testing.T) {
++	notReady := readyVSC("source", vrrTestSnapshotHandle)
++	notReady.Spec.VolumeSnapshotRef = v1.ObjectReference{Namespace: vrrTestTargetNamespace}
++	notReady.Status.ReadyToUse = boolPtr(false)
++	withoutCSI := simplePV("source")
++	withoutCSI.Spec.ClaimRef = &v1.ObjectReference{Namespace: vrrTestTargetNamespace, Name: "claim"}
++
++	for _, kind := range []string{"VolumeSnapshotContent", "PersistentVolume"} {
++		t.Run(kind, func(t *testing.T) {
++			ctrl := gomock.NewController(t)
++			mockSCLister := NewMockStorageClassLister(ctrl)
++			mockSCLister.storageClasses[vrrTestStorageClass] = ourStorageClass()
++			e := newTestExecutor(&mockControllerClient{}, mockSCLister,
++				fakeclientset.NewSimpleClientset(withoutCSI), snapfake.NewSimpleClientset(notReady), nil)
++
++			vrr := createTestVRR("test-vrr", vrrTestTargetNamespace, kind, "source")
++			vrr.Status.Conditions = nil
++			if err := reconcileVRR(t, e, vrr); err != nil {
++				t.Fatalf("an unverified request must wait for the controller without a retry, got: %v", err)
++			}
++		})
++	}
 +}

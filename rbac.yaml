@@ -159,23 +159,11 @@ resources:
   - group: storage-foundation.deckhouse.io
     resource: volumecapturerequests
     namespace:
-      manager:
-        - create
-        - delete
-        - deletecollection
-        - patch
-        - update
       viewer:
         - get
         - list
         - watch
     legacy:
-      ClusterEditor:
-        - create
-        - delete
-        - deletecollection
-        - patch
-        - update
       User:
         - get
         - list
@@ -183,23 +171,11 @@ resources:
   - group: storage-foundation.deckhouse.io
     resource: volumerestorerequests
     namespace:
-      manager:
-        - create
-        - delete
-        - deletecollection
-        - patch
-        - update
       viewer:
         - get
         - list
         - watch
     legacy:
-      ClusterEditor:
-        - create
-        - delete
-        - deletecollection
-        - patch
-        - update
       User:
         - get
         - list
@@ -389,6 +365,13 @@ serviceAccounts:
           - delete
       - apiGroups:
           - ""
+        resources:
+          - events
+        verbs:
+          - create
+          - patch
+      - apiGroups:
+          - events.k8s.io
         resources:
           - events
         verbs:

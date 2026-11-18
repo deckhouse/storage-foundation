@@ -17,9 +17,9 @@ limitations under the License.
 package v1alpha1
 
 // Condition type constants
-// Only Ready condition is used - it is set to True on success or False on final failure
 const (
-	ConditionTypeReady = "Ready"
+	ConditionTypeReady          = "Ready"
+	ConditionTypeSourceVerified = "SourceVerified"
 )
 
 // Condition reason constants
@@ -53,4 +53,10 @@ const (
 	ConditionReasonTargetsPending = "TargetsPending"
 	// ConditionReasonRestoreFailed indicates restore operation failed
 	ConditionReasonRestoreFailed = "RestoreFailed"
+	// ConditionReasonSourceInNamespace indicates the restore source belongs to the namespace of the request
+	ConditionReasonSourceInNamespace = "SourceInNamespace"
+	// ConditionReasonModuleNamespace indicates the request lives in the namespace of the module
+	ConditionReasonModuleNamespace = "ModuleNamespace"
+	// ConditionReasonForeignSource indicates the restore source does not belong to the namespace of the request
+	ConditionReasonForeignSource = "ForeignSource"
 )

@@ -62,6 +62,7 @@ func AddVolumeRestoreRequestControllerToManager(mgr ctrl.Manager, cfg *config.Op
 		APIReader: apiReader,
 		Scheme:    mgr.GetScheme(),
 		Config:    cfg,
+		Recorder:  mgr.GetEventRecorder("volumerestorerequest-controller"),
 	}
 
 	if err := reconciler.SetupWithManager(mgr); err != nil {

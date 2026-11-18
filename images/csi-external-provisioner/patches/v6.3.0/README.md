@@ -89,6 +89,15 @@ module. The executor only:
 - filters by CSI driver (via the target `StorageClass.provisioner`);
 - validates the restore source (`VolumeSnapshotContent` ready-to-use, or
   an existing `PersistentVolume`);
+- restores a source only after the storage-foundation controller has set
+  the `SourceVerified=True` condition for the current generation of the
+  request, whatever namespace the source names in
+  `spec.volumeSnapshotRef` or `spec.claimRef`: the controller alone checks
+  that the source belongs to the namespace of the request (or, in the
+  namespace of the module, to the namespace the request was made for);
+- re-reads the request from the API server right before CSI
+  `CreateVolume` and stops if it has meanwhile become terminal, lost
+  `SourceVerified`, changed generation or been recreated;
 - calls CSI `CreateVolume` (from `volumeSnapshotHandle` or `volumeHandle`);
 - creates the target `PersistentVolume` + `PersistentVolumeClaim`
   (explicit binding, no `dataSourceRef`, no temporary `VolumeSnapshot`);

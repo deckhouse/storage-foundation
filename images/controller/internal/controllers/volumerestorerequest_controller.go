@@ -27,6 +27,7 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/client-go/tools/events"
 	"k8s.io/client-go/util/retry"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -80,6 +81,7 @@ type VolumeRestoreRequestController struct {
 	APIReader client.Reader // Required: for reading StorageClass directly from API server (if needed in future)
 	Scheme    *runtime.Scheme
 	Config    *config.Options
+	Recorder  events.EventRecorder
 }
 
 func (r *VolumeRestoreRequestController) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
@@ -258,6 +260,10 @@ func (r *VolumeRestoreRequestController) processVolumeSnapshotContentRestore(
 		return ctrl.Result{}, fmt.Errorf("failed to get CSI VolumeSnapshotContent: %w", err)
 	}
 
+	if stop, err := r.verifySource(ctx, vrr, csiVSC, csiVSC.Spec.VolumeSnapshotRef.Namespace); stop {
+		return ctrl.Result{}, err
+	}
+
 	// Check if VSC is ReadyToUse (required for restore)
 	if csiVSC.Status == nil || csiVSC.Status.ReadyToUse == nil || !*csiVSC.Status.ReadyToUse {
 		// Check for terminal errors first
@@ -348,6 +354,14 @@ func (r *VolumeRestoreRequestController) processPersistentVolumeRestore(
 			return r.markFailed(ctx, vrr, storagev1alpha1.ConditionReasonNotFound, fmt.Sprintf("PersistentVolume %s not found", vrr.Spec.SourceRef.Name))
 		}
 		return ctrl.Result{}, fmt.Errorf("failed to get PersistentVolume: %w", err)
+	}
+
+	claimNamespace := ""
+	if pv.Spec.ClaimRef != nil {
+		claimNamespace = pv.Spec.ClaimRef.Namespace
+	}
+	if stop, err := r.verifySource(ctx, vrr, pv, claimNamespace); stop {
+		return ctrl.Result{}, err
 	}
 
 	// 2. Create ObjectKeeper (idempotent)

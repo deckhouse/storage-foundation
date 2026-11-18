@@ -40,8 +40,6 @@ rules:
 - apiGroups:
   - storage-foundation.deckhouse.io
   resources:
-  - volumecapturerequests
-  - volumerestorerequests
   - dataexports
   - dataimports
   verbs:

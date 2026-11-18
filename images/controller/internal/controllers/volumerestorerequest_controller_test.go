@@ -100,6 +100,7 @@ var _ = Describe("VolumeRestoreRequest", func() {
 				Source: snapshotv1.VolumeSnapshotContentSource{
 					VolumeHandle: ptr.To("test-volume-handle"),
 				},
+				VolumeSnapshotRef: corev1.ObjectReference{Namespace: "default", Name: name},
 			},
 			Status: &snapshotv1.VolumeSnapshotContentStatus{
 				ReadyToUse: ptr.To(true),
@@ -123,6 +124,7 @@ var _ = Describe("VolumeRestoreRequest", func() {
 						VolumeHandle: "test-volume-handle",
 					},
 				},
+				ClaimRef: &corev1.ObjectReference{Namespace: "default", Name: name},
 			},
 		}
 		Expect(client.Create(ctx, pv)).To(Succeed())
@@ -529,7 +531,8 @@ var _ = Describe("VolumeRestoreRequest", func() {
 					UID:  types.UID("vsc-uid-not-ready"),
 				},
 				Spec: snapshotv1.VolumeSnapshotContentSpec{
-					Driver: "test-driver",
+					Driver:            "test-driver",
+					VolumeSnapshotRef: corev1.ObjectReference{Namespace: "default", Name: "test-vs"},
 				},
 				Status: &snapshotv1.VolumeSnapshotContentStatus{
 					ReadyToUse: ptr.To(false),
@@ -574,7 +577,8 @@ var _ = Describe("VolumeRestoreRequest", func() {
 					UID:  types.UID("vsc-uid-error"),
 				},
 				Spec: snapshotv1.VolumeSnapshotContentSpec{
-					Driver: "test-driver",
+					Driver:            "test-driver",
+					VolumeSnapshotRef: corev1.ObjectReference{Namespace: "default", Name: "test-vs"},
 				},
 				Status: &snapshotv1.VolumeSnapshotContentStatus{
 					ReadyToUse: ptr.To(false),

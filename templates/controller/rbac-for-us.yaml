@@ -102,6 +102,9 @@ rules:
 - apiGroups: [""]
   resources: ["events"]
   verbs: ["create", "patch"]
+- apiGroups: ["events.k8s.io"]
+  resources: ["events"]
+  verbs: ["create", "patch"]
 
 # SnapshotContent (cluster-scoped, get only) - read by the aggregated API server, not by a reconciler.
 # Every one of the three VolumeSnapshot subresources resolves the addressed VolumeSnapshot's
