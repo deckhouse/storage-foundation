@@ -341,6 +341,34 @@ var _ = Describe("VolumeRestoreRequest source namespace", func() {
 		expectRejected(reconcileVRR(moduleNamespace))
 	})
 
+	It("accepts a source of the named namespace for a request in a trusted namespace of another module", func() {
+		cfg.TrustedRequestNamespaces = []string{"d8-backup"}
+		createVSC("vsc", foreignNamespace, nil)
+		createAnnotatedVRR("d8-backup", SourceKindVolumeSnapshotContent, "vsc", exportOf(foreignNamespace))
+		expectVerified(reconcileVRR("d8-backup"), storagev1alpha1.ConditionReasonModuleNamespace)
+	})
+
+	It("rejects a source of another namespace than the named one for a request in a trusted namespace", func() {
+		cfg.TrustedRequestNamespaces = []string{"d8-backup"}
+		createVSC("vsc", foreignNamespace, nil)
+		createAnnotatedVRR("d8-backup", SourceKindVolumeSnapshotContent, "vsc", exportOf(requestNamespace))
+		expectRejected(reconcileVRR("d8-backup"))
+	})
+
+	It("rejects a request in a trusted namespace that names no namespace", func() {
+		cfg.TrustedRequestNamespaces = []string{"d8-backup"}
+		createVSC("vsc", "d8-backup", nil)
+		createVRR("d8-backup", SourceKindVolumeSnapshotContent, "vsc")
+		expectRejected(reconcileVRR("d8-backup"))
+	})
+
+	It("ignores the named namespace of a request outside the trusted namespaces", func() {
+		cfg.TrustedRequestNamespaces = []string{"d8-backup"}
+		createVSC("vsc", foreignNamespace, nil)
+		createAnnotatedVRR(requestNamespace, SourceKindVolumeSnapshotContent, "vsc", exportOf(foreignNamespace))
+		expectRejected(reconcileVRR(requestNamespace))
+	})
+
 	It("rejects a source whose SnapshotContent owner reference does not match the content UID", func() {
 		createSnapshotContent("content", requestNamespace, "")
 		createPV("pv", "", controllerRef("state-snapshotter.deckhouse.io/v1alpha1", "SnapshotContent", "content", "other-uid"))

@@ -98,7 +98,7 @@ func (r *VolumeRestoreRequestController) verifySource(
 ) (bool, error) {
 	trace := sourceTrace{want: vrr.Namespace, anchor: anchorNamespace}
 	reason := storagev1alpha1.ConditionReasonSourceInNamespace
-	if r.Config != nil && vrr.Namespace == r.Config.ControllerNamespace {
+	if r.Config != nil && r.Config.TrustsRequestsIn(vrr.Namespace) {
 		reason = storagev1alpha1.ConditionReasonModuleNamespace
 		trace.want = vrr.Annotations[storagev1alpha1.AnnotationStorageManagerNamespaceKey]
 		if trace.want == "" {

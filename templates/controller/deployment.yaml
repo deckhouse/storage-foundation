@@ -17,7 +17,8 @@
     (dict "name" "AGGREGATION_API_TLS_CERT_FILE" "value" "/etc/aggregation-api-certs/tls.crt")
     (dict "name" "AGGREGATION_API_TLS_KEY_FILE" "value" "/etc/aggregation-api-certs/tls.key")
     (dict "name" "WEBHOOKS_BIND_ADDRESS" "value" ":9443")
-    (dict "name" "WEBHOOKS_CERT_DIR" "value" "/etc/webhook/certs"))
+    (dict "name" "WEBHOOKS_CERT_DIR" "value" "/etc/webhook/certs")
+    (dict "name" "TRUSTED_REQUEST_NAMESPACES" "value" "d8-backup"))
   "additionalControllerVolumeMounts" (list
     (dict "name" "aggregation-api-certs" "mountPath" "/etc/aggregation-api-certs" "readOnly" true)
     (dict "name" "webhook-certs" "mountPath" "/etc/webhook/certs" "readOnly" true))

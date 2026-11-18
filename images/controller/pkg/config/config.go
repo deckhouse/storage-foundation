@@ -19,6 +19,8 @@ package config
 import (
 	"log"
 	"os"
+	"slices"
+	"strings"
 	"time"
 
 	"github.com/deckhouse/sds-common-lib/logger"
@@ -27,6 +29,7 @@ import (
 
 const (
 	ControllerNamespaceEnv               = "CONTROLLER_NAMESPACE"
+	TrustedRequestNamespacesEnv          = "TRUSTED_REQUEST_NAMESPACES"
 	HardcodedControllerNS                = "d8-storage-foundation"
 	ControllerName                       = "controller"
 	DefaultHealthProbeBindAddressEnvName = "HEALTH_PROBE_BIND_ADDRESS"
@@ -54,7 +57,11 @@ type Options struct {
 	// METRICS_BIND_ADDRESS from Helm.
 	MetricsBindAddress  string
 	ControllerNamespace string
-	Retention           RetentionConfig
+	// TrustedRequestNamespaces are the namespaces of other modules whose VolumeRestoreRequests name
+	// the namespace their source must belong to in the storage-manager-namespace annotation, as the
+	// requests of ControllerNamespace do. Only the module owning such a namespace may write there.
+	TrustedRequestNamespaces []string
+	Retention                RetentionConfig
 
 	// AggregationAPIAddr is where the module's aggregated API server listens (see internal/domainapi).
 	AggregationAPIAddr string
@@ -100,6 +107,8 @@ func NewConfig() *Options {
 		}
 	}
 
+	opts.TrustedRequestNamespaces = parseListEnv(TrustedRequestNamespacesEnv)
+
 	// Load retention TTL configuration (for IRetainer - long-lived artifacts)
 	opts.Retention.SnapshotTTL = parseDurationEnv(RetentionSnapshotTTLEnvName, DefaultRetentionSnapshotTTL)
 	opts.Retention.DetachTTL = parseDurationEnv(RetentionDetachTTLEnvName, DefaultRetentionDetachTTL)
@@ -109,6 +118,26 @@ func NewConfig() *Options {
 	opts.AggregationAPITLSKeyFile = envOrDefault(AggregationAPITLSKeyFileEnvName, DefaultAggregationAPITLSKeyFile)
 
 	return &opts
+}
+
+// TrustsRequestsIn reports whether a VolumeRestoreRequest in the namespace takes the namespace of its
+// source from the storage-manager-namespace annotation instead of its own namespace.
+func (o *Options) TrustsRequestsIn(namespace string) bool {
+	if namespace == "" {
+		return false
+	}
+	return namespace == o.ControllerNamespace || slices.Contains(o.TrustedRequestNamespaces, namespace)
+}
+
+// parseListEnv splits a comma-separated environment variable, dropping empty items.
+func parseListEnv(envName string) []string {
+	var items []string
+	for _, item := range strings.Split(os.Getenv(envName), ",") {
+		if item = strings.TrimSpace(item); item != "" {
+			items = append(items, item)
+		}
+	}
+	return items
 }
 
 // envOrDefault reads an environment variable, falling back to a default when it is unset or empty.
