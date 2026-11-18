@@ -106,7 +106,7 @@ resources:
         - list
         - watch
     legacy:
-      ClusterEditor:
+      Editor:
         - create
         - delete
         - deletecollection
@@ -120,6 +120,9 @@ resources:
     resource: dataexports/download
     namespace:
       transfer_volume_data:
+        - create
+    legacy:
+      Editor:
         - create
   - group: storage-foundation.deckhouse.io
     resource: dataimports
@@ -141,7 +144,7 @@ resources:
         - list
         - watch
     legacy:
-      ClusterEditor:
+      Editor:
         - create
         - delete
         - deletecollection
@@ -155,6 +158,9 @@ resources:
     resource: dataimports/download
     namespace:
       transfer_volume_data:
+        - create
+    legacy:
+      Editor:
         - create
   - group: storage-foundation.deckhouse.io
     resource: volumecapturerequests
@@ -185,7 +191,7 @@ resources:
     noAccess: 'the registration of the populators the module ships, read by the volume data source validator; there is nothing in it for users to read or change'
 capabilities:
   namespace.transfer_volume_data:
-    level: admin
+    level: manager
     labels:
       state-snapshotter.deckhouse.io/aggregate-to-backup-agent: "true"
     title:

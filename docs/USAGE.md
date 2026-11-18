@@ -145,10 +145,12 @@ see [Importing data](#importing-data).
 
 ### Access permissions
 
-In Deckhouse Platform 1.78 and later, subjects with the namespace `admin` access level can transfer volume data in that
-namespace. Other subjects need an explicit binding to the built-in
-`d8:namespace-capability:storage-foundation:transfer_volume_data` ClusterRole. It permits creating, reading, and
-deleting DataExport and DataImport objects and transferring data through their HTTP endpoints.
+Volume data can be transferred by subjects with the `Editor` access level or higher in the current role model
+(`ClusterAuthorizationRule` or `AuthorizationRule`), and in RBACv2 by subjects with the `manager` or `admin` access
+level in the namespace (in Deckhouse Platform earlier than 1.78, the `manager` and `admin` use roles). Other subjects
+need an explicit binding to the built-in `d8:namespace-capability:storage-foundation:transfer_volume_data` ClusterRole.
+It permits creating, reading, and deleting DataExport and DataImport objects and transferring data through their HTTP
+endpoints.
 
 For example, bind the role to a user working in the `project` namespace:
 
@@ -176,8 +178,8 @@ Platform versions earlier than 1.78, use the legacy role names:
 | Data transfer | `d8:namespace-capability:storage-foundation:transfer_volume_data` | `d8:use:capability:module:storage-foundation:transfer_volume_data` |
 | Backup agent | `d8:state-snapshotter:backup-agent` | `d8:use:capability:module:state-snapshotter:backup_agent` |
 
-When auditing permissions, also account for the namespace `admin` level and the aggregated `backup-agent` role, if their
-bindings are present. For details, see [Backup integration](/modules/state-snapshotter/backup_integration.html). Manual
+When auditing permissions, also account for the `Editor` and higher access levels, the namespace `manager` and `admin`
+levels, and the aggregated `backup-agent` role, if their bindings are present. For details, see [Backup integration](/modules/state-snapshotter/backup_integration.html). Manual
 HTTP client permissions are covered on the [Advanced usage](advanced_usage.html) page.
 
 DataExport and DataImport objects can be served by two modules: `storage-foundation` in the

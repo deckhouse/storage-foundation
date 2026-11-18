@@ -7,17 +7,19 @@
 # TestTransferVolumeDataRoleGrantsAuthorizedSubresources, which builds the expected rules from the
 # very constants the authorization code passes to the SubjectAccessReview.
 #
-# Aggregates into the namespace lineage at the `admin` level and at no other level or lineage. The
-# namespace lineage is granted per namespace through a RoleBinding, not cluster-wide like the
-# `kubernetes` axis of the legacy scheme, so the permission reaches the administrators of a namespace
-# and only inside that namespace. Admin is the level that runs the namespace, and a namespace admin
-# can already reach the contents of a volume there (pods/exec into the pod that mounts it), so moving
-# those bytes out of the cluster or back in gives that level nothing new in kind. The lower levels
-# (viewer, user, manager) do not get it: the neighbouring view and edit capabilities stop at the
-# transfer objects themselves and grant neither `download` subresource. Anybody else has to be granted
-# this role by an explicit RoleBinding, and it grants them nothing until that binding exists. The
-# level cannot simply be dropped to make the role narrower either: the 1.78 contract refuses a
-# capability that aggregates into no platform role.
+# Aggregates into the namespace lineage at the `manager` level, which `admin` includes, and at no
+# other level or lineage. The namespace lineage is granted per namespace through a RoleBinding, not
+# cluster-wide like the `kubernetes` axis of the legacy scheme, so the permission reaches the managers
+# and administrators of a namespace and only inside that namespace. A namespace manager creates the
+# DataExport and DataImport objects (the neighbouring edit capability) and can already reach the
+# contents of a volume there (a pod that mounts it, pods/exec into it), so moving those bytes out of
+# the cluster or back in gives that level nothing new in kind; it is also the level that matches the
+# `Editor` access level of the current role model, which gets the same subresources. The lower levels
+# (viewer, user) do not get it: the neighbouring view capability stops at the transfer objects
+# themselves and grants neither `download` subresource. Anybody else has to be granted this role by an
+# explicit RoleBinding, and it grants them nothing until that binding exists. The level cannot simply
+# be dropped to make the role narrower either: the 1.78 contract refuses a capability that aggregates
+# into no platform role.
 #
 # The `state-snapshotter.deckhouse.io/aggregate-to-backup-agent` label below adds exactly one more
 # holder and no wider reach. It lies outside `rbac.deckhouse.io/`, so no platform role selects on it.
@@ -31,7 +33,7 @@
 #
 # So do not "tighten" this role by deleting either label. TestNoAggregatedRoleGrantsVolumeDataTransfer
 # keeps every OTHER level and lineage banned for this role, and
-# TestTransferVolumeDataCapabilityAggregatesOnlyIntoNamespaceAdminAndBackupAgent pins these two, their
+# TestTransferVolumeDataCapabilityAggregatesOnlyIntoNamespaceManagerAndBackupAgent pins these two, their
 # values included. The module label has to be the one the aggregating role selects on, and that role
 # lives in another module's chart, so nothing here can verify the pair: a rename on either side
 # silently drops this role out of the aggregated set and the transfer answers 403 to a backup agent
@@ -50,7 +52,7 @@ metadata:
   labels:
     heritage: deckhouse
     module: storage-foundation
-    rbac.deckhouse.io/aggregate-to-namespace-as: admin
+    rbac.deckhouse.io/aggregate-to-namespace-as: manager
     rbac.deckhouse.io/kind: capability
     rbac.deckhouse.io/capability: "namespace-capability.storage-foundation.transfer_volume_data"
     rbac.deckhouse.io/scope: namespace
@@ -92,32 +94,32 @@ rules:
 # TestTransferVolumeDataRoleGrantsAuthorizedSubresources, which builds the expected rules from the
 # very constants the authorization code passes to the SubjectAccessReview.
 #
-# Deliberately carries NO `rbac.deckhouse.io/aggregate-to-kubernetes-as` label, unlike the
-# neighbouring view/edit roles: with one, the right to read a volume out of the cluster and to write
-# one back in would silently reach every subject of the corresponding cluster-wide access level.
-# This role is meant to be granted to a named subject by an explicit RoleBinding, and it grants
-# nothing until that binding exists.
+# Aggregates into the `kubernetes` axis at the `manager` level, like the neighbouring edit role that
+# writes the DataExport and DataImport objects, and so reaches the same subjects as that role: a
+# manager of the `kubernetes` axis can already create a pod that mounts a volume and exec into it, so
+# moving those bytes out of the cluster or back in gives that level nothing new in kind. It is also the
+# level that matches the `Editor` access level of the current role model, which gets the same
+# subresources. The lower levels (viewer, user) do not get it: the neighbouring view role stops at the
+# transfer objects themselves and grants neither `download` subresource.
 #
-# The `rbac.deckhouse.io/aggregate-to-backup-agent-as` label below does not undo that rule, because
-# the two axes differ in who ends up holding the rules. A `kubernetes` axis is reached by holding the
-# cluster-wide access level itself, so the rules arrive together with the level and nobody binds
-# anything. The `backup-agent` axis is collected by a single ClusterRole,
+# The `rbac.deckhouse.io/aggregate-to-backup-agent-as` label below is a second, narrower axis. A
+# `kubernetes` axis is reached by holding the access level itself, so the rules arrive together with
+# the level and nobody binds anything. The `backup-agent` axis is collected by a single ClusterRole,
 # `d8:use:capability:module:state-snapshotter:backup_agent`, which in turn grants nothing until
 # somebody binds it — so this role still reaches only a named subject, and only through an explicit
 # RoleBinding. What the label buys is that setting up an external backup agent takes one binding
 # instead of a handful, and a forgotten one can no longer leave that agent authorized for everything
 # except the volume data.
 #
-# So do not "restore" the paragraph above by deleting the label.
 # TestNoAggregatedRoleGrantsVolumeDataTransfer keeps every OTHER aggregation axis banned for this
-# role, and TestTransferVolumeDataRoleAggregatesOnlyIntoBackupAgent pins this one, its value
-# included. The value has to be the one the aggregating role selects on, and that role lives in
-# another module's chart, so nothing here can verify the pair: a rename on either side silently drops
-# this role out of the aggregated set and the transfer answers 403 to a subject whose binding looks
-# correct. When that module is absent, the label selects nothing and this role behaves exactly as it
-# did before.
+# role, and TestTransferVolumeDataRoleAggregatesOnlyIntoKubernetesManagerAndBackupAgent pins these two,
+# their values included. The value of the backup-agent label has to be the one the aggregating role
+# selects on, and that role lives in another module's chart, so nothing here can verify the pair: a
+# rename on either side silently drops this role out of the aggregated set and the transfer answers 403
+# to a subject whose binding looks correct. When that module is absent, the label selects nothing and
+# this role behaves exactly as it did before.
 #
-# The label belongs to THIS role and to no other role under `templates/rbacv2`: the axis selects
+# The backup-agent label belongs to THIS role and to no other role under `templates/rbacv2`: the axis selects
 # together with `rbac.deckhouse.io/kind: use`, which the neighbouring view and edit roles carry too, so
 # a copy of it there would hand their rules to the same backup agent. That much is held by
 # TestBackupAgentAggregationIsCarriedOnlyByTransferVolumeDataRole — which also spells out how far its
@@ -130,6 +132,7 @@ metadata:
     heritage: deckhouse
     module: storage-foundation
     rbac.deckhouse.io/aggregate-to-backup-agent-as: member
+    rbac.deckhouse.io/aggregate-to-kubernetes-as: manager
     rbac.deckhouse.io/kind: use
   name: d8:use:capability:module:storage-foundation:transfer_volume_data
 rules:

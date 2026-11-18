@@ -120,8 +120,12 @@ roleRef:
   apiGroup: rbac.authorization.k8s.io
 ```
 
-When auditing permissions, account for the namespace `admin` level and bindings of `d8:state-snapshotter:backup-agent`
-as well. For details, see [Backup integration](/modules/state-snapshotter/backup_integration.html).
+The check names no object, so such a binding permits transferring data of every DataExport or DataImport in the
+namespace, not only of the ones the subject created.
+
+When auditing permissions, account for the `Editor` and higher access levels of the current role model, the namespace
+`manager` and `admin` levels of RBACv2, and bindings of `d8:state-snapshotter:backup-agent` as well. For details, see
+[Backup integration](/modules/state-snapshotter/backup_integration.html).
 
 ## Export and import HTTP API
 

@@ -94,15 +94,22 @@ const (
 	// that axis, under the same silent-mismatch caveat as backupAgentAggregationValue.
 	legacyBackupAgentAggregationValue = "member"
 
-	// namespaceAggregationLabel and namespaceAdminLevel are the one platform level the new transfer
+	// namespaceAggregationLabel and namespaceManagerLevel are the one platform level the new transfer
 	// capability aggregates into. The 1.78 contract refuses a capability that aggregates into no
 	// platform role, so the backup-agent label cannot be the only one; the namespace lineage is
-	// granted per namespace through a RoleBinding, and its admin level can already reach the contents
-	// of a volume in its namespace (pods/exec into the pod mounting it), so the transfer adds nothing
-	// new in kind there. The exemption is for this role at this level only: any other role, or this
-	// role at any other level or lineage, stays banned.
+	// granted per namespace through a RoleBinding, and its manager level writes the transfer objects
+	// and can already reach the contents of a volume in its namespace (a pod mounting it, pods/exec
+	// into that pod), so the transfer adds nothing new in kind there. It is the level that matches the
+	// Editor access level of the current role model, which gets the same subresources. The exemption
+	// is for this role at this level only: any other role, or this role at any other level or lineage,
+	// stays banned.
 	namespaceAggregationLabel = aggregationLabelPrefix + "namespace-as"
-	namespaceAdminLevel       = "admin"
+	namespaceManagerLevel     = "manager"
+
+	// kubernetesAggregationLabel and kubernetesManagerLevel are the same level in the legacy scheme:
+	// the axis the neighbouring edit role writes the transfer objects through.
+	kubernetesAggregationLabel = aggregationLabelPrefix + "kubernetes-as"
+	kubernetesManagerLevel     = "manager"
 
 	// i18n annotations every capability of the new model carries, and no legacy object does.
 	enTitleAnnotation       = "en.meta.deckhouse.io/title"
@@ -159,10 +166,10 @@ var (
 		backupAgentValue:        backupAgentAggregationValue,
 		foreignBackupAgentLabel: legacyBackupAgentAggregationLabel,
 		transferAxes: map[string]string{
-			namespaceAggregationLabel:   namespaceAdminLevel,
+			namespaceAggregationLabel:   namespaceManagerLevel,
 			backupAgentAggregationLabel: backupAgentAggregationValue,
 		},
-		transferExemptAxes: map[string]string{namespaceAggregationLabel: namespaceAdminLevel},
+		transferExemptAxes: map[string]string{namespaceAggregationLabel: namespaceManagerLevel},
 	}
 
 	legacyRBACScheme = rbacScheme{
@@ -179,8 +186,11 @@ var (
 		backupAgentLabel:        legacyBackupAgentAggregationLabel,
 		backupAgentValue:        legacyBackupAgentAggregationValue,
 		foreignBackupAgentLabel: backupAgentAggregationLabel,
-		transferAxes:            map[string]string{legacyBackupAgentAggregationLabel: legacyBackupAgentAggregationValue},
-		transferExemptAxes:      map[string]string{},
+		transferAxes: map[string]string{
+			legacyBackupAgentAggregationLabel: legacyBackupAgentAggregationValue,
+			kubernetesAggregationLabel:        kubernetesManagerLevel,
+		},
+		transferExemptAxes: map[string]string{kubernetesAggregationLabel: kubernetesManagerLevel},
 	}
 
 	rbacSchemes = []rbacScheme{newRBACScheme, legacyRBACScheme}
@@ -467,38 +477,38 @@ func assertTransferRoleAxes(t *testing.T, scheme rbacScheme) {
 			"access level that is not meant to hold it", role.Name)
 }
 
-// TestTransferVolumeDataRoleAggregatesOnlyIntoBackupAgent pins which aggregation axes the legacy role
-// declares, and covers the half TestNoAggregatedRoleGrantsVolumeDataTransfer cannot: that test
+// TestTransferVolumeDataRoleAggregatesOnlyIntoKubernetesManagerAndBackupAgent pins which aggregation
+// axes the legacy role declares, and covers the half TestNoAggregatedRoleGrantsVolumeDataTransfer cannot: that test
 // inspects only the roles it finds aggregated, so a label dropped, or given a value the aggregate does
 // not select, leaves it green while the aggregated role silently loses the transfer permission — and
 // the failure surfaces as a 403 in a cluster, on a binding that looks correct. A misspelling that
 // keeps the aggregate-to- prefix is not in that gap: such a label counts as another axis, so the ban
 // inspects the role and goes red on it.
 //
-// The set is compared exactly, not just searched for the expected axis. The kubernetes axis in
-// particular must never appear here: with it, reading a volume out of the cluster and writing one
-// back in would reach every subject of the corresponding cluster-wide access level, with no binding
-// anyone can point at.
+// The set is compared exactly, not just searched for the expected axes. The kubernetes axis appears at
+// the manager level only, the level the neighbouring edit role writes the transfer objects at; at any
+// other level, reading a volume out of the cluster and writing one back in would reach subjects who
+// cannot otherwise touch the transfer objects or the volume.
 //
 // Limit: the "only" in the name is about the aggregate-to-* axes and reaches no further. An
 // aggregationRule selecting on heritage, module or rbac.deckhouse.io/kind alone would collect this
 // role while it carries no aggregate-to-* label at all, and nothing here can see that — the selecting
 // role is not part of this chart.
-func TestTransferVolumeDataRoleAggregatesOnlyIntoBackupAgent(t *testing.T) {
+func TestTransferVolumeDataRoleAggregatesOnlyIntoKubernetesManagerAndBackupAgent(t *testing.T) {
 	assertTransferRoleAxes(t, legacyRBACScheme)
 }
 
-// TestTransferVolumeDataCapabilityAggregatesOnlyIntoNamespaceAdminAndBackupAgent is the same pin for
+// TestTransferVolumeDataCapabilityAggregatesOnlyIntoNamespaceManagerAndBackupAgent is the same pin for
 // the capability of the new scheme, which aggregates in two places: into the namespace lineage at the
-// admin level, and through the module label into d8:state-snapshotter:backup-agent. Both values are
-// compared, and so is the absence of anything else: no other level of the namespace lineage (viewer,
-// user and manager are held by subjects who are not meant to move volume data), no subsystem or
+// manager level, and through the module label into d8:state-snapshotter:backup-agent. Both values are
+// compared, and so is the absence of anything else: no other level of the namespace lineage (viewer
+// and user are held by subjects who are not meant to move volume data), no subsystem or
 // system lineage (those are granted cluster-wide), and not the legacy backup-agent axis, which the
 // 1.78 contract refuses as an unknown lineage.
 //
 // Limit: as above, only these labels are examined. An aggregationRule selecting on the kind, scope or
 // module label alone would collect this capability too, and nothing in this chart can see that.
-func TestTransferVolumeDataCapabilityAggregatesOnlyIntoNamespaceAdminAndBackupAgent(t *testing.T) {
+func TestTransferVolumeDataCapabilityAggregatesOnlyIntoNamespaceManagerAndBackupAgent(t *testing.T) {
 	assertTransferRoleAxes(t, newRBACScheme)
 }
 
@@ -562,14 +572,14 @@ func TestBackupAgentAggregationIsCarriedOnlyByTransferVolumeDataRole(t *testing.
 // until then. That exemption is per LABEL, not per role — a role declaring it alongside any other
 // axis is still inspected and still fails.
 //
-// The new scheme adds one more exemption, and it is narrower: per ROLE, LABEL and VALUE. The transfer
-// capability may aggregate into the namespace lineage at the admin level (see
-// namespaceAggregationLabel for why that level and no other), and that is all — the same label with
-// another value, or on any other role, is inspected like any other axis.
+// Each scheme adds one more exemption, and it is narrower: per ROLE, LABEL and VALUE. The transfer
+// role may aggregate into the namespace lineage (new scheme) or the kubernetes axis (legacy scheme) at
+// the manager level (see namespaceAggregationLabel for why that level and no other), and that is all —
+// the same label with another value, or on any other role, is inspected like any other axis.
 //
 // The room the exemptions leave is covered by the checks above:
-// TestTransferVolumeDataRoleAggregatesOnlyIntoBackupAgent and
-// TestTransferVolumeDataCapabilityAggregatesOnlyIntoNamespaceAdminAndBackupAgent pin WHICH axes the
+// TestTransferVolumeDataRoleAggregatesOnlyIntoKubernetesManagerAndBackupAgent and
+// TestTransferVolumeDataCapabilityAggregatesOnlyIntoNamespaceManagerAndBackupAgent pin WHICH axes the
 // transfer role may declare, values included, and
 // TestBackupAgentAggregationIsCarriedOnlyByTransferVolumeDataRole pins WHICH roles may declare the
 // backup-agent label at all. The last one is what keeps that exemption from being as wide as it

@@ -144,10 +144,12 @@ VirtualDiskSnapshot. VirtualDisk и VirtualDiskSnapshot всегда испол�
 
 ### Права доступа
 
-В Deckhouse Platform 1.78 и новее переносить данные могут субъекты RBAC (пользователи, группы и ServiceAccount) с
-уровнем доступа `admin` в соответствующем неймспейсе. Остальным субъектам необходима явная привязка встроенной
-ClusterRole `d8:namespace-capability:storage-foundation:transfer_volume_data`. Она позволяет создавать, читать и удалять
-DataExport и DataImport, а также передавать данные через HTTP API.
+Переносить данные могут субъекты RBAC (пользователи, группы и ServiceAccount) с уровнем доступа `Editor` и выше в
+текущей ролевой модели (`ClusterAuthorizationRule` или `AuthorizationRule`), а в RBACv2 — с уровнем доступа `manager`
+или `admin` в соответствующем неймспейсе (в Deckhouse Platform ниже 1.78 — с use-ролями `manager` и `admin`). Остальным
+субъектам необходима явная привязка встроенной ClusterRole
+`d8:namespace-capability:storage-foundation:transfer_volume_data`. Она позволяет создавать, читать и удалять DataExport
+и DataImport, а также передавать данные через HTTP API.
 
 Например, привяжите роль к пользователю, работающему с данными в неймспейсе `project`:
 
@@ -175,8 +177,8 @@ roleRef:
 | Перенос данных | `d8:namespace-capability:storage-foundation:transfer_volume_data` | `d8:use:capability:module:storage-foundation:transfer_volume_data` |
 | Агент резервного копирования | `d8:state-snapshotter:backup-agent` | `d8:use:capability:module:state-snapshotter:backup_agent` |
 
-При аудите учитывайте, что доступ к переносу данных также предоставляют уровень `admin` неймспейса и агрегированная роль
-`backup-agent` при наличии соответствующих привязок. Подробности приведены
+При аудите учитывайте, что доступ к переносу данных также предоставляют уровни доступа `Editor` и выше, уровни
+`manager` и `admin` неймспейса и агрегированная роль `backup-agent` при наличии соответствующих привязок. Подробности приведены
 [на странице «Интеграция с системами резервного копирования»](/modules/state-snapshotter/backup_integration.html).
 Ручная настройка прав для HTTP-клиента описана [на странице «Расширенное использование»](advanced_usage.html).
 
