@@ -52,13 +52,13 @@ resources:
         - list
         - watch
     legacy:
-      ClusterEditor:
+      ClusterAdmin:
         - create
         - delete
         - deletecollection
         - patch
         - update
-      User:
+      ClusterEditor:
         - get
         - list
         - watch
@@ -76,7 +76,7 @@ resources:
         - list
         - watch
     legacy:
-      ClusterEditor:
+      Editor:
         - create
         - delete
         - deletecollection
