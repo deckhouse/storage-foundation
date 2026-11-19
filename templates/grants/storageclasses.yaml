@@ -15,7 +15,7 @@ spec:
   defaultAvailability: All
   defaultFrom:
     annotationKey: storageclass.kubernetes.io/is-default-class
-    {{- if eq (include "storage-foundation.grants_default_from_additional_keys" .) "true" }}
+    {{- if eq (include "storage-foundation.grants_crd_has" (list . "defaultFromAdditionalAnnotationKeys")) "true" }}
     additionalAnnotationKeys:
     - storageclass.beta.kubernetes.io/is-default-class
     {{- end }}
@@ -23,6 +23,8 @@ spec:
   excluded:
   - matchLabels:
       storage.deckhouse.io/internal: "true"
+  {{- end }}
+  {{- if eq (include "storage-foundation.grants_crd_has" (list . "catalogFields")) "true" }}
   catalogFields:
   - name: provisioner
     path: $.provisioner
@@ -58,11 +60,13 @@ spec:
     match:
       fieldPath: $.metadata.annotations['volume.beta.kubernetes.io/storage-class']
     defaulting: None
+    {{- if eq (include "storage-foundation.grants_crd_has" (list . "fieldPathMessage")) "true" }}
     message: >-
       Kubernetes takes the StorageClass of a PersistentVolumeClaim from the
       volume.beta.kubernetes.io/storage-class annotation before spec.storageClassName:
       name a StorageClass that is available to the project in the annotation, or remove the annotation
       and set spec.storageClassName.
+    {{- end }}
   - path: $.spec.storageClassName
     match:
       fieldPath: $.spec['dataSource','dataSourceRef'].kind
@@ -70,10 +74,12 @@ spec:
       - PersistentVolumeClaim
       - VolumeSnapshot
     defaulting: None
+    {{- if eq (include "storage-foundation.grants_crd_has" (list . "fieldPathMessage")) "true" }}
     message: >-
       A PersistentVolumeClaim restored from a snapshot or cloned from a volume (spec.dataSource or
       spec.dataSourceRef) keeps its StorageClass and is not switched to the project default:
       specify a StorageClass that is available to the project and served by the CSI driver of the source.
+    {{- end }}
   {{- end }}
 ---
 apiVersion: multitenancy.deckhouse.io/v1alpha1
@@ -149,15 +155,17 @@ spec:
     - statefulsets
   fieldPaths:
   - path: "$.spec.volumeClaimTemplates[?!@.metadata.annotations['volume.beta.kubernetes.io/storage-class']].spec.storageClassName"
-    {{- if eq (include "storage-foundation.grants_missing_path" .) "true" }}
+    {{- if eq (include "storage-foundation.grants_crd_has" (list . "fieldPathMissingPath")) "true" }}
     missingPath: "$.spec.volumeClaimTemplates[?!@.spec.storageClassName && !@.metadata.annotations['volume.beta.kubernetes.io/storage-class']]"
     {{- end }}
     defaulting: None
+    {{- if eq (include "storage-foundation.grants_crd_has" (list . "fieldPathMessage")) "true" }}
     message: >-
       A volume claim template must name a StorageClass that is available to the project, in
       spec.storageClassName or in the volume.beta.kubernetes.io/storage-class annotation, which Kubernetes
       reads first: a template without a class gets the cluster default. An empty storageClassName binds a
       pre-provisioned PersistentVolume and is allowed.
+    {{- end }}
 ---
 apiVersion: multitenancy.deckhouse.io/v1alpha1
 kind: GrantableClusterResourceReference
@@ -178,11 +186,14 @@ spec:
   fieldPaths:
   - path: "$.spec.volumeClaimTemplates[*].metadata.annotations['volume.beta.kubernetes.io/storage-class']"
     defaulting: None
+    {{- if eq (include "storage-foundation.grants_crd_has" (list . "fieldPathMessage")) "true" }}
     message: >-
       Kubernetes takes the StorageClass of a volume claim template from the
       volume.beta.kubernetes.io/storage-class annotation before spec.storageClassName: name a StorageClass
       that is available to the project in the annotation, or remove the annotation and set
       spec.storageClassName.
+    {{- end }}
+{{- if eq (include "storage-foundation.grants_crd_has" (list . "fieldPathResources")) "true" }}
 ---
 apiVersion: multitenancy.deckhouse.io/v1alpha1
 kind: GrantableClusterResourceReference
@@ -205,27 +216,33 @@ spec:
   - resources:
     - pods
     path: "$.spec.volumes[?!@.ephemeral.volumeClaimTemplate.metadata.annotations['volume.beta.kubernetes.io/storage-class']].ephemeral.volumeClaimTemplate.spec.storageClassName"
-    {{- if eq (include "storage-foundation.grants_missing_path" .) "true" }}
+    {{- if eq (include "storage-foundation.grants_crd_has" (list . "fieldPathMissingPath")) "true" }}
     missingPath: "$.spec.volumes[?@.ephemeral && !@.ephemeral.volumeClaimTemplate.spec.storageClassName && !@.ephemeral.volumeClaimTemplate.metadata.annotations['volume.beta.kubernetes.io/storage-class']]"
     {{- end }}
     defaulting: None
+    {{- if eq (include "storage-foundation.grants_crd_has" (list . "fieldPathMessage")) "true" }}
     message: >-
       A volume claim template must name a StorageClass that is available to the project, in
       spec.storageClassName or in the volume.beta.kubernetes.io/storage-class annotation, which Kubernetes
       reads first: a template without a class gets the cluster default. An empty storageClassName binds a
       pre-provisioned PersistentVolume and is allowed.
+    {{- end }}
   - resources:
     - replicationcontrollers
     path: "$.spec.template.spec.volumes[?!@.ephemeral.volumeClaimTemplate.metadata.annotations['volume.beta.kubernetes.io/storage-class']].ephemeral.volumeClaimTemplate.spec.storageClassName"
-    {{- if eq (include "storage-foundation.grants_missing_path" .) "true" }}
+    {{- if eq (include "storage-foundation.grants_crd_has" (list . "fieldPathMissingPath")) "true" }}
     missingPath: "$.spec.template.spec.volumes[?@.ephemeral && !@.ephemeral.volumeClaimTemplate.spec.storageClassName && !@.ephemeral.volumeClaimTemplate.metadata.annotations['volume.beta.kubernetes.io/storage-class']]"
     {{- end }}
     defaulting: None
+    {{- if eq (include "storage-foundation.grants_crd_has" (list . "fieldPathMessage")) "true" }}
     message: >-
       A volume claim template must name a StorageClass that is available to the project, in
       spec.storageClassName or in the volume.beta.kubernetes.io/storage-class annotation, which Kubernetes
       reads first: a template without a class gets the cluster default. An empty storageClassName binds a
       pre-provisioned PersistentVolume and is allowed.
+    {{- end }}
+{{- end }}
+{{- if eq (include "storage-foundation.grants_crd_has" (list . "fieldPathResources")) "true" }}
 ---
 apiVersion: multitenancy.deckhouse.io/v1alpha1
 kind: GrantableClusterResourceReference
@@ -249,20 +266,25 @@ spec:
     - pods
     path: "$.spec.volumes[*].ephemeral.volumeClaimTemplate.metadata.annotations['volume.beta.kubernetes.io/storage-class']"
     defaulting: None
+    {{- if eq (include "storage-foundation.grants_crd_has" (list . "fieldPathMessage")) "true" }}
     message: >-
       Kubernetes takes the StorageClass of a volume claim template from the
       volume.beta.kubernetes.io/storage-class annotation before spec.storageClassName: name a StorageClass
       that is available to the project in the annotation, or remove the annotation and set
       spec.storageClassName.
+    {{- end }}
   - resources:
     - replicationcontrollers
     path: "$.spec.template.spec.volumes[*].ephemeral.volumeClaimTemplate.metadata.annotations['volume.beta.kubernetes.io/storage-class']"
     defaulting: None
+    {{- if eq (include "storage-foundation.grants_crd_has" (list . "fieldPathMessage")) "true" }}
     message: >-
       Kubernetes takes the StorageClass of a volume claim template from the
       volume.beta.kubernetes.io/storage-class annotation before spec.storageClassName: name a StorageClass
       that is available to the project in the annotation, or remove the annotation and set
       spec.storageClassName.
+    {{- end }}
+{{- end }}
 ---
 apiVersion: multitenancy.deckhouse.io/v1alpha1
 kind: GrantableClusterResourceReference
@@ -285,15 +307,17 @@ spec:
     - statefulsets
   fieldPaths:
   - path: "$.spec.template.spec.volumes[?!@.ephemeral.volumeClaimTemplate.metadata.annotations['volume.beta.kubernetes.io/storage-class']].ephemeral.volumeClaimTemplate.spec.storageClassName"
-    {{- if eq (include "storage-foundation.grants_missing_path" .) "true" }}
+    {{- if eq (include "storage-foundation.grants_crd_has" (list . "fieldPathMissingPath")) "true" }}
     missingPath: "$.spec.template.spec.volumes[?@.ephemeral && !@.ephemeral.volumeClaimTemplate.spec.storageClassName && !@.ephemeral.volumeClaimTemplate.metadata.annotations['volume.beta.kubernetes.io/storage-class']]"
     {{- end }}
     defaulting: None
+    {{- if eq (include "storage-foundation.grants_crd_has" (list . "fieldPathMessage")) "true" }}
     message: >-
       A volume claim template must name a StorageClass that is available to the project, in
       spec.storageClassName or in the volume.beta.kubernetes.io/storage-class annotation, which Kubernetes
       reads first: a template without a class gets the cluster default. An empty storageClassName binds a
       pre-provisioned PersistentVolume and is allowed.
+    {{- end }}
 ---
 apiVersion: multitenancy.deckhouse.io/v1alpha1
 kind: GrantableClusterResourceReference
@@ -317,11 +341,14 @@ spec:
   fieldPaths:
   - path: "$.spec.template.spec.volumes[*].ephemeral.volumeClaimTemplate.metadata.annotations['volume.beta.kubernetes.io/storage-class']"
     defaulting: None
+    {{- if eq (include "storage-foundation.grants_crd_has" (list . "fieldPathMessage")) "true" }}
     message: >-
       Kubernetes takes the StorageClass of a volume claim template from the
       volume.beta.kubernetes.io/storage-class annotation before spec.storageClassName: name a StorageClass
       that is available to the project in the annotation, or remove the annotation and set
       spec.storageClassName.
+    {{- end }}
+{{- if eq (include "storage-foundation.grants_crd_has" (list . "fieldPathResources")) "true" }}
 ---
 apiVersion: multitenancy.deckhouse.io/v1alpha1
 kind: GrantableClusterResourceReference
@@ -344,27 +371,33 @@ spec:
   - resources:
     - jobs
     path: "$.spec.template.spec.volumes[?!@.ephemeral.volumeClaimTemplate.metadata.annotations['volume.beta.kubernetes.io/storage-class']].ephemeral.volumeClaimTemplate.spec.storageClassName"
-    {{- if eq (include "storage-foundation.grants_missing_path" .) "true" }}
+    {{- if eq (include "storage-foundation.grants_crd_has" (list . "fieldPathMissingPath")) "true" }}
     missingPath: "$.spec.template.spec.volumes[?@.ephemeral && !@.ephemeral.volumeClaimTemplate.spec.storageClassName && !@.ephemeral.volumeClaimTemplate.metadata.annotations['volume.beta.kubernetes.io/storage-class']]"
     {{- end }}
     defaulting: None
+    {{- if eq (include "storage-foundation.grants_crd_has" (list . "fieldPathMessage")) "true" }}
     message: >-
       A volume claim template must name a StorageClass that is available to the project, in
       spec.storageClassName or in the volume.beta.kubernetes.io/storage-class annotation, which Kubernetes
       reads first: a template without a class gets the cluster default. An empty storageClassName binds a
       pre-provisioned PersistentVolume and is allowed.
+    {{- end }}
   - resources:
     - cronjobs
     path: "$.spec.jobTemplate.spec.template.spec.volumes[?!@.ephemeral.volumeClaimTemplate.metadata.annotations['volume.beta.kubernetes.io/storage-class']].ephemeral.volumeClaimTemplate.spec.storageClassName"
-    {{- if eq (include "storage-foundation.grants_missing_path" .) "true" }}
+    {{- if eq (include "storage-foundation.grants_crd_has" (list . "fieldPathMissingPath")) "true" }}
     missingPath: "$.spec.jobTemplate.spec.template.spec.volumes[?@.ephemeral && !@.ephemeral.volumeClaimTemplate.spec.storageClassName && !@.ephemeral.volumeClaimTemplate.metadata.annotations['volume.beta.kubernetes.io/storage-class']]"
     {{- end }}
     defaulting: None
+    {{- if eq (include "storage-foundation.grants_crd_has" (list . "fieldPathMessage")) "true" }}
     message: >-
       A volume claim template must name a StorageClass that is available to the project, in
       spec.storageClassName or in the volume.beta.kubernetes.io/storage-class annotation, which Kubernetes
       reads first: a template without a class gets the cluster default. An empty storageClassName binds a
       pre-provisioned PersistentVolume and is allowed.
+    {{- end }}
+{{- end }}
+{{- if eq (include "storage-foundation.grants_crd_has" (list . "fieldPathResources")) "true" }}
 ---
 apiVersion: multitenancy.deckhouse.io/v1alpha1
 kind: GrantableClusterResourceReference
@@ -388,19 +421,24 @@ spec:
     - jobs
     path: "$.spec.template.spec.volumes[*].ephemeral.volumeClaimTemplate.metadata.annotations['volume.beta.kubernetes.io/storage-class']"
     defaulting: None
+    {{- if eq (include "storage-foundation.grants_crd_has" (list . "fieldPathMessage")) "true" }}
     message: >-
       Kubernetes takes the StorageClass of a volume claim template from the
       volume.beta.kubernetes.io/storage-class annotation before spec.storageClassName: name a StorageClass
       that is available to the project in the annotation, or remove the annotation and set
       spec.storageClassName.
+    {{- end }}
   - resources:
     - cronjobs
     path: "$.spec.jobTemplate.spec.template.spec.volumes[*].ephemeral.volumeClaimTemplate.metadata.annotations['volume.beta.kubernetes.io/storage-class']"
     defaulting: None
+    {{- if eq (include "storage-foundation.grants_crd_has" (list . "fieldPathMessage")) "true" }}
     message: >-
       Kubernetes takes the StorageClass of a volume claim template from the
       volume.beta.kubernetes.io/storage-class annotation before spec.storageClassName: name a StorageClass
       that is available to the project in the annotation, or remove the annotation and set
       spec.storageClassName.
+    {{- end }}
+{{- end }}
 {{- end }}
 {{- end }}

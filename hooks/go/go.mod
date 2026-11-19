@@ -1,6 +1,7 @@
 module github.com/deckhouse/storage-foundation/hooks/go
 
 go 1.27.4
+
 require (
 	github.com/deckhouse/sds-common-lib v0.10.0
 	github.com/deckhouse/deckhouse/pkg/log v0.2.0
@@ -11,6 +12,7 @@ require (
 	k8s.io/apimachinery v0.35.8
 	k8s.io/client-go v0.35.8
 	sigs.k8s.io/controller-runtime v0.23.3
+	sigs.k8s.io/yaml v1.6.0
 )
 
 require (
@@ -50,6 +52,8 @@ require (
 	github.com/google/go-containerregistry v0.22.1 // indirect
 	github.com/google/uuid v1.6.0 // indirect
 	github.com/inconshreveable/mousetrap v1.1.0 // indirect
+	github.com/itchyny/gojq v0.12.17 // indirect
+	github.com/itchyny/timefmt-go v0.1.6 // indirect
 	github.com/jmoiron/sqlx v1.3.5 // indirect
 	github.com/jonboulle/clockwork v0.5.0 // indirect
 	github.com/json-iterator/go v1.1.12 // indirect
@@ -98,5 +102,4 @@ require (
 	sigs.k8s.io/json v0.0.0-20250730193827-2d320260d730 // indirect
 	sigs.k8s.io/randfill v1.0.0 // indirect
 	sigs.k8s.io/structured-merge-diff/v6 v6.3.2 // indirect
-	sigs.k8s.io/yaml v1.6.0 // indirect
 )

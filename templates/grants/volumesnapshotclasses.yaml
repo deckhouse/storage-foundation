@@ -11,7 +11,7 @@ spec:
     kind: VolumeSnapshotClass
   enforcement: Managed
   defaultAvailability: All
-  {{- if eq (include "storage-foundation.rbacv2_new_scheme" .) "true" }}
+  {{- if eq (include "storage-foundation.grants_crd_has" (list . "catalogFields")) "true" }}
   catalogFields:
   - name: driver
     path: $.driver

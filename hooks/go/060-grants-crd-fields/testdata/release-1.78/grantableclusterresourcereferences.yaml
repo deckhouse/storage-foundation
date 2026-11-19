@@ -1,0 +1,287 @@
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  labels:
+    heritage: deckhouse
+    module: multitenancy-manager
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.20.0
+  name: grantableclusterresourcereferences.multitenancy.deckhouse.io
+spec:
+  group: multitenancy.deckhouse.io
+  names:
+    kind: GrantableClusterResourceReference
+    listKind: GrantableClusterResourceReferenceList
+    plural: grantableclusterresourcereferences
+    shortNames:
+    - gcrr
+    singular: grantableclusterresourcereference
+  scope: Cluster
+  versions:
+  - additionalPrinterColumns:
+    - jsonPath: .spec.grantableClusterResourceName
+      name: Resource
+      type: string
+    - jsonPath: .status.bound
+      name: Bound
+      type: boolean
+    - jsonPath: .metadata.creationTimestamp
+      name: Age
+      type: date
+    name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        description: |-
+          Registers where a cluster-wide resource is used in other Kubernetes resources.
+
+          GrantableClusterResourceReference defines Kubernetes resources and fields that contain references to a cluster-wide resource registered using GrantableClusterResourceDefinition. For such fields, you can configure availability checks for the specified cluster-wide resource and automatic default value assignment.
+
+          One GrantableClusterResourceDefinition can be associated with multiple GrantableClusterResourceReference resources if the cluster-wide resource is used in different resources or fields.
+
+          GrantableClusterResourceReference is created by a module developer when adding a reference to a registered cluster-wide resource.
+
+          For more information about registering references to cluster-wide resources, refer to ["Usage examples"](usage.html#for-module-developers).
+        properties:
+          apiVersion:
+            description: |-
+              APIVersion defines the versioned schema of this representation of an object.
+              Servers should convert recognized schemas to the latest internal value, and
+              may reject unrecognized values.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
+            type: string
+            x-doc-skip: true
+          kind:
+            description: |-
+              Kind is a string value representing the REST resource this object represents.
+              Servers may infer this from the endpoint the client submits requests to.
+              Cannot be updated.
+              In CamelCase.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+            type: string
+            x-doc-skip: true
+          metadata:
+            type: object
+            x-doc-skip: true
+          spec:
+            description: GrantableClusterResourceReference parameters.
+            properties:
+              fieldPaths:
+                description: |-
+                  List of Kubernetes resource fields that contain references to the cluster-wide resource.
+
+                  For each field, you can limit applicability to specific resources, API groups and versions, define a matching condition, and configure default value assignment.
+
+                  At least one item is required. The `resources`, `apiGroups` and `apiVersions` of an item must be a subset of the corresponding lists in `spec.rule` (`*` in `spec.rule` accepts any value). Every combination of API group, version and resource that `spec.rule` matches must be covered by at least one item, otherwise requests for it would not be checked at all. Either give items scoped to every such combination, or add an item without `resources`, `apiGroups` and `apiVersions` as the fallback for all other cases. An object that violates either rule is rejected.
+                items:
+                  description: |-
+                    Settings for a field that contains a reference to the cluster-wide resource.
+
+                    If a request matches multiple items, the most specific one applies: `resources` takes precedence over `apiGroups`, and `apiGroups` takes precedence over `apiVersions`. `*` in `resources`, `apiGroups`, or `apiVersions` does not restrict the item and does not make it more specific. Items whose `match` condition does not hold for the object are skipped. Of equally restricted items, an item with `match` takes precedence over an item without it. If several items are equally specific, the first one in the list applies. An item without restrictions and without `match` is used in all other cases.
+
+                    Several items with the same `path` can therefore handle different objects of one resource. For example, an item with `match` on `$.spec['dataSource','dataSourceRef'].kind` and `defaulting: None` handles the PersistentVolumeClaims that restore or clone a volume, and an item without `match` and with `defaulting: Coerce` handles all other PersistentVolumeClaims.
+                  properties:
+                    apiGroups:
+                      description: |-
+                        API groups to which the field settings apply.
+
+                        If the parameter is not specified, the settings apply to all API groups that match `spec.rule`.
+                      items:
+                        type: string
+                      type: array
+                    apiVersions:
+                      description: |-
+                        API versions to which the field settings apply.
+
+                        If the parameter is not specified, the settings apply to all API versions that match `spec.rule`.
+                      items:
+                        type: string
+                      type: array
+                    defaulting:
+                      default: None
+                      description: |-
+                        Default value assignment mode.
+
+                        Allowed values:
+
+                        - `None`: No value is assigned; only the availability of the specified cluster-wide resource is checked.
+                        - `FillEmpty`: The default value is assigned when an object is created if the field is empty.
+                        - `Coerce`: The default value is assigned when an object is created if the field is empty or the specified cluster-wide resource is unavailable to the project.
+
+                        `FillEmpty` and `Coerce` require `path` to point to a single field, so only a simple member path is accepted, for example `$.spec.storageClassName` or `$.metadata.annotations['cert-manager.io/cluster-issuer']`. A path with a wildcard, an array index or a filter is rejected with these modes and can only be used with `None`.
+                      enum:
+                      - None
+                      - FillEmpty
+                      - Coerce
+                      type: string
+                    match:
+                      description: |-
+                        Condition for applying the field settings.
+
+                        If the condition does not match, the item is skipped: the next most specific item applies, and if there is none, availability checks and default value assignment are not performed for this field.
+
+                        Without `equals` and `in`, the condition matches when `fieldPath` points to a string value.
+                      properties:
+                        equals:
+                          description: Value that the field specified in `fieldPath` must match.
+                          type: string
+                        fieldPath:
+                          description: |-
+                            JSONPath to the field whose value is checked by the condition.
+
+                            Must be a valid RFC 9535 JSONPath of at most 256 characters; an object with a path that does not parse is rejected.
+                          maxLength: 256
+                          type: string
+                        in:
+                          description: List of allowed values for the field specified in `fieldPath`.
+                          items:
+                            type: string
+                          type: array
+                      required:
+                      - fieldPath
+                      type: object
+                    message:
+                      description: |-
+                        Text appended to the rejection of an object whose field references a cluster-wide resource that is unavailable to the project.
+
+                        Use it to tell the user what to do, for example why the value cannot be replaced with the project default.
+                      maxLength: 512
+                      type: string
+                    path:
+                      description: |-
+                        JSONPath to the string field containing the name of the cluster-wide resource.
+
+                        The path can also point to an annotation, for example, `$.metadata.annotations['cert-manager.io/cluster-issuer']`.
+
+                        Must be a valid RFC 9535 JSONPath of at most 256 characters; an object with a path that does not parse is rejected, whatever `defaulting` is set to. A field name that is not a plain identifier (contains `-`, `.` or `/`, or starts with a digit) must be written in brackets, for example `$.spec['foo-bar']`.
+
+                        An availability check evaluates the full JSONPath, including wildcards, array indexes and filters. Default value assignment does not: with `defaulting: FillEmpty` or `defaulting: Coerce`, only a simple member path is accepted.
+                      maxLength: 256
+                      type: string
+                    resources:
+                      description: |-
+                        Kubernetes resource names in plural, for example, `pods` or `cronjobs`, to which the field settings apply.
+
+                        If the parameter is not specified, the settings apply to all resources that match `spec.rule`. `*` has the same effect as omitting the parameter: it does not restrict the item and does not make it more specific.
+                      items:
+                        minLength: 1
+                        type: string
+                      type: array
+                  required:
+                  - path
+                  type: object
+                minItems: 1
+                type: array
+              grantableClusterResourceName:
+                description: Name of the GrantableClusterResourceDefinition that registers the cluster-wide resource referenced by the fields.
+                type: string
+              rule:
+                description: Rule for selecting Kubernetes resources to which GrantableClusterResourceReference applies.
+                properties:
+                  apiGroups:
+                    description: |-
+                      API groups of Kubernetes resources. The core group is the empty string.
+
+                      `*` is not accepted: the admission webhook is registered for the listed groups only, so a wildcard would silently intercept nothing.
+                    items:
+                      type: string
+                    type: array
+                    x-kubernetes-validations:
+                      - rule: "!('*' in self)"
+                        message: "apiGroups must list the groups explicitly; '*' is not intercepted by the webhook"
+                  apiVersions:
+                    description: |-
+                      API versions of Kubernetes resources.
+
+                      Use `*` to select all API versions.
+                    items:
+                      type: string
+                    type: array
+                  resources:
+                    description: Kubernetes resource names in plural form (for example, `ingresses`).
+                    items:
+                      type: string
+                    type: array
+                required:
+                - apiGroups
+                - apiVersions
+                - resources
+                type: object
+            required:
+            - fieldPaths
+            - grantableClusterResourceName
+            - rule
+            type: object
+          status:
+            description: GrantableClusterResourceReference status.
+            properties:
+              bound:
+                description: Indicates that the GrantableClusterResourceDefinition specified in `spec.grantableClusterResourceName` exists.
+                type: boolean
+              conditions:
+                description: |-
+                  Current state of GrantableClusterResourceReference.
+
+                  - `Bound`: whether the GrantableClusterResourceDefinition specified in `spec.grantableClusterResourceName` exists (reasons `Resolved`, `UnknownResource`).
+                  - `FieldPathsValid`: whether `spec.fieldPaths` pass the checks applied when the object is created or updated: the paths are valid, defaulting paths are simple member paths, item scopes are within `spec.rule`, and every combination `spec.rule` matches is covered (reasons `Valid`, `InvalidFieldPaths`; the message lists all problems). `False` means the object was stored bypassing these checks; the invalid paths are skipped during availability checks.
+                items:
+                  description: Information about one aspect of the current resource state.
+                  properties:
+                    lastTransitionTime:
+                      description: |-
+                        Time when the condition last changed.
+                      format: date-time
+                      type: string
+                    message:
+                      description: |-
+                        Message with additional information about the condition state.
+                      maxLength: 32768
+                      type: string
+                    observedGeneration:
+                      description: |-
+                        Resource generation on which the condition state is based.
+                      format: int64
+                      minimum: 0
+                      type: integer
+                    reason:
+                      description: |-
+                        Reason for the last change in the condition state.
+                      maxLength: 1024
+                      minLength: 1
+                      pattern: ^[A-Za-z]([A-Za-z0-9_,:]*[A-Za-z0-9_])?$
+                      type: string
+                    status:
+                      description: Condition state.
+                      enum:
+                      - "True"
+                      - "False"
+                      - Unknown
+                      type: string
+                    type:
+                      description: Condition type.
+                      maxLength: 316
+                      pattern: ^([a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*/)?(([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9])$
+                      type: string
+                  required:
+                  - lastTransitionTime
+                  - message
+                  - reason
+                  - status
+                  - type
+                  type: object
+                type: array
+                x-kubernetes-list-map-keys:
+                - type
+                x-kubernetes-list-type: map
+              observedGeneration:
+                description: Latest resource generation processed by the controller.
+                format: int64
+                type: integer
+            type: object
+        required:
+        - spec
+        type: object
+    served: true
+    storage: true
+    subresources:
+      status: {}

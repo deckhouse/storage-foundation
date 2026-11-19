@@ -84,6 +84,26 @@ properties:
           ca:
             type: string
             x-examples: ["YjY0ZW5jX3N0cmluZwo="]
+      grantsCRDFields:
+        type: object
+        default: {}
+        description: "The fields the GrantableClusterResourceDefinition and GrantableClusterResourceReference CRDs of multitenancy-manager declare in the cluster, read from their schemas by a hook. The grant templates render a field only if the CRD declares it."
+        properties:
+          catalogFields:
+            type: boolean
+            default: false
+          defaultFromAdditionalAnnotationKeys:
+            type: boolean
+            default: false
+          fieldPathMessage:
+            type: boolean
+            default: false
+          fieldPathMissingPath:
+            type: boolean
+            default: false
+          fieldPathResources:
+            type: boolean
+            default: false
   registry:
     type: object
     description: "System field, overwritten by Deckhouse. Don't use"
