@@ -1,0 +1,186 @@
+- name: storage-foundation.volume-health
+  rules:
+    - alert: PersistentVolumeFilesystemIsRO
+      expr: |
+        (
+            max by (node, persistentvolume, driver, pod_uid, fstype) (last_over_time(storage_foundation_volume_read_only[2m]) == 1)
+          * on (pod_uid) group_left (namespace, pod)
+            max by (pod_uid, namespace, pod) (
+              label_replace(kube_pod_info{job="kube-state-metrics"}, "pod_uid", "$1", "uid", "(.+)")
+            )
+          * on (persistentvolume) group_left (persistentvolumeclaim)
+            max by (persistentvolume, persistentvolumeclaim) (
+              label_replace(kube_persistentvolume_claim_ref{job="kube-state-metrics"}, "persistentvolumeclaim", "$1", "name", "(.+)")
+            )
+        )
+        or on (node, persistentvolume, pod_uid)
+          max by (node, persistentvolume, driver, pod_uid, fstype) (last_over_time(storage_foundation_volume_read_only[2m]) == 1)
+      for: 2m
+      labels:
+        severity_level: "4"
+        tier: cluster
+      annotations:
+        plk_protocol_version: "1"
+        plk_markup_format: "markdown"
+        plk_create_group_if_not_exists__persistent_volume_filesystem_is_ro: "PersistentVolumeFilesystemIsROGroup,tier=~tier,prometheus=deckhouse,kubernetes=~kubernetes"
+        plk_grouped_by__persistent_volume_filesystem_is_ro: "PersistentVolumeFilesystemIsROGroup,tier=~tier,prometheus=deckhouse,kubernetes=~kubernetes"
+        summary: The filesystem of the PersistentVolume `{{ $labels.persistentvolume }}` is read-only.
+        description: |
+          The kernel has switched the `{{ $labels.fstype }}` filesystem of the PersistentVolume `{{ $labels.persistentvolume }}` (CSI driver `{{ $labels.driver }}`) on the node `{{ $labels.node }}` to read-only, while the Pod with the UID `{{ $labels.pod_uid }}`{{ if $labels.pod }} (`{{ $labels.namespace }}/{{ $labels.pod }}`, PersistentVolumeClaim `{{ $labels.persistentvolumeclaim }}`){{ end }} mounts it for writing. Every write of the application to this volume fails.
+
+          The kernel does this after a filesystem error or an I/O error of the storage, for example ext4 with `errors=remount-ro`, and never switches the filesystem back by itself.
+
+          Troubleshooting steps:
+
+          1. Find the Pod and the PersistentVolumeClaim, if the alert does not name them:
+
+             ```shell
+             d8 k get pods -A -o json | jq -r '.items[] | select(.metadata.uid == "{{ $labels.pod_uid }}") | .metadata.namespace + "/" + .metadata.name'
+             d8 k get pv {{ $labels.persistentvolume }} -o jsonpath='{.spec.claimRef.namespace}/{.spec.claimRef.name}{"\n"}'
+             ```
+
+          2. Read the kernel log on the node `{{ $labels.node }}` to find the cause, such as I/O errors of the device or errors of the filesystem:
+
+             ```shell
+             dmesg -T | grep -E -i 'EXT4-fs|XFS|I/O error|read-only'
+             ```
+
+             If the storage returned I/O errors, fix the storage or the paths to it first.
+
+          3. Stop the workload so that no Pod mounts the volume, for example by scaling its Deployment or StatefulSet to zero replicas.
+
+          4. Check the filesystem with `fsck` while the volume is not mounted anywhere. Do not remount the filesystem read-write by hand: writing to a filesystem with errors can damage the data further.
+
+          5. Start the workload again. A new Pod mounts the filesystem anew.
+
+          The module documentation describes these steps in detail in the "Monitoring the filesystems of volumes" section.
+
+    - alert: PersistentVolumeFilesystemErrors
+      expr: |
+        (
+            max by (node, persistentvolume, driver, fstype) (last_over_time(storage_foundation_volume_filesystem_errors[2m]) > 0)
+          * on (persistentvolume) group_left (namespace, persistentvolumeclaim)
+            max by (persistentvolume, namespace, persistentvolumeclaim) (
+              label_replace(
+                label_replace(kube_persistentvolume_claim_ref{job="kube-state-metrics"}, "persistentvolumeclaim", "$1", "name", "(.+)"),
+                "namespace", "$1", "claim_namespace", "(.+)"
+              )
+            )
+        )
+        or on (node, persistentvolume)
+          max by (node, persistentvolume, driver, fstype) (last_over_time(storage_foundation_volume_filesystem_errors[2m]) > 0)
+      for: 1m
+      labels:
+        severity_level: "5"
+        tier: cluster
+      annotations:
+        plk_protocol_version: "1"
+        plk_markup_format: "markdown"
+        plk_create_group_if_not_exists__persistent_volume_filesystem_errors: "PersistentVolumeFilesystemErrorsGroup,tier=~tier,prometheus=deckhouse,kubernetes=~kubernetes"
+        plk_grouped_by__persistent_volume_filesystem_errors: "PersistentVolumeFilesystemErrorsGroup,tier=~tier,prometheus=deckhouse,kubernetes=~kubernetes"
+        summary: The filesystem of the PersistentVolume `{{ $labels.persistentvolume }}` has recorded errors.
+        description: |
+          The `{{ $labels.fstype }}` filesystem of the PersistentVolume `{{ $labels.persistentvolume }}` (CSI driver `{{ $labels.driver }}`){{ if $labels.persistentvolumeclaim }}, bound to the PersistentVolumeClaim `{{ $labels.namespace }}/{{ $labels.persistentvolumeclaim }}`,{{ end }} mounted on the node `{{ $labels.node }}` has recorded {{ $value }} errors in its superblock since it was last checked with `fsck`.
+
+          The filesystem may still be writable: with `errors=continue`, the default of `mke2fs`, ext4 keeps working after an error, and with `errors=remount-ro` it turns read-only and the `PersistentVolumeFilesystemIsRO` alert fires as well. Either way the data on the volume may be damaged. The counter is kept in the superblock, so the alert keeps firing, also on another node and after the Pod is recreated, until the filesystem is checked with `e2fsck`.
+
+          Troubleshooting steps:
+
+          1. Read the kernel log on the node `{{ $labels.node }}` to find the errors and their cause:
+
+             ```shell
+             dmesg -T | grep -E -i 'EXT4-fs|I/O error'
+             ```
+
+          2. Plan a maintenance window for the workload that uses the volume: stop it so that no Pod mounts the volume, check the filesystem with `e2fsck -f` while the volume is not mounted anywhere, and start the workload again.
+
+          The module documentation describes these steps in detail in the "Monitoring the filesystems of volumes" section.
+
+    - alert: PersistentVolumeFilesystemShutdown
+      expr: |
+        (
+            max by (node, persistentvolume, driver, fstype) (last_over_time(storage_foundation_volume_filesystem_shutdown[2m]) == 1)
+          * on (persistentvolume) group_left (namespace, persistentvolumeclaim)
+            max by (persistentvolume, namespace, persistentvolumeclaim) (
+              label_replace(
+                label_replace(kube_persistentvolume_claim_ref{job="kube-state-metrics"}, "persistentvolumeclaim", "$1", "name", "(.+)"),
+                "namespace", "$1", "claim_namespace", "(.+)"
+              )
+            )
+        )
+        or on (node, persistentvolume)
+          max by (node, persistentvolume, driver, fstype) (last_over_time(storage_foundation_volume_filesystem_shutdown[2m]) == 1)
+      for: 2m
+      labels:
+        severity_level: "4"
+        tier: cluster
+      annotations:
+        plk_protocol_version: "1"
+        plk_markup_format: "markdown"
+        plk_create_group_if_not_exists__persistent_volume_filesystem_shutdown: "PersistentVolumeFilesystemShutdownGroup,tier=~tier,prometheus=deckhouse,kubernetes=~kubernetes"
+        plk_grouped_by__persistent_volume_filesystem_shutdown: "PersistentVolumeFilesystemShutdownGroup,tier=~tier,prometheus=deckhouse,kubernetes=~kubernetes"
+        summary: The XFS filesystem of the PersistentVolume `{{ $labels.persistentvolume }}` has shut down.
+        description: |
+          The XFS filesystem of the PersistentVolume `{{ $labels.persistentvolume }}` (CSI driver `{{ $labels.driver }}`){{ if $labels.persistentvolumeclaim }}, bound to the PersistentVolumeClaim `{{ $labels.namespace }}/{{ $labels.persistentvolumeclaim }}`,{{ end }} on the node `{{ $labels.node }}` has shut down. Every read and write of the application on this volume fails with an I/O error, while the volume stays mounted and the mount looks writable.
+
+          XFS shuts down after an I/O error on its metadata or its log, after it finds corruption, or when it is shut down on purpose, and stays shut down until it is unmounted.
+
+          Troubleshooting steps:
+
+          1. Read the kernel log on the node `{{ $labels.node }}` to find the cause:
+
+             ```shell
+             dmesg -T | grep -E -i 'XFS|I/O error'
+             ```
+
+             If the storage returned I/O errors, fix the storage or the paths to it first.
+
+          2. Stop the workload so that no Pod mounts the volume. Unmounting replays the log when the filesystem is mounted again.
+
+          3. If the kernel reported corruption, check the filesystem with `xfs_repair` while the volume is not mounted anywhere.
+
+          4. Start the workload again. A new Pod mounts the filesystem anew.
+
+          The module documentation describes these steps in detail in the "Monitoring the filesystems of volumes" section.
+
+    - alert: D8StorageFoundationVolumeHealthExporterStale
+      expr: |
+        (
+          time() - max by (node) (node_textfile_mtime_seconds{file=~"(.*/)?storage-foundation-volume-health[.]prom"}) > 300
+        )
+        or on (node)
+        (
+            max by (node) (kube_pod_info{job="kube-state-metrics", namespace="d8-storage-foundation", created_by_kind="DaemonSet", created_by_name="volume-health-exporter"})
+          unless on (node)
+            max by (node) (node_textfile_mtime_seconds{file=~"(.*/)?storage-foundation-volume-health[.]prom"})
+          and on (node)
+            max by (node) (up{job="node-exporter"} == 1)
+        )
+      for: 5m
+      labels:
+        severity_level: "8"
+        tier: cluster
+      annotations:
+        plk_protocol_version: "1"
+        plk_markup_format: "markdown"
+        plk_create_group_if_not_exists__d8_storage_foundation_volume_health_exporter_health: "D8StorageFoundationVolumeHealthExporterHealth,tier=~tier,prometheus=deckhouse,kubernetes=~kubernetes"
+        plk_grouped_by__d8_storage_foundation_volume_health_exporter_health: "D8StorageFoundationVolumeHealthExporterHealth,tier=~tier,prometheus=deckhouse,kubernetes=~kubernetes"
+        summary: The volume health metrics of the node `{{ $labels.node }}` are not updated.
+        description: |
+          The `volume-health-exporter` Pod on the node `{{ $labels.node }}` has not updated its metrics file for more than five minutes, or the node exporter does not report the file. The `storage_foundation_volume_read_only` metric of this node is out of date or missing, so the `PersistentVolumeFilesystemIsRO` alert cannot fire for the volumes of this node.
+
+          Troubleshooting steps:
+
+          1. Check the state of the Pod on the node:
+
+             ```shell
+             d8 k -n d8-storage-foundation get pods -l app=volume-health-exporter -o wide --field-selector spec.nodeName={{ $labels.node }}
+             ```
+
+          2. Check the logs of the Pod found in the previous step:
+
+             ```shell
+             d8 k -n d8-storage-foundation logs <POD_NAME>
+             ```
+
+          3. On the node, check that the `/var/run/node-exporter-textfile/storage-foundation-volume-health.prom` file exists and is updated every 30 seconds.

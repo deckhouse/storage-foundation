@@ -1,0 +1,50 @@
+{{- if .Values.global.enabledModules | has "admission-policy-engine" }}
+---
+apiVersion: deckhouse.io/v1alpha1
+kind: SecurityPolicyException
+metadata:
+  name: volume-health-exporter
+  namespace: d8-{{ .Chart.Name }}
+  {{- include "helm_lib_module_labels" (list . (dict "app" "volume-health-exporter")) | nindent 2 }}
+spec:
+  securityContext:
+    runAsUser:
+      allowedValues:
+        - 0
+      metadata:
+        description: |
+          Allow running as root (UID 0) for the volume-health-exporter.
+          The pod directories of the kubelet and the node exporter textfile directory belong to root, so only root reads the volume data files of the kubelet and writes the metrics file. All capabilities are dropped, the root filesystem is read-only, the Pod mounts no ServiceAccount token and listens on no port: the probes run the exporter binary inside the container.
+          Trust boundary: root with the read-only hostPath volumes below can read everything under them, which includes the contents of every volume mounted on the node and the Secret, ConfigMap and projected ServiceAccount token volumes of every Pod on the node. The exporter reads only the mount table of its own container and the vol_data.json files of the CSI volumes and calls stat() on the root of the XFS volumes, but a compromise of its image or binary exposes all of the above on that node.
+    runAsNonRoot:
+      allowedValue: false
+      metadata:
+        description: |
+          Allow running as root for the volume-health-exporter.
+          The pod directories of the kubelet and the node exporter textfile directory belong to root.
+  volumes:
+    types:
+      allowedValues:
+        - hostPath
+      metadata:
+        description: |
+          Allow hostPath volumes for the volume-health-exporter.
+          The exporter reads the mounts of the pod volumes on the node and reports them through the textfile collector of the node exporter.
+    hostPath:
+      allowedValues:
+        - path: /var/lib/kubelet/pods
+          readOnly: true
+          metadata:
+            description: |
+              The pod directories of the kubelet, mounted with HostToContainer propagation. The exporter reads the mount table of the CSI volumes published into pods and the vol_data.json files the kubelet keeps next to them, and calls stat() on the root of every XFS volume to detect a shut down filesystem; it does not open the volumes or read their files.
+        - path: /var/lib/kubelet/plugins/kubernetes.io/csi
+          readOnly: true
+          metadata:
+            description: |
+              The staging directory of the CSI volumes, mounted with HostToContainer propagation. The exporter reads only the mount options of the staging mounts from its own mount table, to leave out a volume that the CSI driver staged read-only, such as a ReadOnlyMany claim.
+        - path: /var/run/node-exporter-textfile
+          readOnly: false
+          metadata:
+            description: |
+              The textfile directory of the node exporter, where the exporter keeps its own metrics file for the node exporter to report.
+{{- end }}

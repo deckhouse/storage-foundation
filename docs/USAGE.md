@@ -570,6 +570,56 @@ Take the following into account:
   d8 k get available volumesnapshotclasses -n <PROJECT_NAME> -o yaml
   ```
 
+## Monitoring the filesystems of volumes
+
+The kernel switches the filesystem of a volume to read-only after a filesystem error or an I/O error of the storage, for example ext4 mounted with `errors=remount-ro`. The volume stays mounted, the Pod keeps running, and every write of the application fails. The kernel never switches such a filesystem back to read-write by itself.
+
+The `volume-health-exporter` DaemonSet of the module runs one Pod on every node and reports such volumes. Every 30 seconds it reads the mounts of the CSI volumes that the kubelet publishes into Pods and writes the metrics to the textfile collector of the node exporter (the `/var/run/node-exporter-textfile/storage-foundation-volume-health.prom` file on the node):
+
+| Metric | Labels | Value |
+|---|---|---|
+| `storage_foundation_volume_read_only` | `node`, `persistentvolume`, `driver`, `pod_uid`, `fstype` | `1` if the filesystem of the volume is read-only while its mount in the Pod is writable, `0` if the filesystem is writable |
+| `storage_foundation_volume_filesystem_errors` | `node`, `persistentvolume`, `driver`, `fstype` | For an ext2, ext3 or ext4 filesystem: the number of errors recorded in its superblock since it was last checked with `e2fsck` (the `errors_count` file of the filesystem in `/sys/fs/ext4/`) |
+| `storage_foundation_volume_filesystem_shutdown` | `node`, `persistentvolume`, `driver`, `fstype` | For an XFS filesystem: `1` if it has shut down, `0` if it is running. The exporter calls `stat()` on the root of the volume, which XFS refuses with an I/O error once it has shut down, without reading the device. A call that does not return within 2 seconds is not waited for and gives no series until it returns; the next scans do not start another call for that volume. |
+
+The metrics cover every CSI driver, with or without the staging step. They have no series for a volume the CSI driver staged read-only, such as a `ReadOnlyMany` claim, for a block volume (`volumeMode: Block`), for an inline ephemeral CSI volume, and for a volume no Pod mounts on the node. A volume a Pod mounts with `readOnly: true` has a series with `0` while its filesystem is writable: the CSI driver makes such a mount read-only with a remount after the bind, and the exporter, which reads the mounts as they reach its own mount namespace, does not see a remount. If the filesystem of such a volume turns read-only, the metric becomes `1` as for any other Pod.
+
+The module sends the following alerts:
+
+| Alert | Severity | When it fires |
+|---|---|---|
+| `PersistentVolumeFilesystemIsRO` | 4 | `storage_foundation_volume_read_only` has been `1` for 2 minutes. A gap in the metric of up to 2 minutes, such as a restart of the exporter Pod, does not reset the alert, so it also resolves up to 2 minutes after the Pod is gone. The alert names the node, the PersistentVolume, the CSI driver and the UID of the Pod and, while kube-state-metrics reports them, the namespace and the name of the Pod and the name of the PersistentVolumeClaim. |
+| `PersistentVolumeFilesystemErrors` | 5 | `storage_foundation_volume_filesystem_errors` has been above `0` for 1 minute. The ext4 filesystem has found errors, even if it is still writable: with `errors=continue`, the default of `mke2fs`, it keeps working after an error. The counter is kept in the superblock, so the alert keeps firing, also on another node and after the Pod is recreated, until the filesystem is checked with `e2fsck`. |
+| `PersistentVolumeFilesystemShutdown` | 4 | `storage_foundation_volume_filesystem_shutdown` has been `1` for 2 minutes. XFS shuts down after an I/O error on its metadata or its log or after it finds corruption, and then fails every read and write on the volume, while the mount still looks writable and `storage_foundation_volume_read_only` stays `0`. The filesystem stays shut down until it is unmounted. |
+| `D8StorageFoundationVolumeHealthExporterStale` | 8 | For 5 minutes, the metrics file of a node has not been updated for more than 5 minutes, or the node exporter does not report the file of a node where the `volume-health-exporter` Pod runs. The metrics of this node are out of date, and `PersistentVolumeFilesystemIsRO` cannot fire for its volumes. |
+
+### What to do when the filesystem of a volume is read-only, has errors or has shut down
+
+For `PersistentVolumeFilesystemErrors`, follow the same steps in a maintenance window: the filesystem may still be writable, but its data may already be damaged. For `PersistentVolumeFilesystemShutdown`, follow them at once: the application can neither read nor write the volume. Mounting a shut down XFS filesystem again replays its log, so run `xfs_repair` only if the kernel log reports corruption.
+
+1. Find the Pod and the PersistentVolumeClaim. If the alert does not name them, look them up by the labels of the alert:
+
+   ```bash
+   d8 k get pods -A -o json | jq -r '.items[] | select(.metadata.uid == "<POD_UID>") | .metadata.namespace + "/" + .metadata.name'
+   d8 k get pv <PERSISTENTVOLUME> -o jsonpath='{.spec.claimRef.namespace}/{.spec.claimRef.name}{"\n"}'
+   ```
+
+1. Find the cause in the kernel log of the node from the `node` label of the alert. You can open a shell on the node with `d8 k debug node/<NODE_NAME> -it --image=<IMAGE>` and `chroot /host`, or over SSH:
+
+   ```bash
+   dmesg -T | grep -E -i 'EXT4-fs|XFS|I/O error|read-only'
+   ```
+
+   Lines such as `EXT4-fs error (device ...)` followed by `Remounting filesystem read-only` mean that ext4 found an error and switched the filesystem to read-only. `I/O error, dev ...` lines before them mean that the storage did not complete the I/O. In that case, fix the storage or the paths to it first, for example the network to the storage system or the multipath paths, and only then repair the filesystem.
+
+1. Stop the workload so that no Pod mounts the volume, for example by scaling its Deployment or StatefulSet to zero replicas. Do not remount the filesystem read-write by hand: writing to a filesystem with errors can damage the data further.
+
+1. If the CSI driver supports snapshots, consider taking a VolumeSnapshot of the volume before the repair, so that you can return to the current state.
+
+1. Check and repair the filesystem with `fsck` (`e2fsck -f` for ext4, `xfs_repair` for XFS) while the volume is not mounted anywhere. Where the block device is available depends on the CSI driver: for example, a local LVM volume stays available on its node as the logical volume, while the volume of a storage system has to be attached to a node first. Follow the documentation of the CSI driver or of the storage system.
+
+1. Start the workload again. Once no Pod on the node mounts the volume, the new Pod mounts the filesystem anew, and the metric of its volume returns to `0`. Recreating the Pod without a manual `fsck` mounts the filesystem anew as well, but repairs it at most with the automatic check that some CSI drivers run before mounting (`fsck -a`), which fixes only simple errors.
+
 ## Troubleshooting
 
 The sections below describe how to read the state of module objects and how to fix typical errors.

@@ -817,6 +817,10 @@ serviceAccounts:
               - secrets
             verbs:
               - get
+  - name: volume-health-exporter
+    path: volume-health-exporter
+    labels:
+      app: volume-health-exporter
   - name: webhooks
     path: webhooks
     labels:
