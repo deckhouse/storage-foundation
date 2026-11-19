@@ -51,3 +51,19 @@ func vcrState(vcr *v1alpha1.VolumeCaptureRequest) string {
 
 	return statePending
 }
+
+// vcrStage returns the stage label of a pending vcr from its deletion timestamp and Ready condition.
+func vcrStage(vcr *v1alpha1.VolumeCaptureRequest) string {
+	ready := meta.FindStatusCondition(vcr.Status.Conditions, v1alpha1.ConditionTypeReady)
+
+	switch {
+	case vcr.DeletionTimestamp != nil:
+		return stageOther
+	case ready == nil || ready.Status == metav1.ConditionUnknown:
+		return stageNotStarted
+	case ready.Status == metav1.ConditionFalse && ready.Reason == v1alpha1.ConditionReasonTargetsPending:
+		return stageSnapshotInProgress
+	}
+
+	return stageOther
+}

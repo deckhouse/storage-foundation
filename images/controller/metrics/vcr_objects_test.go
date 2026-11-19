@@ -23,6 +23,8 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"testing/synctest"
+	"time"
 
 	metricsstorage "github.com/deckhouse/deckhouse/pkg/metrics-storage"
 	"github.com/prometheus/client_golang/prometheus"
@@ -44,6 +46,11 @@ const header = "# HELP storage_foundation_vcr_objects " +
 	"VolumeCaptureRequests in the cluster by mode, CSI driver, StorageClass and state.\n" +
 	"# TYPE storage_foundation_vcr_objects gauge\n"
 
+// pendingHeader is what the exposition output of the pending metric starts with.
+const pendingHeader = "# HELP storage_foundation_vcr_pending_objects " +
+	"Pending VolumeCaptureRequests in the cluster by mode, CSI driver, StorageClass, age and stage.\n" +
+	"# TYPE storage_foundation_vcr_pending_objects gauge\n"
+
 // The PV driver and the StorageClass provisioner differ, so a test sees where the driver came from.
 const (
 	testPVDriver    = "pv.csi.example.com"
@@ -51,6 +58,9 @@ const (
 )
 
 var errRead = errors.New("read failed")
+
+// bubbleStart is the time a synctest bubble starts at.
+var bubbleStart = time.Date(2000, time.January, 1, 0, 0, 0, 0, time.UTC)
 
 func TestVCRObjectsMetric_update(t *testing.T) {
 	t.Parallel()
@@ -204,7 +214,8 @@ func TestVCRObjectsMetric_update(t *testing.T) {
 
 			update(t.Context())
 
-			if err := testutil.CollectAndCompare(collector, strings.NewReader(tt.want)); err != nil {
+			err := testutil.CollectAndCompare(collector, strings.NewReader(tt.want), "storage_foundation_vcr_objects")
+			if err != nil {
 				t.Errorf("CollectAndCompare() error = %v", err)
 			}
 		})
@@ -252,7 +263,8 @@ func TestVCRObjectsMetric_update_readErrors(t *testing.T) {
 
 			update(t.Context())
 
-			if err := testutil.CollectAndCompare(collector, strings.NewReader(tt.want)); err != nil {
+			err := testutil.CollectAndCompare(collector, strings.NewReader(tt.want), "storage_foundation_vcr_objects")
+			if err != nil {
 				t.Errorf("CollectAndCompare() error = %v", err)
 			}
 		})
@@ -262,7 +274,9 @@ func TestVCRObjectsMetric_update_readErrors(t *testing.T) {
 func TestVCRObjectsMetric_update_twice(t *testing.T) {
 	t.Parallel()
 
-	pending := header + series(v1alpha1.VolumeCaptureModeSnapshot, "unknown", "unknown", "pending", 1)
+	// A request without a creation time is older than a day.
+	pending := header + series(v1alpha1.VolumeCaptureModeSnapshot, "unknown", "unknown", "pending", 1) +
+		pendingHeader + pendingSeries(v1alpha1.VolumeCaptureModeSnapshot, "unknown", "unknown", "gt_24h", "not_started", 1)
 
 	tests := []struct {
 		name   string
@@ -320,6 +334,94 @@ func TestVCRObjectsMetric_update_twice(t *testing.T) {
 	}
 }
 
+func TestVCRObjectsMetric_update_pending(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		objects []client.Object
+		want    string
+	}{
+		{
+			name: "success: no requests publish no series",
+		},
+		{
+			name: "success: completed and failed requests are not pending",
+			objects: []client.Object{
+				createdAgo(newVCR("a", v1alpha1.VolumeCaptureModeSnapshot, ready(metav1.ConditionTrue, v1alpha1.ConditionReasonCompleted)), time.Minute),
+				createdAgo(newVCR("b", v1alpha1.VolumeCaptureModeSnapshot, ready(metav1.ConditionFalse, v1alpha1.ConditionReasonNotFound)), time.Minute),
+			},
+		},
+		{
+			name: "success: a request without the Ready condition is not_started",
+			objects: []client.Object{
+				createdAgo(newVCR("a", v1alpha1.VolumeCaptureModeDetach), time.Minute),
+			},
+			want: pendingHeader + pendingSeries(v1alpha1.VolumeCaptureModeDetach, "unknown", "unknown", "lt_3m", "not_started", 1),
+		},
+		{
+			name: "success: Ready=Unknown is not_started",
+			objects: []client.Object{
+				createdAgo(newVCR("a", v1alpha1.VolumeCaptureModeSnapshot, ready(metav1.ConditionUnknown, "Progressing")), 20*time.Minute),
+			},
+			want: pendingHeader + pendingSeries(v1alpha1.VolumeCaptureModeSnapshot, "unknown", "unknown", "15m_30m", "not_started", 1),
+		},
+		{
+			name: "success: Ready=False with the TargetsPending reason is snapshot_in_progress",
+			objects: []client.Object{
+				pendingVCR("a", 5*time.Minute),
+			},
+			want: pendingHeader + pendingSeries(v1alpha1.VolumeCaptureModeSnapshot, "unknown", "unknown", "3m_15m", "snapshot_in_progress", 1),
+		},
+		{
+			name: "success: a request being deleted is other whatever its Ready condition",
+			objects: []client.Object{
+				deleting(pendingVCR("a", time.Hour)),
+			},
+			want: pendingHeader + pendingSeries(v1alpha1.VolumeCaptureModeSnapshot, "unknown", "unknown", "30m_2h", "other", 1),
+		},
+		{
+			name: "success: pending requests with the same labels make one series with their count",
+			objects: []client.Object{
+				pendingVCR("a", 5*time.Minute),
+				pendingVCR("b", 10*time.Minute),
+				pendingVCR("c", 3*time.Hour),
+			},
+			want: pendingHeader +
+				pendingSeries(v1alpha1.VolumeCaptureModeSnapshot, "unknown", "unknown", "2h_24h", "snapshot_in_progress", 1) +
+				pendingSeries(v1alpha1.VolumeCaptureModeSnapshot, "unknown", "unknown", "3m_15m", "snapshot_in_progress", 2),
+		},
+		{
+			name: "success: a pending request has the driver and StorageClass of its source PVC",
+			objects: []client.Object{
+				withTarget(pendingVCR("a", 25*time.Hour), "data"),
+				newPVC("data", "fast", "pv-1"),
+				newPV("pv-1", testPVDriver),
+				newStorageClass("fast"),
+			},
+			want: pendingHeader + pendingSeries(v1alpha1.VolumeCaptureModeSnapshot, testPVDriver, "fast", "gt_24h", "snapshot_in_progress", 1),
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			// The bubble starts its clock at bubbleStart, so the age of a request is known.
+			synctest.Test(t, func(t *testing.T) {
+				update, collector := registerTestVCRObjects(t, newReader(t, interceptor.Funcs{}, tt.objects...))
+
+				update(t.Context())
+
+				err := testutil.CollectAndCompare(collector, strings.NewReader(tt.want), "storage_foundation_vcr_pending_objects")
+				if err != nil {
+					t.Errorf("CollectAndCompare() error = %v", err)
+				}
+			})
+		})
+	}
+}
+
 func TestRegisterVCRObjects(t *testing.T) {
 	t.Parallel()
 
@@ -335,6 +437,11 @@ func TestRegisterVCRObjects(t *testing.T) {
 		{
 			name:    "error: a counter of the same name takes the name",
 			counter: "storage_foundation_vcr_objects",
+			wantErr: true,
+		},
+		{
+			name:    "error: a counter of the pending metric name takes the name",
+			counter: "storage_foundation_vcr_pending_objects",
 			wantErr: true,
 		},
 	}
@@ -371,7 +478,15 @@ func series(mode, driver, storageClass, state string, count int) string {
 		driver, mode, state, storageClass, count)
 }
 
-// registerTestVCRObjects registers the metric in a new storage and returns its update function and the
+// pendingSeries returns the exposition line of one series of the pending metric, labels in the order
+// Prometheus prints them.
+func pendingSeries(mode, driver, storageClass, age, stage string, count int) string {
+	return fmt.Sprintf(
+		"storage_foundation_vcr_pending_objects{age=%q,driver=%q,mode=%q,stage=%q,storage_class=%q} %d\n",
+		age, driver, mode, stage, storageClass, count)
+}
+
+// registerTestVCRObjects registers the metrics in a new storage and returns its update function and the
 // collector of that storage.
 func registerTestVCRObjects(t *testing.T, reader client.Reader) (updateFunc, prometheus.Collector) {
 	t.Helper()
@@ -434,6 +549,27 @@ func newVCR(name, mode string, conditions ...metav1.Condition) *v1alpha1.VolumeC
 		Spec:      v1alpha1.VolumeCaptureRequestSpec{Mode: mode},
 		Status:    v1alpha1.VolumeCaptureRequestStatus{Conditions: conditions},
 	}
+}
+
+// createdAgo sets the creation time of vcr to age before bubbleStart and returns vcr.
+func createdAgo(vcr *v1alpha1.VolumeCaptureRequest, age time.Duration) *v1alpha1.VolumeCaptureRequest {
+	vcr.CreationTimestamp = metav1.NewTime(bubbleStart.Add(-age))
+	return vcr
+}
+
+// pendingVCR returns a Snapshot request with Ready=False and the TargetsPending reason, created age before
+// bubbleStart.
+func pendingVCR(name string, age time.Duration) *v1alpha1.VolumeCaptureRequest {
+	vcr := newVCR(name, v1alpha1.VolumeCaptureModeSnapshot,
+		ready(metav1.ConditionFalse, v1alpha1.ConditionReasonTargetsPending))
+	return createdAgo(vcr, age)
+}
+
+// deleting marks vcr as being deleted and returns it. The finalizer keeps the fake client from refusing it.
+func deleting(vcr *v1alpha1.VolumeCaptureRequest) *v1alpha1.VolumeCaptureRequest {
+	vcr.DeletionTimestamp = new(metav1.NewTime(bubbleStart))
+	vcr.Finalizers = []string{"test"}
+	return vcr
 }
 
 // withTarget points the spec.target of vcr at the PVC name made by newPVC and returns vcr.

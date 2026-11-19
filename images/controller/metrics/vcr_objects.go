@@ -19,6 +19,7 @@ package metrics
 import (
 	"context"
 	"fmt"
+	"time"
 
 	metricsstorage "github.com/deckhouse/deckhouse/pkg/metrics-storage"
 	"github.com/deckhouse/deckhouse/pkg/metrics-storage/collectors"
@@ -29,16 +30,18 @@ import (
 	"github.com/deckhouse/storage-foundation/api/v1alpha1"
 )
 
-// vcrObjectsGroup holds every series of the metric, so that an update can drop them all at once.
+// vcrObjectsGroup holds every series of the metrics, so that an update can drop them all at once.
 const vcrObjectsGroup = "vcr_objects"
 
-// vcrObjectsMetric publishes the number of VolumeCaptureRequests in the cache by label set.
+// vcrObjectsMetric publishes the number of VolumeCaptureRequests in the cache by label set, and the number of
+// pending ones by age and stage.
 type vcrObjectsMetric struct {
-	reader client.Reader
-	gauge  *collectors.ConstGaugeCollector
+	reader  client.Reader
+	gauge   *collectors.ConstGaugeCollector
+	pending *collectors.ConstGaugeCollector
 }
 
-// vcrLabelSet holds the label values of one series of the metric.
+// vcrLabelSet holds the label values of one series of storage_foundation_vcr_objects.
 type vcrLabelSet struct {
 	mode         string
 	driver       string
@@ -46,7 +49,22 @@ type vcrLabelSet struct {
 	state        string
 }
 
-// registerVCRObjects registers the metric in st and returns the function that recounts it.
+// vcrPendingLabelSet holds the label values of one series of storage_foundation_vcr_pending_objects.
+type vcrPendingLabelSet struct {
+	mode         string
+	driver       string
+	storageClass string
+	age          string
+	stage        string
+}
+
+// vcrCounts holds the number of requests by label set of each metric.
+type vcrCounts struct {
+	objects map[vcrLabelSet]int
+	pending map[vcrPendingLabelSet]int
+}
+
+// registerVCRObjects registers the metrics in st and returns the function that recounts them.
 func registerVCRObjects(st *metricsstorage.MetricStorage, reader client.Reader) (updateFunc, error) {
 	gauge, err := st.RegisterGauge(
 		"storage_foundation_vcr_objects",
@@ -57,9 +75,20 @@ func registerVCRObjects(st *metricsstorage.MetricStorage, reader client.Reader) 
 		return nil, fmt.Errorf("register storage_foundation_vcr_objects: %w", err)
 	}
 
+	pending, err := st.RegisterGauge(
+		"storage_foundation_vcr_pending_objects",
+		[]string{labelMode, labelDriver, labelStorageClass, labelAge, labelStage},
+		options.WithHelp("Pending VolumeCaptureRequests in the cluster by mode, CSI driver, StorageClass, "+
+			"age and stage."),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("register storage_foundation_vcr_pending_objects: %w", err)
+	}
+
 	metric := &vcrObjectsMetric{
-		reader: reader,
-		gauge:  gauge,
+		reader:  reader,
+		gauge:   gauge,
+		pending: pending,
 	}
 
 	return metric.update, nil
@@ -67,16 +96,17 @@ func registerVCRObjects(st *metricsstorage.MetricStorage, reader client.Reader) 
 
 // update replaces the series with the current count, or drops them when the requests cannot be read.
 func (m *vcrObjectsMetric) update(ctx context.Context) {
-	counts, err := m.countRequests(ctx)
+	counts, err := m.countRequests(ctx, time.Now())
 
 	// Expired before the error check, so a failed read leaves no stale series.
 	m.gauge.ExpireGroupMetrics(vcrObjectsGroup)
+	m.pending.ExpireGroupMetrics(vcrObjectsGroup)
 	if err != nil {
 		log.FromContext(ctx).Error(err, "count VolumeCaptureRequests")
 		return
 	}
 
-	for labelSet, count := range counts {
+	for labelSet, count := range counts.objects {
 		labels := map[string]string{
 			labelMode:         labelSet.mode,
 			labelDriver:       labelSet.driver,
@@ -86,17 +116,32 @@ func (m *vcrObjectsMetric) update(ctx context.Context) {
 
 		m.gauge.Set(float64(count), labels, collectors.WithGroup(vcrObjectsGroup))
 	}
+
+	for labelSet, count := range counts.pending {
+		labels := map[string]string{
+			labelMode:         labelSet.mode,
+			labelDriver:       labelSet.driver,
+			labelStorageClass: labelSet.storageClass,
+			labelAge:          labelSet.age,
+			labelStage:        labelSet.stage,
+		}
+
+		m.pending.Set(float64(count), labels, collectors.WithGroup(vcrObjectsGroup))
+	}
 }
 
-// countRequests returns the number of requests in the cache by label set. It reads the source PVC
-// and PV of each request.
-func (m *vcrObjectsMetric) countRequests(ctx context.Context) (map[vcrLabelSet]int, error) {
+// countRequests counts the requests in the cache by label set of each metric, with the age of a pending one
+// measured at now. It reads the source PVC and PV of each request.
+func (m *vcrObjectsMetric) countRequests(ctx context.Context, now time.Time) (vcrCounts, error) {
 	requests := new(v1alpha1.VolumeCaptureRequestList)
 	if err := m.reader.List(ctx, requests); err != nil {
-		return nil, fmt.Errorf("list VolumeCaptureRequests: %w", err)
+		return vcrCounts{}, fmt.Errorf("list VolumeCaptureRequests: %w", err)
 	}
 
-	counts := make(map[vcrLabelSet]int)
+	counts := vcrCounts{
+		objects: make(map[vcrLabelSet]int),
+		pending: make(map[vcrPendingLabelSet]int),
+	}
 
 	// No requests, so the StorageClasses are not needed.
 	if len(requests.Items) == 0 {
@@ -105,20 +150,30 @@ func (m *vcrObjectsMetric) countRequests(ctx context.Context) (map[vcrLabelSet]i
 
 	provisioners, err := storageClassProvisioners(ctx, m.reader)
 	if err != nil {
-		return nil, fmt.Errorf("list StorageClasses: %w", err)
+		return vcrCounts{}, fmt.Errorf("list StorageClasses: %w", err)
 	}
 
 	for i := range requests.Items {
 		vcr := &requests.Items[i]
+		mode := vcrMode(vcr)
 		driver, scName := vcrVolumeLabels(ctx, m.reader, vcr, provisioners)
-		labelSet := vcrLabelSet{
-			mode:         vcrMode(vcr),
-			driver:       driver,
-			storageClass: scName,
-			state:        vcrState(vcr),
+		state := vcrState(vcr)
+
+		counts.objects[vcrLabelSet{mode: mode, driver: driver, storageClass: scName, state: state}]++
+
+		if state != statePending {
+			continue
 		}
 
-		counts[labelSet]++
+		pendingLabelSet := vcrPendingLabelSet{
+			mode:         mode,
+			driver:       driver,
+			storageClass: scName,
+			age:          ageBucket(vcr.CreationTimestamp.Time, now),
+			stage:        vcrStage(vcr),
+		}
+
+		counts.pending[pendingLabelSet]++
 	}
 
 	return counts, nil

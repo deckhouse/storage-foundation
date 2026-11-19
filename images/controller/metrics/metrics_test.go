@@ -46,9 +46,9 @@ func TestRegister(t *testing.T) {
 			want: 0,
 		},
 		{
-			name:  "success: the updater publishes the series once it runs",
+			name:  "success: the updater publishes the series of both gauges once it runs",
 			start: true,
-			want:  1,
+			want:  2,
 		},
 	}
 
