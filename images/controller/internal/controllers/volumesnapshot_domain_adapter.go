@@ -126,11 +126,12 @@ func ensureVSDomainSpecificController(cs **storagev1alpha1.CaptureStateStatus) {
 // the SDK's read-only view. Absent sub-structure => both legs nil (no leg declared yet).
 func vsCoreCaptureStateFrom(cs *storagev1alpha1.CaptureStateStatus) snapshotsdk.CoreCaptureState {
 	if cs == nil || cs.CommonController == nil {
-		return snapshotsdk.CoreCaptureState{}
+		return snapshotsdk.CoreCaptureState{DataLegExpected: true}
 	}
 	return snapshotsdk.CoreCaptureState{
 		ManifestCaptured: cs.CommonController.ManifestCaptured,
 		DataCaptured:     cs.CommonController.DataCaptured,
+		DataLegExpected:  true,
 	}
 }
 

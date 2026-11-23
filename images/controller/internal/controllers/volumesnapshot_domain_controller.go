@@ -226,7 +226,7 @@ func (r *VolumeSnapshotDomainReconciler) Reconcile(ctx context.Context, req ctrl
 	// and it is not a cosmetic one: the core withholds the native-CSI data leg until the source is named, so
 	// the content stays DataCapturePending and the whole tree wedges below its root with nothing in any log
 	// to say why. Republishing is a no-op once the value is equal, so the steady state stays write-free.
-	needManifestCapture := snapshotsdk.ManifestCaptureNeeded(adapter)
+	needManifestCapture := snapshotsdk.ManifestCaptureDecision(adapter) != snapshotsdk.CaptureLegSuppressed
 	if needManifestCapture || adapter.GetSnapshotSource() == nil {
 		pvc := &corev1.PersistentVolumeClaim{}
 		switch getErr := r.Client.Get(ctx, types.NamespacedName{Namespace: vs.Namespace, Name: *pvcName}, pvc); {

@@ -4,8 +4,8 @@ go 1.27.4
 
 require (
 	github.com/deckhouse/sds-common-lib v0.22.0
-	github.com/deckhouse/state-snapshotter/api v0.0.0-20261022094718-f1260fa12809
-	github.com/deckhouse/state-snapshotter/pkg/snapshotsdk v0.0.0-20260903020803-2954009c5a0b
+	github.com/deckhouse/state-snapshotter/api v0.0.0-20261119065548-329bcf7414d0
+	github.com/deckhouse/state-snapshotter/pkg/snapshotsdk v0.0.0-20261117122826-b23288f2f31c
 	github.com/deckhouse/storage-foundation/api v0.0.0-00010101000000-000000000000
 	github.com/deckhouse/storage-foundation/common v0.0.0-00010101000000-000000000000
 	github.com/deckhouse/storage-foundation/images/webhooks v0.0.0-00010101000000-000000000000

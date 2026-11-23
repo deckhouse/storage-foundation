@@ -19,7 +19,7 @@ replace github.com/deckhouse/storage-foundation/api => ../../api
 
 require (
 	cel.dev/expr v0.25.1 // indirect
-	github.com/deckhouse/state-snapshotter/api v0.0.0-20261022094718-f1260fa12809 // indirect
+	github.com/deckhouse/state-snapshotter/api v0.0.0-20261119065548-329bcf7414d0 // indirect
 	github.com/DataDog/gostackparse v0.7.0 // indirect
 	github.com/antlr4-go/antlr/v4 v4.13.1 // indirect
 	github.com/davecgh/go-spew v1.1.2-0.20180830191138-d8f796af33cc // indirect

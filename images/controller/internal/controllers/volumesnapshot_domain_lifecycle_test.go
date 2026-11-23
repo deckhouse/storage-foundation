@@ -139,6 +139,22 @@ func reconcileVolumeSnapshot(t *testing.T, r *VolumeSnapshotDomainReconciler, na
 	return result
 }
 
+func declareCoreLegs(t *testing.T, r *VolumeSnapshotDomainReconciler, name string) {
+	t.Helper()
+	open := false
+	got := getDomainVolumeSnapshot(t, r, name)
+	if got.Status.CaptureState == nil {
+		got.Status.CaptureState = &storagev1alpha1.CaptureStateStatus{}
+	}
+	got.Status.CaptureState.CommonController = &storagev1alpha1.CommonControllerCaptureState{
+		ManifestCaptured: &open,
+		DataCaptured:     &open,
+	}
+	if err := r.SnapClient.Status().Update(context.Background(), got); err != nil {
+		t.Fatalf("declare core capture legs: %v", err)
+	}
+}
+
 func getDomainVolumeSnapshot(t *testing.T, r *VolumeSnapshotDomainReconciler, name string) *sfsnapv1.VolumeSnapshot {
 	t.Helper()
 	vs := &sfsnapv1.VolumeSnapshot{}
@@ -189,6 +205,8 @@ func TestVolumeSnapshotDomainCapturesAUserSnapshot(t *testing.T) {
 	}
 	r := newVolumeSnapshotDomainLifecycleReconciler(t, vs, pvc)
 
+	reconcileVolumeSnapshot(t, r, vs.Name)
+	declareCoreLegs(t, r, vs.Name)
 	reconcileVolumeSnapshot(t, r, vs.Name)
 
 	got := getDomainVolumeSnapshot(t, r, vs.Name)
@@ -256,6 +274,8 @@ func TestVolumeSnapshotDomainAdoptsItsOwnSnapshot(t *testing.T) {
 	}
 	r := newVolumeSnapshotDomainLifecycleReconciler(t, vs, pvc)
 
+	reconcileVolumeSnapshot(t, r, vs.Name)
+	declareCoreLegs(t, r, vs.Name)
 	reconcileVolumeSnapshot(t, r, vs.Name)
 
 	got := getDomainVolumeSnapshot(t, r, vs.Name)
