@@ -42,8 +42,9 @@ type vcrEventMetrics struct {
 func registerVCREventMetrics(st *metricsstorage.MetricStorage) (vcrEventMetrics, error) {
 	created, err := st.RegisterCounter(
 		"storage_foundation_vcr_created_total",
-		[]string{labelMode, labelDriver, labelStorageClass},
-		options.WithHelp("VolumeCaptureRequests created in the cluster by mode, CSI driver and StorageClass."),
+		[]string{labelMode, labelDriver, labelStorageClass, labelVolumeSnapshotClass},
+		options.WithHelp("VolumeCaptureRequests created in the cluster by mode, CSI driver, StorageClass "+
+			"and VolumeSnapshotClass."),
 	)
 	if err != nil {
 		return vcrEventMetrics{}, fmt.Errorf("register storage_foundation_vcr_created_total: %w", err)
@@ -51,10 +52,10 @@ func registerVCREventMetrics(st *metricsstorage.MetricStorage) (vcrEventMetrics,
 
 	duration, err := st.RegisterHistogram(
 		"storage_foundation_vcr_duration_seconds",
-		[]string{labelMode, labelDriver, labelStorageClass, labelResult},
+		[]string{labelMode, labelDriver, labelStorageClass, labelVolumeSnapshotClass, labelResult},
 		durationBuckets(),
 		options.WithHelp("Time from the creation of a VolumeCaptureRequest to its final status "+
-			"by mode, CSI driver, StorageClass and result."),
+			"by mode, CSI driver, StorageClass, VolumeSnapshotClass and result."),
 	)
 	if err != nil {
 		return vcrEventMetrics{}, fmt.Errorf("register storage_foundation_vcr_duration_seconds: %w", err)
@@ -77,8 +78,7 @@ func (r *Recorder) VCREvents() handler.Funcs {
 			ctx, cancel := context.WithTimeout(ctx, eventTimeout)
 			defer cancel()
 
-			driver, scName := r.resolveVCRDriverAndStorageClass(ctx, vcr)
-			r.countVCRCreated(vcr, driver, scName)
+			r.countVCRCreated(vcr, r.resolveVCRVolume(ctx, vcr))
 		},
 		UpdateFunc: func(ctx context.Context, e event.UpdateEvent, _ workqueue.TypedRateLimitingInterface[reconcile.Request]) {
 			oldVCR, ok := e.ObjectOld.(*v1alpha1.VolumeCaptureRequest)
@@ -97,38 +97,34 @@ func (r *Recorder) VCREvents() handler.Funcs {
 			ctx, cancel := context.WithTimeout(ctx, eventTimeout)
 			defer cancel()
 
-			driver, scName := r.resolveVCRDriverAndStorageClass(ctx, vcr)
-			r.observeVCRDuration(vcr, driver, scName)
+			r.observeVCRDuration(vcr, r.resolveVCRVolume(ctx, vcr))
 		},
 	}
 }
 
-// resolveVCRDriverAndStorageClass returns the driver and storage_class labels of vcr. It reads the StorageClasses,
-// the source PVC and the PV.
-func (r *Recorder) resolveVCRDriverAndStorageClass(
-	ctx context.Context,
-	vcr *v1alpha1.VolumeCaptureRequest,
-) (driver, scName string) {
-	provisioners, err := storageClassProvisioners(ctx, r.reader)
+// resolveVCRVolume returns the volume labels of vcr. It reads the StorageClasses, the source PVC and the PV.
+func (r *Recorder) resolveVCRVolume(ctx context.Context, vcr *v1alpha1.VolumeCaptureRequest) vcrVolume {
+	classes, err := storageClasses(ctx, r.reader)
 	if err != nil {
-		// The event does not come again, so the request is labelled with an unknown StorageClass.
+		// The event does not come again, so the request is labelled as if its StorageClass were unknown.
 		log.FromContext(ctx).Error(err, "list StorageClasses", "namespace", vcr.Namespace, "name", vcr.Name)
 	}
 
-	return vcrVolumeLabels(ctx, r.reader, vcr, provisioners)
+	return vcrVolumeLabels(ctx, r.reader, vcr, classes)
 }
 
 // countVCRCreated counts vcr as a created request.
-func (r *Recorder) countVCRCreated(vcr *v1alpha1.VolumeCaptureRequest, driver, scName string) {
+func (r *Recorder) countVCRCreated(vcr *v1alpha1.VolumeCaptureRequest, volume vcrVolume) {
 	r.vcr.created.Add(1, map[string]string{
-		labelMode:         vcrMode(vcr),
-		labelDriver:       driver,
-		labelStorageClass: scName,
+		labelMode:                vcrMode(vcr),
+		labelDriver:              volume.driver,
+		labelStorageClass:        volume.storageClass,
+		labelVolumeSnapshotClass: volume.snapshotClass,
 	})
 }
 
 // observeVCRDuration records the time from the creation of the finished vcr to its final status.
-func (r *Recorder) observeVCRDuration(vcr *v1alpha1.VolumeCaptureRequest, driver, scName string) {
+func (r *Recorder) observeVCRDuration(vcr *v1alpha1.VolumeCaptureRequest, volume vcrVolume) {
 	seconds := vcr.Status.CompletionTimestamp.Sub(vcr.CreationTimestamp.Time).Seconds()
 	// The API server stamps the creation and the controller the completion, each by its own clock and to the second,
 	// so a request that fails at once may come out negative.
@@ -137,10 +133,11 @@ func (r *Recorder) observeVCRDuration(vcr *v1alpha1.VolumeCaptureRequest, driver
 	}
 
 	r.vcr.duration.Observe(seconds, map[string]string{
-		labelMode:         vcrMode(vcr),
-		labelDriver:       driver,
-		labelStorageClass: scName,
-		labelResult:       vcrState(vcr),
+		labelMode:                vcrMode(vcr),
+		labelDriver:              volume.driver,
+		labelStorageClass:        volume.storageClass,
+		labelVolumeSnapshotClass: volume.snapshotClass,
+		labelResult:              vcrState(vcr),
 	})
 }
 

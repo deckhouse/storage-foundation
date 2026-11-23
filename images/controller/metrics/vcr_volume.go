@@ -28,67 +28,110 @@ import (
 	"github.com/deckhouse/storage-foundation/api/v1alpha1"
 )
 
-// storageClassProvisioners returns the provisioner of every StorageClass in the cluster by its name.
-func storageClassProvisioners(ctx context.Context, reader client.Reader) (map[string]string, error) {
+// snapshotClassAnnotation is the StorageClass annotation that names the VolumeSnapshotClass the VCR controller
+// takes snapshots with.
+const snapshotClassAnnotation = "storage.deckhouse.io/volumesnapshotclass"
+
+// storageClassLabels holds the label values that one StorageClass gives a volume.
+type storageClassLabels struct {
+	provisioner   string
+	snapshotClass string
+}
+
+// vcrVolume holds the labels of a VolumeCaptureRequest that describe its source volume.
+type vcrVolume struct {
+	driver        string
+	storageClass  string
+	snapshotClass string
+}
+
+// storageClasses returns the label values of every StorageClass in the cluster by its name.
+func storageClasses(ctx context.Context, reader client.Reader) (map[string]storageClassLabels, error) {
 	list := new(storagev1.StorageClassList)
 	if err := reader.List(ctx, list); err != nil {
 		return nil, err
 	}
 
-	provisioners := make(map[string]string, len(list.Items))
+	classes := make(map[string]storageClassLabels, len(list.Items))
 	for i := range list.Items {
-		provisioners[list.Items[i].Name] = list.Items[i].Provisioner
+		sc := &list.Items[i]
+
+		snapshotClass := sc.Annotations[snapshotClassAnnotation]
+		// The VCR controller takes no snapshot on a StorageClass that does not name a VolumeSnapshotClass.
+		if snapshotClass == "" {
+			snapshotClass = labelNone
+		}
+
+		classes[sc.Name] = storageClassLabels{provisioner: sc.Provisioner, snapshotClass: snapshotClass}
 	}
 
-	return provisioners, nil
+	return classes, nil
 }
 
-// vcrVolumeLabels returns the driver and storage_class labels of vcr, read from its source PVC.
-// A label that cannot be determined is unknown.
+// vcrVolumeLabels returns the volume labels of vcr, read from its source PVC. A label that cannot be determined
+// is unknown, and a Detach request has no VolumeSnapshotClass.
 func vcrVolumeLabels(
 	ctx context.Context,
 	reader client.Reader,
 	vcr *v1alpha1.VolumeCaptureRequest,
-	provisioners map[string]string,
-) (driver, scName string) {
+	classes map[string]storageClassLabels,
+) vcrVolume {
+	volume := sourceVolumeLabels(ctx, reader, vcr, classes)
+	if vcr.Spec.Mode == v1alpha1.VolumeCaptureModeDetach {
+		volume.snapshotClass = labelNone
+	}
+
+	return volume
+}
+
+// sourceVolumeLabels returns the volume labels of the source PVC of vcr, all unknown if that PVC cannot be read.
+func sourceVolumeLabels(
+	ctx context.Context,
+	reader client.Reader,
+	vcr *v1alpha1.VolumeCaptureRequest,
+	classes map[string]storageClassLabels,
+) vcrVolume {
+	unknown := vcrVolume{driver: labelUnknown, storageClass: labelUnknown, snapshotClass: labelUnknown}
 	if vcr.Spec.Target == nil {
-		return labelUnknown, labelUnknown
+		return unknown
 	}
 
 	pvc := new(corev1.PersistentVolumeClaim)
 	// spec.target has no namespace: the PVC is in the namespace of the request.
 	err := reader.Get(ctx, client.ObjectKey{Namespace: vcr.Namespace, Name: vcr.Spec.Target.Name}, pvc)
 	if apierrors.IsNotFound(err) {
-		return labelUnknown, labelUnknown
+		return unknown
 	}
 	if err != nil {
 		// V(1): a broken cache would repeat this for every request on every scrape.
 		log.FromContext(ctx).V(1).Info("get the PVC of a VolumeCaptureRequest, using unknown labels",
 			"namespace", vcr.Namespace, "name", vcr.Name, "err", err)
-		return labelUnknown, labelUnknown
+		return unknown
 	}
 
 	// A PVC recreated under the same name is not the source PVC.
 	if string(pvc.UID) != vcr.Spec.Target.UID {
-		return labelUnknown, labelUnknown
+		return unknown
 	}
 
+	var scName string
 	if pvc.Spec.StorageClassName != nil {
 		scName = *pvc.Spec.StorageClassName
 	}
-	provisioner, ok := provisioners[scName]
+	class, ok := classes[scName]
 	if !ok {
-		scName, provisioner = labelUnknown, labelUnknown
+		scName = labelUnknown
+		class = storageClassLabels{provisioner: labelUnknown, snapshotClass: labelUnknown}
 	}
 
-	driver, err = pvcDriver(ctx, reader, pvc, provisioner)
+	driver, err := pvcDriver(ctx, reader, pvc, class.provisioner)
 	if err != nil {
 		log.FromContext(ctx).V(1).Info("get the PV of a VolumeCaptureRequest, using unknown driver",
 			"namespace", vcr.Namespace, "name", vcr.Name, "err", err)
-		return labelUnknown, scName
+		driver = labelUnknown
 	}
 
-	return driver, scName
+	return vcrVolume{driver: driver, storageClass: scName, snapshotClass: class.snapshotClass}
 }
 
 // pvcDriver returns the CSI driver of the PV bound to pvc, or provisioner while pvc has no PV.

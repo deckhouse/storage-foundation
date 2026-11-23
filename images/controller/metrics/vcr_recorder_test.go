@@ -38,12 +38,13 @@ import (
 
 // createdHeader is what the exposition output of the counter starts with. It is followed by the series.
 const createdHeader = "# HELP storage_foundation_vcr_created_total " +
-	"VolumeCaptureRequests created in the cluster by mode, CSI driver and StorageClass.\n" +
+	"VolumeCaptureRequests created in the cluster by mode, CSI driver, StorageClass and VolumeSnapshotClass.\n" +
 	"# TYPE storage_foundation_vcr_created_total counter\n"
 
 // durationHeader is what the exposition output of the histogram starts with. It is followed by the series.
 const durationHeader = "# HELP storage_foundation_vcr_duration_seconds " +
-	"Time from the creation of a VolumeCaptureRequest to its final status by mode, CSI driver, StorageClass and result.\n" +
+	"Time from the creation of a VolumeCaptureRequest to its final status by mode, CSI driver, StorageClass, " +
+	"VolumeSnapshotClass and result.\n" +
 	"# TYPE storage_foundation_vcr_duration_seconds histogram\n"
 
 func TestRecorder_VCREvents(t *testing.T) {
@@ -58,7 +59,7 @@ func TestRecorder_VCREvents(t *testing.T) {
 		{
 			name: "success: a created request is counted",
 			obj:  withTarget(newVCR("a", v1alpha1.VolumeCaptureModeSnapshot), "data"),
-			want: createdHeader + createdSeries(v1alpha1.VolumeCaptureModeSnapshot, testPVDriver, "fast", 1),
+			want: createdHeader + createdSeries(v1alpha1.VolumeCaptureModeSnapshot, boundVolume, 1),
 		},
 		{
 			name:            "success: a request from the initial list is not counted",
@@ -99,7 +100,8 @@ func TestRecorder_VCREvents_timeout(t *testing.T) {
 		if got := time.Since(start); got != eventTimeout {
 			t.Errorf("VCREvents().Create() returned after %v; want %v", got, eventTimeout)
 		}
-		want := createdHeader + createdSeries(v1alpha1.VolumeCaptureModeSnapshot, testPVDriver, "unknown", 1)
+		want := createdHeader + createdSeries(v1alpha1.VolumeCaptureModeSnapshot,
+			vcrVolume{driver: testPVDriver, storageClass: "unknown", snapshotClass: "unknown"}, 1)
 		if err := testutil.CollectAndCompare(collector, strings.NewReader(want)); err != nil {
 			t.Errorf("CollectAndCompare() error = %v", err)
 		}
@@ -123,19 +125,19 @@ func TestRecorder_VCREvents_update(t *testing.T) {
 			name:   "success: a request that completes is observed with result completed",
 			oldObj: createdVCR(inProgress),
 			newObj: finishedVCR(completed, 7*time.Second),
-			want:   durationHeader + durationSeries(v1alpha1.VolumeCaptureModeSnapshot, testPVDriver, "fast", "completed", 7),
+			want:   durationHeader + durationSeries(v1alpha1.VolumeCaptureModeSnapshot, boundVolume, "completed", 7),
 		},
 		{
 			name:   "success: a request that fails is observed with result failed",
 			oldObj: createdVCR(),
 			newObj: finishedVCR(failed, 3*time.Second),
-			want:   durationHeader + durationSeries(v1alpha1.VolumeCaptureModeSnapshot, testPVDriver, "fast", "failed", 3),
+			want:   durationHeader + durationSeries(v1alpha1.VolumeCaptureModeSnapshot, boundVolume, "failed", 3),
 		},
 		{
 			name:   "success: a completion time before the creation time is observed as zero",
 			oldObj: createdVCR(),
 			newObj: finishedVCR(failed, -time.Second),
-			want:   durationHeader + durationSeries(v1alpha1.VolumeCaptureModeSnapshot, testPVDriver, "fast", "failed", 0),
+			want:   durationHeader + durationSeries(v1alpha1.VolumeCaptureModeSnapshot, boundVolume, "failed", 0),
 		},
 		{
 			name:   "success: an update of a request that is already final is not observed",
@@ -189,7 +191,8 @@ func TestRecorder_VCREvents_updateTimeout(t *testing.T) {
 		if got := time.Since(start); got != eventTimeout {
 			t.Errorf("VCREvents().Update() returned after %v; want %v", got, eventTimeout)
 		}
-		want := durationHeader + durationSeries(v1alpha1.VolumeCaptureModeSnapshot, testPVDriver, "unknown", "completed", 7)
+		want := durationHeader + durationSeries(v1alpha1.VolumeCaptureModeSnapshot,
+			vcrVolume{driver: testPVDriver, storageClass: "unknown", snapshotClass: "unknown"}, "completed", 7)
 		if err := testutil.CollectAndCompare(collector, strings.NewReader(want)); err != nil {
 			t.Errorf("CollectAndCompare() error = %v", err)
 		}
@@ -211,14 +214,14 @@ func TestRecorder_countVCRCreated(t *testing.T) {
 				withTarget(newVCR("a", v1alpha1.VolumeCaptureModeSnapshot), "data"),
 				withTarget(newVCR("b", v1alpha1.VolumeCaptureModeSnapshot), "data"),
 			},
-			want: createdHeader + createdSeries(v1alpha1.VolumeCaptureModeSnapshot, testPVDriver, "fast", 2),
+			want: createdHeader + createdSeries(v1alpha1.VolumeCaptureModeSnapshot, boundVolume, 2),
 		},
 		{
-			name: "success: a request whose PVC is not found is counted with unknown labels",
+			name: "success: a Detach request without its PVC is counted with unknown labels and no VolumeSnapshotClass",
 			vcrs: []*v1alpha1.VolumeCaptureRequest{
 				withTarget(newVCR("a", v1alpha1.VolumeCaptureModeDetach), "missing"),
 			},
-			want: createdHeader + createdSeries(v1alpha1.VolumeCaptureModeDetach, "unknown", "unknown", 1),
+			want: createdHeader + createdSeries(v1alpha1.VolumeCaptureModeDetach, unknownDetachVolume, 1),
 		},
 		{
 			name: "error: a failed StorageClass list counts the request with an unknown StorageClass",
@@ -226,7 +229,8 @@ func TestRecorder_countVCRCreated(t *testing.T) {
 				withTarget(newVCR("a", v1alpha1.VolumeCaptureModeSnapshot), "data"),
 			},
 			funcs: failList(new(storagev1.StorageClassList)),
-			want:  createdHeader + createdSeries(v1alpha1.VolumeCaptureModeSnapshot, testPVDriver, "unknown", 1),
+			want: createdHeader + createdSeries(v1alpha1.VolumeCaptureModeSnapshot,
+				vcrVolume{driver: testPVDriver, storageClass: "unknown", snapshotClass: "unknown"}, 1),
 		},
 	}
 
@@ -237,8 +241,7 @@ func TestRecorder_countVCRCreated(t *testing.T) {
 			r, collector := newTestRecorder(t, newVolumeReader(t, tt.funcs))
 
 			for _, vcr := range tt.vcrs {
-				driver, scName := r.resolveVCRDriverAndStorageClass(t.Context(), vcr)
-				r.countVCRCreated(vcr, driver, scName)
+				r.countVCRCreated(vcr, r.resolveVCRVolume(t.Context(), vcr))
 			}
 
 			if err := testutil.CollectAndCompare(collector, strings.NewReader(tt.want)); err != nil {
@@ -289,16 +292,18 @@ func TestNewRecorder(t *testing.T) {
 }
 
 // createdSeries returns the exposition line of one series of the counter, labels in the order Prometheus prints them.
-func createdSeries(mode, driver, storageClass string, count int) string {
-	return fmt.Sprintf("storage_foundation_vcr_created_total{driver=%q,mode=%q,storage_class=%q} %d\n",
-		driver, mode, storageClass, count)
+func createdSeries(mode string, volume vcrVolume, count int) string {
+	return fmt.Sprintf(
+		"storage_foundation_vcr_created_total{driver=%q,mode=%q,storage_class=%q,volume_snapshot_class=%q} %d\n",
+		volume.driver, mode, volume.storageClass, volume.snapshotClass, count)
 }
 
 // durationSeries returns the exposition lines of one series of the histogram that holds the single observation
 // seconds, labels in the order Prometheus prints them.
-func durationSeries(mode, driver, storageClass, result string, seconds float64) string {
+func durationSeries(mode string, volume vcrVolume, result string, seconds float64) string {
 	const name = "storage_foundation_vcr_duration_seconds"
-	labels := fmt.Sprintf("driver=%q,mode=%q,result=%q,storage_class=%q", driver, mode, result, storageClass)
+	labels := fmt.Sprintf("driver=%q,mode=%q,result=%q,storage_class=%q,volume_snapshot_class=%q",
+		volume.driver, mode, result, volume.storageClass, volume.snapshotClass)
 
 	var b strings.Builder
 	for _, bound := range durationBuckets() {
@@ -355,7 +360,8 @@ func newTestRecorder(t *testing.T, reader client.Reader) (*Recorder, prometheus.
 	return r, st.Collector()
 }
 
-// newVolumeReader returns a reader that holds the PVC data, its PV of testPVDriver and the StorageClass fast.
+// newVolumeReader returns a reader that holds the PVC data, its PV of testPVDriver and the StorageClass fast that
+// names testSnapshotClass.
 // Its calls go through funcs.
 func newVolumeReader(t *testing.T, funcs interceptor.Funcs) client.Reader {
 	t.Helper()

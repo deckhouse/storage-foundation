@@ -20,17 +20,21 @@ import "time"
 
 // Label names. The same constants name the labels at registration and key them at every write.
 const (
-	labelMode         = "mode"
-	labelDriver       = "driver"
-	labelStorageClass = "storage_class"
-	labelState        = "state"
-	labelResult       = "result"
-	labelAge          = "age"
-	labelStage        = "stage"
+	labelMode                = "mode"
+	labelDriver              = "driver"
+	labelStorageClass        = "storage_class"
+	labelVolumeSnapshotClass = "volume_snapshot_class"
+	labelState               = "state"
+	labelResult              = "result"
+	labelAge                 = "age"
+	labelStage               = "stage"
 )
 
 // labelUnknown replaces a label value that is not one of the known ones.
 const labelUnknown = "unknown"
+
+// labelNone is the value of a label whose object the request does not use.
+const labelNone = "none"
 
 // Values of the state label.
 const (

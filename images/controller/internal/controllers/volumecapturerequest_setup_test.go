@@ -59,9 +59,10 @@ func TestVolumeCaptureRequestController_SetupWithManager_countsCreated(t *testin
 	})
 
 	want := "# HELP storage_foundation_vcr_created_total " +
-		"VolumeCaptureRequests created in the cluster by mode, CSI driver and StorageClass.\n" +
+		"VolumeCaptureRequests created in the cluster by mode, CSI driver, StorageClass and VolumeSnapshotClass.\n" +
 		"# TYPE storage_foundation_vcr_created_total counter\n" +
-		`storage_foundation_vcr_created_total{driver="unknown",mode="Snapshot",storage_class="unknown"} 1` + "\n"
+		`storage_foundation_vcr_created_total{driver="unknown",mode="Snapshot",storage_class="unknown",` +
+		`volume_snapshot_class="unknown"} 1` + "\n"
 	if err := testutil.GatherAndCompare(reg, strings.NewReader(want), "storage_foundation_vcr_created_total"); err != nil {
 		t.Errorf("GatherAndCompare() error = %v", err)
 	}

@@ -43,18 +43,35 @@ import (
 
 // header is what the exposition output of the metric starts with. It is followed by the series.
 const header = "# HELP storage_foundation_vcr_objects " +
-	"VolumeCaptureRequests in the cluster by mode, CSI driver, StorageClass and state.\n" +
+	"VolumeCaptureRequests in the cluster by mode, CSI driver, StorageClass, VolumeSnapshotClass and state.\n" +
 	"# TYPE storage_foundation_vcr_objects gauge\n"
 
 // pendingHeader is what the exposition output of the pending metric starts with.
 const pendingHeader = "# HELP storage_foundation_vcr_pending_objects " +
-	"Pending VolumeCaptureRequests in the cluster by mode, CSI driver, StorageClass, age and stage.\n" +
+	"Pending VolumeCaptureRequests in the cluster by mode, CSI driver, StorageClass, VolumeSnapshotClass, " +
+	"age and stage.\n" +
 	"# TYPE storage_foundation_vcr_pending_objects gauge\n"
 
 // The PV driver and the StorageClass provisioner differ, so a test sees where the driver came from.
 const (
 	testPVDriver    = "pv.csi.example.com"
 	testProvisioner = "sc.csi.example.com"
+)
+
+// testSnapshotClass is the VolumeSnapshotClass that newStorageClass names.
+const testSnapshotClass = "fast-snapshots"
+
+// testSnapshotClassAnnotation is spelled out, so that a typo in snapshotClassAnnotation fails the tests.
+const testSnapshotClassAnnotation = "storage.deckhouse.io/volumesnapshotclass"
+
+// Volume labels that many tests expect.
+var (
+	// unknownVolume is the labels of a Snapshot request whose source PVC cannot be read.
+	unknownVolume = vcrVolume{driver: "unknown", storageClass: "unknown", snapshotClass: "unknown"}
+	// unknownDetachVolume is the labels of a Detach request whose source PVC cannot be read.
+	unknownDetachVolume = vcrVolume{driver: "unknown", storageClass: "unknown", snapshotClass: "none"}
+	// boundVolume is the labels of a request whose PVC is bound to a PV of testPVDriver and has the StorageClass fast.
+	boundVolume = vcrVolume{driver: testPVDriver, storageClass: "fast", snapshotClass: testSnapshotClass}
 )
 
 var errRead = errors.New("read failed")
@@ -78,42 +95,42 @@ func TestVCRObjectsMetric_update(t *testing.T) {
 			objects: []client.Object{
 				newVCR("a", v1alpha1.VolumeCaptureModeSnapshot, ready(metav1.ConditionTrue, v1alpha1.ConditionReasonCompleted)),
 			},
-			want: header + series(v1alpha1.VolumeCaptureModeSnapshot, "unknown", "unknown", "completed", 1),
+			want: header + series(v1alpha1.VolumeCaptureModeSnapshot, unknownVolume, "completed", 1),
 		},
 		{
 			name: "success: Ready=False with a final reason is failed",
 			objects: []client.Object{
 				newVCR("a", v1alpha1.VolumeCaptureModeSnapshot, ready(metav1.ConditionFalse, v1alpha1.ConditionReasonNotFound)),
 			},
-			want: header + series(v1alpha1.VolumeCaptureModeSnapshot, "unknown", "unknown", "failed", 1),
+			want: header + series(v1alpha1.VolumeCaptureModeSnapshot, unknownVolume, "failed", 1),
 		},
 		{
 			name: "success: a request without the Ready condition is pending",
 			objects: []client.Object{
 				newVCR("a", v1alpha1.VolumeCaptureModeSnapshot),
 			},
-			want: header + series(v1alpha1.VolumeCaptureModeSnapshot, "unknown", "unknown", "pending", 1),
+			want: header + series(v1alpha1.VolumeCaptureModeSnapshot, unknownVolume, "pending", 1),
 		},
 		{
 			name: "success: Ready=False with the TargetsPending reason is pending",
 			objects: []client.Object{
 				newVCR("a", v1alpha1.VolumeCaptureModeSnapshot, ready(metav1.ConditionFalse, v1alpha1.ConditionReasonTargetsPending)),
 			},
-			want: header + series(v1alpha1.VolumeCaptureModeSnapshot, "unknown", "unknown", "pending", 1),
+			want: header + series(v1alpha1.VolumeCaptureModeSnapshot, unknownVolume, "pending", 1),
 		},
 		{
 			name: "success: Ready=Unknown is pending",
 			objects: []client.Object{
 				newVCR("a", v1alpha1.VolumeCaptureModeSnapshot, ready(metav1.ConditionUnknown, "Progressing")),
 			},
-			want: header + series(v1alpha1.VolumeCaptureModeSnapshot, "unknown", "unknown", "pending", 1),
+			want: header + series(v1alpha1.VolumeCaptureModeSnapshot, unknownVolume, "pending", 1),
 		},
 		{
 			name: "success: an invalid mode becomes unknown instead of leaking into the label",
 			objects: []client.Object{
 				newVCR("a", "Bogus"),
 			},
-			want: header + series("unknown", "unknown", "unknown", "pending", 1),
+			want: header + series("unknown", unknownVolume, "pending", 1),
 		},
 		{
 			name: "success: requests with the same labels make one series with their count",
@@ -125,19 +142,19 @@ func TestVCRObjectsMetric_update(t *testing.T) {
 				newVCR("e", v1alpha1.VolumeCaptureModeDetach, ready(metav1.ConditionTrue, v1alpha1.ConditionReasonCompleted)),
 			},
 			want: header +
-				series(v1alpha1.VolumeCaptureModeDetach, "unknown", "unknown", "completed", 1) +
-				series(v1alpha1.VolumeCaptureModeSnapshot, "unknown", "unknown", "completed", 3) +
-				series(v1alpha1.VolumeCaptureModeSnapshot, "unknown", "unknown", "failed", 1),
+				series(v1alpha1.VolumeCaptureModeDetach, unknownDetachVolume, "completed", 1) +
+				series(v1alpha1.VolumeCaptureModeSnapshot, unknownVolume, "completed", 3) +
+				series(v1alpha1.VolumeCaptureModeSnapshot, unknownVolume, "failed", 1),
 		},
 		{
-			name: "success: a bound PVC gives the driver of its PV and its StorageClass",
+			name: "success: a bound PVC gives the driver of its PV, its StorageClass and its VolumeSnapshotClass",
 			objects: []client.Object{
 				withTarget(newVCR("a", v1alpha1.VolumeCaptureModeSnapshot), "data"),
 				newPVC("data", "fast", "pv-1"),
 				newPV("pv-1", testPVDriver),
 				newStorageClass("fast"),
 			},
-			want: header + series(v1alpha1.VolumeCaptureModeSnapshot, testPVDriver, "fast", "pending", 1),
+			want: header + series(v1alpha1.VolumeCaptureModeSnapshot, boundVolume, "pending", 1),
 		},
 		{
 			name: "success: an unbound PVC gives the provisioner of its StorageClass",
@@ -146,7 +163,8 @@ func TestVCRObjectsMetric_update(t *testing.T) {
 				newPVC("data", "fast", ""),
 				newStorageClass("fast"),
 			},
-			want: header + series(v1alpha1.VolumeCaptureModeSnapshot, testProvisioner, "fast", "pending", 1),
+			want: header + series(v1alpha1.VolumeCaptureModeSnapshot,
+				vcrVolume{driver: testProvisioner, storageClass: "fast", snapshotClass: testSnapshotClass}, "pending", 1),
 		},
 		{
 			name: "success: a PVC whose PV is gone gives the provisioner of its StorageClass",
@@ -155,7 +173,8 @@ func TestVCRObjectsMetric_update(t *testing.T) {
 				newPVC("data", "fast", "pv-1"),
 				newStorageClass("fast"),
 			},
-			want: header + series(v1alpha1.VolumeCaptureModeSnapshot, testProvisioner, "fast", "pending", 1),
+			want: header + series(v1alpha1.VolumeCaptureModeSnapshot,
+				vcrVolume{driver: testProvisioner, storageClass: "fast", snapshotClass: testSnapshotClass}, "pending", 1),
 		},
 		{
 			name: "success: a PV that is not CSI has an unknown driver",
@@ -165,7 +184,8 @@ func TestVCRObjectsMetric_update(t *testing.T) {
 				newPV("pv-1", ""),
 				newStorageClass("fast"),
 			},
-			want: header + series(v1alpha1.VolumeCaptureModeSnapshot, "unknown", "fast", "pending", 1),
+			want: header + series(v1alpha1.VolumeCaptureModeSnapshot,
+				vcrVolume{driver: "unknown", storageClass: "fast", snapshotClass: testSnapshotClass}, "pending", 1),
 		},
 		{
 			name: "success: a bound PVC without storageClassName has the driver of its PV and an unknown StorageClass",
@@ -175,7 +195,8 @@ func TestVCRObjectsMetric_update(t *testing.T) {
 				newPV("pv-1", testPVDriver),
 				newStorageClass("fast"),
 			},
-			want: header + series(v1alpha1.VolumeCaptureModeSnapshot, testPVDriver, "unknown", "pending", 1),
+			want: header + series(v1alpha1.VolumeCaptureModeSnapshot,
+				vcrVolume{driver: testPVDriver, storageClass: "unknown", snapshotClass: "unknown"}, "pending", 1),
 		},
 		{
 			name: "success: an unbound PVC whose StorageClass does not exist has unknown labels",
@@ -184,7 +205,7 @@ func TestVCRObjectsMetric_update(t *testing.T) {
 				newPVC("data", "gone", ""),
 				newStorageClass("fast"),
 			},
-			want: header + series(v1alpha1.VolumeCaptureModeSnapshot, "unknown", "unknown", "pending", 1),
+			want: header + series(v1alpha1.VolumeCaptureModeSnapshot, unknownVolume, "pending", 1),
 		},
 		{
 			name: "success: a request whose PVC is gone has unknown labels",
@@ -192,7 +213,7 @@ func TestVCRObjectsMetric_update(t *testing.T) {
 				withTarget(newVCR("a", v1alpha1.VolumeCaptureModeSnapshot), "data"),
 				newStorageClass("fast"),
 			},
-			want: header + series(v1alpha1.VolumeCaptureModeSnapshot, "unknown", "unknown", "pending", 1),
+			want: header + series(v1alpha1.VolumeCaptureModeSnapshot, unknownVolume, "pending", 1),
 		},
 		{
 			name: "success: a PVC recreated under the same name is not the source PVC and gives unknown labels",
@@ -202,7 +223,40 @@ func TestVCRObjectsMetric_update(t *testing.T) {
 				newPV("pv-1", testPVDriver),
 				newStorageClass("fast"),
 			},
-			want: header + series(v1alpha1.VolumeCaptureModeSnapshot, "unknown", "unknown", "pending", 1),
+			want: header + series(v1alpha1.VolumeCaptureModeSnapshot, unknownVolume, "pending", 1),
+		},
+		{
+			name: "success: a StorageClass without the annotation names no VolumeSnapshotClass",
+			objects: []client.Object{
+				withTarget(newVCR("a", v1alpha1.VolumeCaptureModeSnapshot), "data"),
+				newPVC("data", "fast", "pv-1"),
+				newPV("pv-1", testPVDriver),
+				withAnnotations(newStorageClass("fast"), nil),
+			},
+			want: header + series(v1alpha1.VolumeCaptureModeSnapshot,
+				vcrVolume{driver: testPVDriver, storageClass: "fast", snapshotClass: "none"}, "pending", 1),
+		},
+		{
+			name: "success: a StorageClass with an empty annotation names no VolumeSnapshotClass",
+			objects: []client.Object{
+				withTarget(newVCR("a", v1alpha1.VolumeCaptureModeSnapshot), "data"),
+				newPVC("data", "fast", "pv-1"),
+				newPV("pv-1", testPVDriver),
+				withAnnotations(newStorageClass("fast"), map[string]string{testSnapshotClassAnnotation: ""}),
+			},
+			want: header + series(v1alpha1.VolumeCaptureModeSnapshot,
+				vcrVolume{driver: testPVDriver, storageClass: "fast", snapshotClass: "none"}, "pending", 1),
+		},
+		{
+			name: "success: a Detach request has no VolumeSnapshotClass even if its StorageClass names one",
+			objects: []client.Object{
+				withTarget(newVCR("a", v1alpha1.VolumeCaptureModeDetach), "data"),
+				newPVC("data", "fast", "pv-1"),
+				newPV("pv-1", testPVDriver),
+				newStorageClass("fast"),
+			},
+			want: header + series(v1alpha1.VolumeCaptureModeDetach,
+				vcrVolume{driver: testPVDriver, storageClass: "fast", snapshotClass: "none"}, "pending", 1),
 		},
 	}
 
@@ -241,12 +295,13 @@ func TestVCRObjectsMetric_update_readErrors(t *testing.T) {
 		{
 			name:  "error: a failed PVC read keeps the request with unknown labels",
 			funcs: failGet(new(corev1.PersistentVolumeClaim)),
-			want:  header + series(v1alpha1.VolumeCaptureModeSnapshot, "unknown", "unknown", "pending", 1),
+			want:  header + series(v1alpha1.VolumeCaptureModeSnapshot, unknownVolume, "pending", 1),
 		},
 		{
 			name:  "error: a failed PV read keeps the request with an unknown driver",
 			funcs: failGet(new(corev1.PersistentVolume)),
-			want:  header + series(v1alpha1.VolumeCaptureModeSnapshot, "unknown", "fast", "pending", 1),
+			want: header + series(v1alpha1.VolumeCaptureModeSnapshot,
+				vcrVolume{driver: "unknown", storageClass: "fast", snapshotClass: testSnapshotClass}, "pending", 1),
 		},
 	}
 
@@ -275,8 +330,8 @@ func TestVCRObjectsMetric_update_twice(t *testing.T) {
 	t.Parallel()
 
 	// A request without a creation time is older than a day.
-	pending := header + series(v1alpha1.VolumeCaptureModeSnapshot, "unknown", "unknown", "pending", 1) +
-		pendingHeader + pendingSeries(v1alpha1.VolumeCaptureModeSnapshot, "unknown", "unknown", "gt_24h", "not_started", 1)
+	pending := header + series(v1alpha1.VolumeCaptureModeSnapshot, unknownVolume, "pending", 1) +
+		pendingHeader + pendingSeries(v1alpha1.VolumeCaptureModeSnapshot, unknownVolume, "gt_24h", "not_started", 1)
 
 	tests := []struct {
 		name   string
@@ -305,7 +360,7 @@ func TestVCRObjectsMetric_update_twice(t *testing.T) {
 			second: newReader(t, interceptor.Funcs{},
 				newVCR("a", v1alpha1.VolumeCaptureModeSnapshot, ready(metav1.ConditionTrue, v1alpha1.ConditionReasonCompleted)),
 			),
-			want: header + series(v1alpha1.VolumeCaptureModeSnapshot, "unknown", "unknown", "completed", 1),
+			want: header + series(v1alpha1.VolumeCaptureModeSnapshot, unknownVolume, "completed", 1),
 		},
 		{
 			name:  "error: a failed read after a successful update drops the series",
@@ -357,28 +412,32 @@ func TestVCRObjectsMetric_update_pending(t *testing.T) {
 			objects: []client.Object{
 				createdAgo(newVCR("a", v1alpha1.VolumeCaptureModeDetach), time.Minute),
 			},
-			want: pendingHeader + pendingSeries(v1alpha1.VolumeCaptureModeDetach, "unknown", "unknown", "lt_3m", "not_started", 1),
+			want: pendingHeader + pendingSeries(v1alpha1.VolumeCaptureModeDetach,
+				unknownDetachVolume, "lt_3m", "not_started", 1),
 		},
 		{
 			name: "success: Ready=Unknown is not_started",
 			objects: []client.Object{
 				createdAgo(newVCR("a", v1alpha1.VolumeCaptureModeSnapshot, ready(metav1.ConditionUnknown, "Progressing")), 20*time.Minute),
 			},
-			want: pendingHeader + pendingSeries(v1alpha1.VolumeCaptureModeSnapshot, "unknown", "unknown", "15m_30m", "not_started", 1),
+			want: pendingHeader + pendingSeries(v1alpha1.VolumeCaptureModeSnapshot,
+				unknownVolume, "15m_30m", "not_started", 1),
 		},
 		{
 			name: "success: Ready=False with the TargetsPending reason is snapshot_in_progress",
 			objects: []client.Object{
 				pendingVCR("a", 5*time.Minute),
 			},
-			want: pendingHeader + pendingSeries(v1alpha1.VolumeCaptureModeSnapshot, "unknown", "unknown", "3m_15m", "snapshot_in_progress", 1),
+			want: pendingHeader + pendingSeries(v1alpha1.VolumeCaptureModeSnapshot,
+				unknownVolume, "3m_15m", "snapshot_in_progress", 1),
 		},
 		{
 			name: "success: a request being deleted is other whatever its Ready condition",
 			objects: []client.Object{
 				deleting(pendingVCR("a", time.Hour)),
 			},
-			want: pendingHeader + pendingSeries(v1alpha1.VolumeCaptureModeSnapshot, "unknown", "unknown", "30m_2h", "other", 1),
+			want: pendingHeader + pendingSeries(v1alpha1.VolumeCaptureModeSnapshot,
+				unknownVolume, "30m_2h", "other", 1),
 		},
 		{
 			name: "success: pending requests with the same labels make one series with their count",
@@ -388,18 +447,19 @@ func TestVCRObjectsMetric_update_pending(t *testing.T) {
 				pendingVCR("c", 3*time.Hour),
 			},
 			want: pendingHeader +
-				pendingSeries(v1alpha1.VolumeCaptureModeSnapshot, "unknown", "unknown", "2h_24h", "snapshot_in_progress", 1) +
-				pendingSeries(v1alpha1.VolumeCaptureModeSnapshot, "unknown", "unknown", "3m_15m", "snapshot_in_progress", 2),
+				pendingSeries(v1alpha1.VolumeCaptureModeSnapshot, unknownVolume, "2h_24h", "snapshot_in_progress", 1) +
+				pendingSeries(v1alpha1.VolumeCaptureModeSnapshot, unknownVolume, "3m_15m", "snapshot_in_progress", 2),
 		},
 		{
-			name: "success: a pending request has the driver and StorageClass of its source PVC",
+			name: "success: a pending request has the volume labels of its source PVC",
 			objects: []client.Object{
 				withTarget(pendingVCR("a", 25*time.Hour), "data"),
 				newPVC("data", "fast", "pv-1"),
 				newPV("pv-1", testPVDriver),
 				newStorageClass("fast"),
 			},
-			want: pendingHeader + pendingSeries(v1alpha1.VolumeCaptureModeSnapshot, testPVDriver, "fast", "gt_24h", "snapshot_in_progress", 1),
+			want: pendingHeader + pendingSeries(v1alpha1.VolumeCaptureModeSnapshot,
+				boundVolume, "gt_24h", "snapshot_in_progress", 1),
 		},
 	}
 
@@ -473,17 +533,18 @@ type readerSwitch struct {
 }
 
 // series returns the exposition line of one series of the metric, labels in the order Prometheus prints them.
-func series(mode, driver, storageClass, state string, count int) string {
-	return fmt.Sprintf("storage_foundation_vcr_objects{driver=%q,mode=%q,state=%q,storage_class=%q} %d\n",
-		driver, mode, state, storageClass, count)
+func series(mode string, volume vcrVolume, state string, count int) string {
+	return fmt.Sprintf(
+		"storage_foundation_vcr_objects{driver=%q,mode=%q,state=%q,storage_class=%q,volume_snapshot_class=%q} %d\n",
+		volume.driver, mode, state, volume.storageClass, volume.snapshotClass, count)
 }
 
 // pendingSeries returns the exposition line of one series of the pending metric, labels in the order
 // Prometheus prints them.
-func pendingSeries(mode, driver, storageClass, age, stage string, count int) string {
-	return fmt.Sprintf(
-		"storage_foundation_vcr_pending_objects{age=%q,driver=%q,mode=%q,stage=%q,storage_class=%q} %d\n",
-		age, driver, mode, stage, storageClass, count)
+func pendingSeries(mode string, volume vcrVolume, age, stage string, count int) string {
+	return fmt.Sprintf("storage_foundation_vcr_pending_objects"+
+		"{age=%q,driver=%q,mode=%q,stage=%q,storage_class=%q,volume_snapshot_class=%q} %d\n",
+		age, volume.driver, mode, stage, volume.storageClass, volume.snapshotClass, count)
 }
 
 // registerTestVCRObjects registers the metrics in a new storage and returns its update function and the
@@ -623,6 +684,17 @@ func newPV(name, driver string) *corev1.PersistentVolume {
 	return pv
 }
 
+// newStorageClass returns a StorageClass of testProvisioner that names testSnapshotClass.
 func newStorageClass(name string) *storagev1.StorageClass {
-	return &storagev1.StorageClass{Name: name, Provisioner: testProvisioner}
+	return &storagev1.StorageClass{
+		Name:        name,
+		Annotations: map[string]string{testSnapshotClassAnnotation: testSnapshotClass},
+		Provisioner: testProvisioner,
+	}
+}
+
+// withAnnotations replaces the annotations of sc and returns sc.
+func withAnnotations(sc *storagev1.StorageClass, annotations map[string]string) *storagev1.StorageClass {
+	sc.Annotations = annotations
+	return sc
 }
