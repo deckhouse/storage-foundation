@@ -2,3 +2,4 @@ dirs:
   # Serving certificate of the aggregated API server, mounted read-only from the controller-https-certs
   # secret. Declared here because the deployment mounts it into the container.
   - /etc/aggregation-api-certs
+  - /etc/webhook/certs
