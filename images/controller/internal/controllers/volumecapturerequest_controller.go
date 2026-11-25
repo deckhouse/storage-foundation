@@ -31,6 +31,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/util/retry"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
@@ -601,6 +602,8 @@ func (r *VolumeCaptureRequestController) SetupWithManager(mgr ctrl.Manager) erro
 		For(&storagev1alpha1.VolumeCaptureRequest{}).
 		// Writes the metrics of request events and enqueues nothing.
 		Watches(new(storagev1alpha1.VolumeCaptureRequest), r.Metrics.VCREvents()).
+		// Drops the metric series of a deleted namespace and enqueues nothing.
+		Watches(new(corev1.Namespace), r.Metrics.NamespaceEvents(), builder.OnlyMetadata).
 		Complete(r)
 }
 

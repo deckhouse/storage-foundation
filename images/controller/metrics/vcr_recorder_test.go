@@ -38,13 +38,14 @@ import (
 
 // createdHeader is what the exposition output of the counter starts with. It is followed by the series.
 const createdHeader = "# HELP storage_foundation_vcr_created_total " +
-	"VolumeCaptureRequests created in the cluster by mode, CSI driver, StorageClass and VolumeSnapshotClass.\n" +
+	"VolumeCaptureRequests created in the cluster by namespace, mode, CSI driver, StorageClass " +
+	"and VolumeSnapshotClass.\n" +
 	"# TYPE storage_foundation_vcr_created_total counter\n"
 
 // durationHeader is what the exposition output of the histogram starts with. It is followed by the series.
 const durationHeader = "# HELP storage_foundation_vcr_duration_seconds " +
-	"Time from the creation of a VolumeCaptureRequest to its final status by mode, CSI driver, StorageClass, " +
-	"VolumeSnapshotClass and result.\n" +
+	"Time from the creation of a VolumeCaptureRequest to its final status by namespace, mode, CSI driver, " +
+	"StorageClass, VolumeSnapshotClass and result.\n" +
 	"# TYPE storage_foundation_vcr_duration_seconds histogram\n"
 
 func TestRecorder_VCREvents(t *testing.T) {
@@ -251,6 +252,47 @@ func TestRecorder_countVCRCreated(t *testing.T) {
 	}
 }
 
+func TestRecorder_NamespaceEvents(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		deleted string
+		want    string
+	}{
+		{
+			name:    "success: a deleted namespace loses its series and another namespace keeps its own",
+			deleted: testNamespace,
+			want: createdHeader +
+				relabelNamespace(createdSeries(v1alpha1.VolumeCaptureModeSnapshot, unknownVolume, 1), "other") +
+				durationHeader +
+				relabelNamespace(durationSeries(v1alpha1.VolumeCaptureModeSnapshot, unknownVolume, "completed", 7), "other"),
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			r, collector := newTestRecorder(t, newReader(t, interceptor.Funcs{}))
+			completed := ready(metav1.ConditionTrue, v1alpha1.ConditionReasonCompleted)
+			for _, ns := range []string{testNamespace, "other"} {
+				vcr := inNamespace(finishedVCR(completed, 7*time.Second), ns)
+				r.countVCRCreated(vcr, unknownVolume)
+				r.observeVCRDuration(vcr, unknownVolume)
+			}
+
+			// The watch of the controller delivers only the metadata of a Namespace.
+			deleted := &metav1.PartialObjectMetadata{Name: tt.deleted}
+			r.NamespaceEvents().Delete(t.Context(), event.DeleteEvent{Object: deleted}, nil)
+
+			if err := testutil.CollectAndCompare(collector, strings.NewReader(tt.want)); err != nil {
+				t.Errorf("CollectAndCompare() error = %v", err)
+			}
+		})
+	}
+}
+
 func TestNewRecorder(t *testing.T) {
 	t.Parallel()
 
@@ -293,17 +335,17 @@ func TestNewRecorder(t *testing.T) {
 
 // createdSeries returns the exposition line of one series of the counter, labels in the order Prometheus prints them.
 func createdSeries(mode string, volume vcrVolume, count int) string {
-	return fmt.Sprintf(
-		"storage_foundation_vcr_created_total{driver=%q,mode=%q,storage_class=%q,volume_snapshot_class=%q} %d\n",
-		volume.driver, mode, volume.storageClass, volume.snapshotClass, count)
+	return fmt.Sprintf("storage_foundation_vcr_created_total"+
+		"{driver=%q,mode=%q,namespace=%q,storage_class=%q,volume_snapshot_class=%q} %d\n",
+		volume.driver, mode, testNamespace, volume.storageClass, volume.snapshotClass, count)
 }
 
 // durationSeries returns the exposition lines of one series of the histogram that holds the single observation
 // seconds, labels in the order Prometheus prints them.
 func durationSeries(mode string, volume vcrVolume, result string, seconds float64) string {
 	const name = "storage_foundation_vcr_duration_seconds"
-	labels := fmt.Sprintf("driver=%q,mode=%q,result=%q,storage_class=%q,volume_snapshot_class=%q",
-		volume.driver, mode, result, volume.storageClass, volume.snapshotClass)
+	labels := fmt.Sprintf("driver=%q,mode=%q,namespace=%q,result=%q,storage_class=%q,volume_snapshot_class=%q",
+		volume.driver, mode, testNamespace, result, volume.storageClass, volume.snapshotClass)
 
 	var b strings.Builder
 	for _, bound := range durationBuckets() {

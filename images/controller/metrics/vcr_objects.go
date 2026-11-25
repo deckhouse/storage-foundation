@@ -43,17 +43,19 @@ type vcrObjectsMetric struct {
 
 // vcrLabelSet holds the label values of one series of storage_foundation_vcr_objects.
 type vcrLabelSet struct {
-	mode   string
-	volume vcrVolume
-	state  string
+	namespace string
+	mode      string
+	volume    vcrVolume
+	state     string
 }
 
 // vcrPendingLabelSet holds the label values of one series of storage_foundation_vcr_pending_objects.
 type vcrPendingLabelSet struct {
-	mode   string
-	volume vcrVolume
-	age    string
-	stage  string
+	namespace string
+	mode      string
+	volume    vcrVolume
+	age       string
+	stage     string
 }
 
 // vcrCounts holds the number of requests by label set of each metric.
@@ -66,8 +68,8 @@ type vcrCounts struct {
 func registerVCRObjects(st *metricsstorage.MetricStorage, reader client.Reader) (updateFunc, error) {
 	gauge, err := st.RegisterGauge(
 		"storage_foundation_vcr_objects",
-		[]string{labelMode, labelDriver, labelStorageClass, labelVolumeSnapshotClass, labelState},
-		options.WithHelp("VolumeCaptureRequests in the cluster by mode, CSI driver, StorageClass, "+
+		[]string{labelNamespace, labelMode, labelDriver, labelStorageClass, labelVolumeSnapshotClass, labelState},
+		options.WithHelp("VolumeCaptureRequests in the cluster by namespace, mode, CSI driver, StorageClass, "+
 			"VolumeSnapshotClass and state."),
 	)
 	if err != nil {
@@ -76,8 +78,10 @@ func registerVCRObjects(st *metricsstorage.MetricStorage, reader client.Reader) 
 
 	pending, err := st.RegisterGauge(
 		"storage_foundation_vcr_pending_objects",
-		[]string{labelMode, labelDriver, labelStorageClass, labelVolumeSnapshotClass, labelAge, labelStage},
-		options.WithHelp("Pending VolumeCaptureRequests in the cluster by mode, CSI driver, StorageClass, "+
+		[]string{
+			labelNamespace, labelMode, labelDriver, labelStorageClass, labelVolumeSnapshotClass, labelAge, labelStage,
+		},
+		options.WithHelp("Pending VolumeCaptureRequests in the cluster by namespace, mode, CSI driver, StorageClass, "+
 			"VolumeSnapshotClass, age and stage."),
 	)
 	if err != nil {
@@ -107,6 +111,7 @@ func (m *vcrObjectsMetric) update(ctx context.Context) {
 
 	for labelSet, count := range counts.objects {
 		labels := map[string]string{
+			labelNamespace:           labelSet.namespace,
 			labelMode:                labelSet.mode,
 			labelDriver:              labelSet.volume.driver,
 			labelStorageClass:        labelSet.volume.storageClass,
@@ -119,6 +124,7 @@ func (m *vcrObjectsMetric) update(ctx context.Context) {
 
 	for labelSet, count := range counts.pending {
 		labels := map[string]string{
+			labelNamespace:           labelSet.namespace,
 			labelMode:                labelSet.mode,
 			labelDriver:              labelSet.volume.driver,
 			labelStorageClass:        labelSet.volume.storageClass,
@@ -160,17 +166,18 @@ func (m *vcrObjectsMetric) countRequests(ctx context.Context, now time.Time) (vc
 		volume := vcrVolumeLabels(ctx, m.reader, vcr, classes)
 		state := vcrState(vcr)
 
-		counts.objects[vcrLabelSet{mode: mode, volume: volume, state: state}]++
+		counts.objects[vcrLabelSet{namespace: vcr.Namespace, mode: mode, volume: volume, state: state}]++
 
 		if state != statePending {
 			continue
 		}
 
 		pendingLabelSet := vcrPendingLabelSet{
-			mode:   mode,
-			volume: volume,
-			age:    ageBucket(vcr.CreationTimestamp.Time, now),
-			stage:  vcrStage(vcr),
+			namespace: vcr.Namespace,
+			mode:      mode,
+			volume:    volume,
+			age:       ageBucket(vcr.CreationTimestamp.Time, now),
+			stage:     vcrStage(vcr),
 		}
 
 		counts.pending[pendingLabelSet]++

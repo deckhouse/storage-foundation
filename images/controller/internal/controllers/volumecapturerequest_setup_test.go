@@ -25,6 +25,7 @@ import (
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/testutil"
+	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -59,9 +60,10 @@ func TestVolumeCaptureRequestController_SetupWithManager_countsCreated(t *testin
 	})
 
 	want := "# HELP storage_foundation_vcr_created_total " +
-		"VolumeCaptureRequests created in the cluster by mode, CSI driver, StorageClass and VolumeSnapshotClass.\n" +
+		"VolumeCaptureRequests created in the cluster by namespace, mode, CSI driver, StorageClass " +
+		"and VolumeSnapshotClass.\n" +
 		"# TYPE storage_foundation_vcr_created_total counter\n" +
-		`storage_foundation_vcr_created_total{driver="unknown",mode="Snapshot",storage_class="unknown",` +
+		`storage_foundation_vcr_created_total{driver="unknown",mode="Snapshot",namespace="ns",storage_class="unknown",` +
 		`volume_snapshot_class="unknown"} 1` + "\n"
 	if err := testutil.GatherAndCompare(reg, strings.NewReader(want), "storage_foundation_vcr_created_total"); err != nil {
 		t.Errorf("GatherAndCompare() error = %v", err)
@@ -189,7 +191,9 @@ func newTestScheme(t *testing.T) *runtime.Scheme {
 	t.Helper()
 
 	scheme := runtime.NewScheme()
-	if err := storagev1alpha1.AddToScheme(scheme); err != nil {
+	// corev1 is for the Namespace watch that drops the metric series of a deleted namespace.
+	schemeBuilder := runtime.NewSchemeBuilder(storagev1alpha1.AddToScheme, corev1.AddToScheme)
+	if err := schemeBuilder.AddToScheme(scheme); err != nil {
 		t.Fatalf("add to scheme: %v", err)
 	}
 

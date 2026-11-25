@@ -20,6 +20,7 @@ import "time"
 
 // Label names. The same constants name the labels at registration and key them at every write.
 const (
+	labelNamespace           = "namespace"
 	labelMode                = "mode"
 	labelDriver              = "driver"
 	labelStorageClass        = "storage_class"

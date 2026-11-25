@@ -43,13 +43,14 @@ import (
 
 // header is what the exposition output of the metric starts with. It is followed by the series.
 const header = "# HELP storage_foundation_vcr_objects " +
-	"VolumeCaptureRequests in the cluster by mode, CSI driver, StorageClass, VolumeSnapshotClass and state.\n" +
+	"VolumeCaptureRequests in the cluster by namespace, mode, CSI driver, StorageClass, VolumeSnapshotClass " +
+	"and state.\n" +
 	"# TYPE storage_foundation_vcr_objects gauge\n"
 
 // pendingHeader is what the exposition output of the pending metric starts with.
 const pendingHeader = "# HELP storage_foundation_vcr_pending_objects " +
-	"Pending VolumeCaptureRequests in the cluster by mode, CSI driver, StorageClass, VolumeSnapshotClass, " +
-	"age and stage.\n" +
+	"Pending VolumeCaptureRequests in the cluster by namespace, mode, CSI driver, StorageClass, " +
+	"VolumeSnapshotClass, age and stage.\n" +
 	"# TYPE storage_foundation_vcr_pending_objects gauge\n"
 
 // The PV driver and the StorageClass provisioner differ, so a test sees where the driver came from.
@@ -57,6 +58,9 @@ const (
 	testPVDriver    = "pv.csi.example.com"
 	testProvisioner = "sc.csi.example.com"
 )
+
+// testNamespace is the namespace of newVCR and newPVC. The series helpers print it as the namespace label.
+const testNamespace = "ns"
 
 // testSnapshotClass is the VolumeSnapshotClass that newStorageClass names.
 const testSnapshotClass = "fast-snapshots"
@@ -257,6 +261,15 @@ func TestVCRObjectsMetric_update(t *testing.T) {
 			},
 			want: header + series(v1alpha1.VolumeCaptureModeDetach,
 				vcrVolume{driver: testPVDriver, storageClass: "fast", snapshotClass: "none"}, "pending", 1),
+		},
+		{
+			name: "success: requests with the same labels in two namespaces make a series per namespace",
+			objects: []client.Object{
+				newVCR("a", v1alpha1.VolumeCaptureModeSnapshot),
+				inNamespace(newVCR("a", v1alpha1.VolumeCaptureModeSnapshot), "other"),
+			},
+			want: header + series(v1alpha1.VolumeCaptureModeSnapshot, unknownVolume, "pending", 1) +
+				relabelNamespace(series(v1alpha1.VolumeCaptureModeSnapshot, unknownVolume, "pending", 1), "other"),
 		},
 	}
 
@@ -534,17 +547,22 @@ type readerSwitch struct {
 
 // series returns the exposition line of one series of the metric, labels in the order Prometheus prints them.
 func series(mode string, volume vcrVolume, state string, count int) string {
-	return fmt.Sprintf(
-		"storage_foundation_vcr_objects{driver=%q,mode=%q,state=%q,storage_class=%q,volume_snapshot_class=%q} %d\n",
-		volume.driver, mode, state, volume.storageClass, volume.snapshotClass, count)
+	return fmt.Sprintf("storage_foundation_vcr_objects"+
+		"{driver=%q,mode=%q,namespace=%q,state=%q,storage_class=%q,volume_snapshot_class=%q} %d\n",
+		volume.driver, mode, testNamespace, state, volume.storageClass, volume.snapshotClass, count)
 }
 
 // pendingSeries returns the exposition line of one series of the pending metric, labels in the order
 // Prometheus prints them.
 func pendingSeries(mode string, volume vcrVolume, age, stage string, count int) string {
 	return fmt.Sprintf("storage_foundation_vcr_pending_objects"+
-		"{age=%q,driver=%q,mode=%q,stage=%q,storage_class=%q,volume_snapshot_class=%q} %d\n",
-		age, volume.driver, mode, stage, volume.storageClass, volume.snapshotClass, count)
+		"{age=%q,driver=%q,mode=%q,namespace=%q,stage=%q,storage_class=%q,volume_snapshot_class=%q} %d\n",
+		age, volume.driver, mode, testNamespace, stage, volume.storageClass, volume.snapshotClass, count)
+}
+
+// relabelNamespace returns the exposition lines with testNamespace replaced by ns.
+func relabelNamespace(lines, ns string) string {
+	return strings.ReplaceAll(lines, fmt.Sprintf("namespace=%q", testNamespace), fmt.Sprintf("namespace=%q", ns))
 }
 
 // registerTestVCRObjects registers the metrics in a new storage and returns its update function and the
@@ -606,7 +624,7 @@ func failGet(obj client.Object) interceptor.Funcs {
 func newVCR(name, mode string, conditions ...metav1.Condition) *v1alpha1.VolumeCaptureRequest {
 	return &v1alpha1.VolumeCaptureRequest{
 		Name:      name,
-		Namespace: "ns",
+		Namespace: testNamespace,
 		Spec:      v1alpha1.VolumeCaptureRequestSpec{Mode: mode},
 		Status:    v1alpha1.VolumeCaptureRequestStatus{Conditions: conditions},
 	}
@@ -633,6 +651,12 @@ func deleting(vcr *v1alpha1.VolumeCaptureRequest) *v1alpha1.VolumeCaptureRequest
 	return vcr
 }
 
+// inNamespace moves vcr to the namespace ns and returns vcr.
+func inNamespace(vcr *v1alpha1.VolumeCaptureRequest, ns string) *v1alpha1.VolumeCaptureRequest {
+	vcr.Namespace = ns
+	return vcr
+}
+
 // withTarget points the spec.target of vcr at the PVC name made by newPVC and returns vcr.
 func withTarget(vcr *v1alpha1.VolumeCaptureRequest, name string) *v1alpha1.VolumeCaptureRequest {
 	vcr.Spec.Target = &v1alpha1.VolumeCaptureTarget{
@@ -653,7 +677,7 @@ func ready(status metav1.ConditionStatus, reason string) metav1.Condition {
 func newPVC(name, class, volume string) *corev1.PersistentVolumeClaim {
 	pvc := &corev1.PersistentVolumeClaim{
 		Name:      name,
-		Namespace: "ns",
+		Namespace: testNamespace,
 		UID:       pvcUID(name),
 		Spec:      corev1.PersistentVolumeClaimSpec{VolumeName: volume},
 	}

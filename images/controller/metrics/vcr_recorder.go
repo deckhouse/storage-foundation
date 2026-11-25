@@ -42,8 +42,8 @@ type vcrEventMetrics struct {
 func registerVCREventMetrics(st *metricsstorage.MetricStorage) (vcrEventMetrics, error) {
 	created, err := st.RegisterCounter(
 		"storage_foundation_vcr_created_total",
-		[]string{labelMode, labelDriver, labelStorageClass, labelVolumeSnapshotClass},
-		options.WithHelp("VolumeCaptureRequests created in the cluster by mode, CSI driver, StorageClass "+
+		[]string{labelNamespace, labelMode, labelDriver, labelStorageClass, labelVolumeSnapshotClass},
+		options.WithHelp("VolumeCaptureRequests created in the cluster by namespace, mode, CSI driver, StorageClass "+
 			"and VolumeSnapshotClass."),
 	)
 	if err != nil {
@@ -52,10 +52,10 @@ func registerVCREventMetrics(st *metricsstorage.MetricStorage) (vcrEventMetrics,
 
 	duration, err := st.RegisterHistogram(
 		"storage_foundation_vcr_duration_seconds",
-		[]string{labelMode, labelDriver, labelStorageClass, labelVolumeSnapshotClass, labelResult},
+		[]string{labelNamespace, labelMode, labelDriver, labelStorageClass, labelVolumeSnapshotClass, labelResult},
 		durationBuckets(),
 		options.WithHelp("Time from the creation of a VolumeCaptureRequest to its final status "+
-			"by mode, CSI driver, StorageClass, VolumeSnapshotClass and result."),
+			"by namespace, mode, CSI driver, StorageClass, VolumeSnapshotClass and result."),
 	)
 	if err != nil {
 		return vcrEventMetrics{}, fmt.Errorf("register storage_foundation_vcr_duration_seconds: %w", err)
@@ -115,7 +115,7 @@ func (r *Recorder) resolveVCRVolume(ctx context.Context, vcr *v1alpha1.VolumeCap
 
 // countVCRCreated counts vcr as a created request.
 func (r *Recorder) countVCRCreated(vcr *v1alpha1.VolumeCaptureRequest, volume vcrVolume) {
-	r.vcr.created.Add(1, map[string]string{
+	incInNamespace(r.vcr.created, vcr, map[string]string{
 		labelMode:                vcrMode(vcr),
 		labelDriver:              volume.driver,
 		labelStorageClass:        volume.storageClass,
@@ -132,7 +132,7 @@ func (r *Recorder) observeVCRDuration(vcr *v1alpha1.VolumeCaptureRequest, volume
 		seconds = 0
 	}
 
-	r.vcr.duration.Observe(seconds, map[string]string{
+	observeInNamespace(r.vcr.duration, vcr, seconds, map[string]string{
 		labelMode:                vcrMode(vcr),
 		labelDriver:              volume.driver,
 		labelStorageClass:        volume.storageClass,
